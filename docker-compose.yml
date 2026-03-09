@@ -1,0 +1,126 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # REDIS — realtime storage, fast data layer
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: trackista-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trackista-network
+
+  # ─────────────────────────────────────────────
+  # MYSQL — persistent storage, history, metadata
+  # ─────────────────────────────────────────────
+  mysql:
+    image: mysql:8
+    container_name: trackista-mysql
+    ports:
+      - "3306:3306"
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - trackista-network
+
+  # ─────────────────────────────────────────────
+  # BACKEND — Node.js API server
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+    container_name: trackista-backend
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      API_PORT: ${API_PORT}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MEDIA_OUTPUT_DIR: ${MEDIA_OUTPUT_DIR}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./media:/app/media
+    restart: unless-stopped
+    networks:
+      - trackista-network
+
+  # ─────────────────────────────────────────────
+  # COLLECTOR — Binance WebSocket data ingestion
+  # ─────────────────────────────────────────────
+  collector:
+    build:
+      context: ./collector
+    container_name: trackista-collector
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE}
+      BINANCE_SPOT_WS: ${BINANCE_SPOT_WS}
+      BINANCE_FUTURES_WS: ${BINANCE_FUTURES_WS}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - trackista-network
+
+  # ─────────────────────────────────────────────
+  # FUTURE SERVICES (reserved — not active yet):
+  #   notifier      — alerts, Telegram, messages
+  #   image-worker  — chart screenshots, post images
+  #   aggregator    — analytics aggregation
+  #   signal-engine — impulse / pump / knife-catch / wall-break
+  # ─────────────────────────────────────────────
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  trackista-network:
+    driver: bridge

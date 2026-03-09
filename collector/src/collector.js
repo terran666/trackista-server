@@ -14,6 +14,7 @@ const SYMBOL_REFRESH_MS     = 60 * 60 * 1000; // re-fetch symbol list every hour
 const FLUSH_INTERVAL_MS     = 1000;       // write metrics to Redis once per second
 const SUMMARY_LOG_INTERVAL  = 30;        // print aggregation summary every N seconds
 const BUCKET_COUNT          = 60;        // rolling window: 60 one-second buckets
+const SIGNAL_HISTORY_SIZE   = 60;        // keep last 60 metric snapshots for baseline
 
 // ─── Redis client ────────────────────────────────────────────────
 const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
@@ -97,6 +98,7 @@ function getOrCreateState(symbol) {
       lastTradeTime:      0,
       currentBucket:      null, // will be set on first trade
       secondBuckets:      [],   // completed buckets, newest at end, max BUCKET_COUNT
+      signalHistory:      [],   // last SIGNAL_HISTORY_SIZE snapshots for baseline
     });
   }
   return symbolStates.get(symbol);
@@ -171,6 +173,78 @@ function computeActivityScore(vol60, count60, priceChangePct60) {
   return (vol60 * 0.5) + (count60 * 10) + (Math.abs(priceChangePct60) * 1000);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  DERIVED SIGNAL METRICS
+// ═══════════════════════════════════════════════════════════════════
+
+const EPSILON = 1e-9; // avoid division by zero
+
+function avgField(history, field) {
+  if (history.length === 0) return 0;
+  let sum = 0;
+  for (const s of history) sum += (s[field] || 0);
+  return sum / history.length;
+}
+
+function computeInPlayScore(vsr60, vsr15, tradeAcc, pricePct60, deltaImb) {
+  return (
+    (vsr60 * 40) +
+    (vsr15 * 30) +
+    (tradeAcc * 20) +
+    (Math.abs(pricePct60) * 50) +
+    (Math.abs(deltaImb) * 100)
+  );
+}
+
+function computeImpulseScore(vsr15, tradeAcc, deltaImb, priceVel, pricePct60) {
+  return (
+    (vsr15 * 35) +
+    (tradeAcc * 25) +
+    (Math.abs(deltaImb) * 120) +
+    (Math.abs(priceVel) * 5000) +
+    (Math.abs(pricePct60) * 80)
+  );
+}
+
+function buildSignal(snapshot, signalHistory, nowMs) {
+  const prev = signalHistory; // array of past snapshots (excluding current)
+
+  const avgVol60  = Math.max(avgField(prev, 'volumeUsdt60s'),  EPSILON);
+  const avgVol15  = Math.max(avgField(prev, 'volumeUsdt15s'),  EPSILON);
+  const avgCnt60  = Math.max(avgField(prev, 'tradeCount60s'),  EPSILON);
+
+  const vsr60 = snapshot.volumeUsdt60s / avgVol60;
+  const vsr15 = snapshot.volumeUsdt15s / Math.max(avgVol15, EPSILON);
+
+  // tradeAcceleration: current 5s trade rate vs expected 5s rate derived from 60s average
+  const expectedPer5s  = avgCnt60 / 12;
+  const tradeAcc       = snapshot.tradeCount5s / Math.max(expectedPer5s, EPSILON);
+
+  const vol60          = Math.max(snapshot.volumeUsdt60s, EPSILON);
+  const deltaImb       = snapshot.deltaUsdt60s / vol60;
+  const priceVel       = snapshot.priceChangePct60s / 60;
+
+  const inPlayScore  = computeInPlayScore(vsr60, vsr15, tradeAcc, snapshot.priceChangePct60s, deltaImb);
+  const impulseScore = computeImpulseScore(vsr15, tradeAcc, deltaImb, priceVel, snapshot.priceChangePct60s);
+
+  let impulseDirection = 'mixed';
+  if (snapshot.priceChangePct60s > 0 && deltaImb > 0) impulseDirection = 'up';
+  else if (snapshot.priceChangePct60s < 0 && deltaImb < 0) impulseDirection = 'down';
+
+  return {
+    symbol:               snapshot.symbol,
+    volumeSpikeRatio60s:  vsr60,
+    volumeSpikeRatio15s:  vsr15,
+    tradeAcceleration:    tradeAcc,
+    deltaImbalancePct60s: deltaImb,
+    priceVelocity60s:     priceVel,
+    inPlayScore,
+    impulseScore,
+    impulseDirection,
+    updatedAt:            nowMs,
+  };
+}
+
 function buildSnapshot(state, nowMs) {
   // Merge completed buckets + current (in-flight) bucket for the window calculation
   const allBuckets = state.currentBucket
@@ -228,14 +302,39 @@ function startFlushTimer() {
     const pipeline = redis.pipeline();
     let snapshotCount = 0;
 
+    // Used for summary log
+    let topInPlay   = { symbol: '', score: -1 };
+    let topImpulse  = { symbol: '', score: -1 };
+    const topInPlayList  = [];
+    const topImpulseList = [];
+
     for (const state of symbolStates.values()) {
       if (state.lastTradeTime === 0) continue; // no trades yet
 
       const snapshot = buildSnapshot(state, nowMs);
       pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot));
-      // Also keep the price key up to date (backward compat)
       pipeline.set(`price:${state.symbol}`, String(state.lastPrice));
+
+      // Build signal from history, then append current snapshot to history
+      const signal = buildSignal(snapshot, state.signalHistory, nowMs);
+      pipeline.set(`signal:${state.symbol}`, JSON.stringify(signal));
+
+      // Update signal history (append current snapshot, trim to SIGNAL_HISTORY_SIZE)
+      state.signalHistory.push({
+        volumeUsdt60s:     snapshot.volumeUsdt60s,
+        volumeUsdt15s:     snapshot.volumeUsdt15s,
+        tradeCount60s:     snapshot.tradeCount60s,
+      });
+      if (state.signalHistory.length > SIGNAL_HISTORY_SIZE) {
+        state.signalHistory.shift();
+      }
+
       snapshotCount++;
+
+      if (flushCount % SUMMARY_LOG_INTERVAL === SUMMARY_LOG_INTERVAL - 1) {
+        topInPlayList.push({ symbol: state.symbol, score: signal.inPlayScore });
+        topImpulseList.push({ symbol: state.symbol, score: signal.impulseScore });
+      }
     }
 
     if (snapshotCount > 0) {
@@ -248,9 +347,14 @@ function startFlushTimer() {
 
     // Summary log every SUMMARY_LOG_INTERVAL seconds
     if (flushCount % SUMMARY_LOG_INTERVAL === 0) {
+      topInPlayList.sort((a, b) => b.score - a.score);
+      topImpulseList.sort((a, b) => b.score - a.score);
+      const top3InPlay   = topInPlayList.slice(0, 3).map(x => `${x.symbol}(${x.score.toFixed(1)})`).join(', ');
+      const top3Impulse  = topImpulseList.slice(0, 3).map(x => `${x.symbol}(${x.score.toFixed(1)})`).join(', ');
       console.log(
-        `[aggregator] Summary: ${snapshotCount} metrics snapshots flushed to Redis` +
-        ` | ${symbolStates.size} symbols tracked`,
+        `[aggregator] Summary: ${snapshotCount} snapshots flushed` +
+        ` | top in-play: ${top3InPlay}` +
+        ` | top impulse: ${top3Impulse}`,
       );
     }
   }, FLUSH_INTERVAL_MS);
@@ -305,7 +409,7 @@ function connectBatch(batchIndex, symbols) {
 
 // ─── Main startup ────────────────────────────────────────────────
 async function start() {
-  console.log('[collector] Starting Trackista collector (stage 3)...');
+  console.log('[collector] Starting Trackista collector (stage 4)...');
   console.log(`[collector] Redis: ${REDIS_HOST}:${REDIS_PORT}`);
 
   let validSymbols;

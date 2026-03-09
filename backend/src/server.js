@@ -134,6 +134,109 @@ app.get('/api/metrics/:symbol', async (req, res) => {
   }
 });
 
+// GET /api/signals/:symbol
+app.get('/api/signals/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  try {
+    const raw = await redis.get(`signal:${symbol}`);
+
+    if (raw === null) {
+      return res.status(404).json({
+        success: false,
+        error:   'Signal not found — symbol may be inactive or collector still warming up',
+        symbol,
+      });
+    }
+
+    return res.json({
+      success: true,
+      symbol,
+      signal: JSON.parse(raw),
+    });
+  } catch (err) {
+    console.error(`[backend] Error reading signal:${symbol}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Helper: fetch all signal snapshots by active symbol list via pipeline
+async function fetchAllSignals() {
+  const rawSymbols = await redis.get('symbols:active:usdt');
+  if (!rawSymbols) return null;
+  const symbols = JSON.parse(rawSymbols);
+  const pipeline = redis.pipeline();
+  for (const sym of symbols) pipeline.get(`signal:${sym}`);
+  const results = await pipeline.exec();
+  const signals = [];
+  for (const [err, raw] of results) {
+    if (err || !raw) continue;
+    try { signals.push(JSON.parse(raw)); } catch (_) {}
+  }
+  return signals;
+}
+
+// GET /api/market/in-play?limit=20
+app.get('/api/market/in-play', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '20', 10), 500);
+
+  try {
+    const signals = await fetchAllSignals();
+    if (signals === null) {
+      return res.status(503).json({ success: false, error: 'Symbol list not available yet' });
+    }
+
+    signals.sort((a, b) => b.inPlayScore - a.inPlayScore);
+    const items = signals.slice(0, limit).map(s => ({
+      symbol:               s.symbol,
+      inPlayScore:          s.inPlayScore,
+      volumeSpikeRatio60s:  s.volumeSpikeRatio60s,
+      volumeSpikeRatio15s:  s.volumeSpikeRatio15s,
+      tradeAcceleration:    s.tradeAcceleration,
+      deltaImbalancePct60s: s.deltaImbalancePct60s,
+      impulseDirection:     s.impulseDirection,
+    }));
+
+    return res.json({ success: true, count: items.length, items });
+  } catch (err) {
+    console.error('[backend] Error in /api/market/in-play:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/market/impulse?limit=20&direction=up|down|mixed|all
+app.get('/api/market/impulse', async (req, res) => {
+  const limit     = Math.min(parseInt(req.query.limit || '20', 10), 500);
+  const direction = (req.query.direction || 'all').toLowerCase();
+
+  try {
+    const signals = await fetchAllSignals();
+    if (signals === null) {
+      return res.status(503).json({ success: false, error: 'Symbol list not available yet' });
+    }
+
+    const filtered = direction === 'all'
+      ? signals
+      : signals.filter(s => s.impulseDirection === direction);
+
+    filtered.sort((a, b) => b.impulseScore - a.impulseScore);
+    const items = filtered.slice(0, limit).map(s => ({
+      symbol:               s.symbol,
+      impulseScore:         s.impulseScore,
+      impulseDirection:     s.impulseDirection,
+      volumeSpikeRatio15s:  s.volumeSpikeRatio15s,
+      tradeAcceleration:    s.tradeAcceleration,
+      deltaImbalancePct60s: s.deltaImbalancePct60s,
+      priceVelocity60s:     s.priceVelocity60s,
+    }));
+
+    return res.json({ success: true, count: items.length, items });
+  } catch (err) {
+    console.error('[backend] Error in /api/market/impulse:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 // GET /api/market/top-active?limit=20
 app.get('/api/market/top-active', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '20', 10), 500);

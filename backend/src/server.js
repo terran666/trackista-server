@@ -108,6 +108,81 @@ app.get('/api/trade/:symbol/last', async (req, res) => {
   }
 });
 
+// GET /api/metrics/:symbol
+app.get('/api/metrics/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  try {
+    const raw = await redis.get(`metrics:${symbol}`);
+
+    if (raw === null) {
+      return res.status(404).json({
+        success: false,
+        error:   'Metrics not found — symbol may be inactive or collector still warming up',
+        symbol,
+      });
+    }
+
+    return res.json({
+      success: true,
+      symbol,
+      metrics: JSON.parse(raw),
+    });
+  } catch (err) {
+    console.error(`[backend] Error reading metrics:${symbol}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/market/top-active?limit=20
+app.get('/api/market/top-active', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '20', 10), 500);
+
+  try {
+    const rawSymbols = await redis.get('symbols:active:usdt');
+    if (rawSymbols === null) {
+      return res.status(503).json({
+        success: false,
+        error:   'Symbol list not available yet — collector may still be starting up',
+      });
+    }
+
+    const symbols = JSON.parse(rawSymbols);
+
+    // Fetch all metrics in one pipeline
+    const pipeline = redis.pipeline();
+    for (const sym of symbols) pipeline.get(`metrics:${sym}`);
+    const results = await pipeline.exec();
+
+    const items = [];
+    for (const [err, raw] of results) {
+      if (err || !raw) continue;
+      try {
+        const m = JSON.parse(raw);
+        items.push({
+          symbol:            m.symbol,
+          activityScore:     m.activityScore,
+          volumeUsdt60s:     m.volumeUsdt60s,
+          tradeCount60s:     m.tradeCount60s,
+          priceChangePct60s: m.priceChangePct60s,
+          lastPrice:         m.lastPrice,
+        });
+      } catch (_) { /* skip malformed */ }
+    }
+
+    items.sort((a, b) => b.activityScore - a.activityScore);
+
+    return res.json({
+      success: true,
+      count:   Math.min(items.length, limit),
+      items:   items.slice(0, limit),
+    });
+  } catch (err) {
+    console.error('[backend] Error in /api/market/top-active:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 // ─── Start server ────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`[backend] API listening on port ${PORT}`);

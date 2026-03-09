@@ -2,20 +2,48 @@
 
 const express = require('express');
 const Redis   = require('ioredis');
+const mysql   = require('mysql2/promise');
+
+const { createLevelsService } = require('./levelsService');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
+const MYSQL_HOST = process.env.DB_HOST     || process.env.MYSQL_HOST || 'localhost';
+const MYSQL_PORT = parseInt(process.env.DB_PORT     || process.env.MYSQL_PORT || '3306', 10);
+const MYSQL_USER = process.env.DB_USER     || process.env.MYSQL_USER || 'trackista';
+const MYSQL_PASS = process.env.DB_PASSWORD || process.env.MYSQL_PASSWORD || '';
+const MYSQL_DB   = process.env.DB_NAME     || process.env.MYSQL_DATABASE || 'trackista';
 
 console.log('[backend] Starting backend API...');
 console.log(`[backend] Redis: ${REDIS_HOST}:${REDIS_PORT}`);
+console.log(`[backend] MySQL: ${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DB}`);
 
 // ─── Redis client ────────────────────────────────────────────────
 const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
 
 redis.on('connect', () => console.log('[backend] Connected to Redis'));
 redis.on('error',   (err) => console.error('[backend] Redis error:', err.message));
+
+// ─── MySQL pool ───────────────────────────────────────────────────
+const db = mysql.createPool({
+  host:            MYSQL_HOST,
+  port:            MYSQL_PORT,
+  user:            MYSQL_USER,
+  password:        MYSQL_PASS,
+  database:        MYSQL_DB,
+  waitForConnections: true,
+  connectionLimit: 10,
+  timezone:        'Z',
+});
+
+db.getConnection()
+  .then(conn => { console.log('[backend] Connected to MySQL'); conn.release(); })
+  .catch(err => console.error('[backend] MySQL connection error:', err.message));
+
+// ─── Levels service ───────────────────────────────────────────────
+const levels = createLevelsService(db, redis);
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -286,6 +314,75 @@ app.get('/api/market/top-active', async (req, res) => {
     });
   } catch (err) {
     console.error('[backend] Error in /api/market/top-active:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ─── Level endpoints ─────────────────────────────────────────────
+
+// GET /api/levels/:symbol
+app.get('/api/levels/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  try {
+    const result = await levels.getActiveLevelsBySymbol(symbol);
+    return res.json({ success: true, symbol, count: result.length, levels: result });
+  } catch (err) {
+    console.error(`[backend] Error reading levels:${symbol}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// POST /api/levels/manual
+app.post('/api/levels/manual', async (req, res) => {
+  const payload = req.body || {};
+  const errors  = levels.validateLevelPayload(payload, true);
+  if (errors.length) {
+    return res.status(400).json({ success: false, errors });
+  }
+  if (!levels.ALLOWED_TYPES.has(payload.type)) {
+    return res.status(400).json({ success: false, errors: [`type must be one of: ${[...levels.ALLOWED_TYPES].join(', ')}`] });
+  }
+
+  try {
+    const level = await levels.createManualLevel(payload);
+    return res.status(201).json({ success: true, level });
+  } catch (err) {
+    console.error('[backend] Error creating manual level:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/levels/:id
+app.patch('/api/levels/:id', async (req, res) => {
+  const id      = parseInt(req.params.id, 10);
+  const payload = req.body || {};
+
+  if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const errors = levels.validateLevelPayload(payload, false);
+  if (errors.length) return res.status(400).json({ success: false, errors });
+
+  try {
+    const level = await levels.updateLevel(id, payload);
+    if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+    return res.json({ success: true, level });
+  } catch (err) {
+    console.error(`[backend] Error updating level ${id}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/levels/:id  (soft delete)
+app.delete('/api/levels/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  try {
+    const result = await levels.deactivateLevel(id);
+    if (!result) return res.status(404).json({ success: false, error: 'Level not found' });
+    return res.json({ success: true, id: result.id, message: 'Level deactivated' });
+  } catch (err) {
+    console.error(`[backend] Error deactivating level ${id}:`, err.message);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

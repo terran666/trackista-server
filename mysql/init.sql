@@ -84,6 +84,27 @@ CREATE TABLE IF NOT EXISTS signals (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────
+-- Price levels
+-- Manual and auto-detected support/resistance
+-- ─────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS levels (
+  id          BIGINT              AUTO_INCREMENT PRIMARY KEY,
+  symbol      VARCHAR(32)         NOT NULL,
+  price       DECIMAL(20,8)       NOT NULL,
+  type        VARCHAR(32)         NOT NULL,   -- support, resistance, manual, high, low, cluster, density
+  source      VARCHAR(32)         NOT NULL,   -- manual, auto, auto_swing, auto_extreme, auto_cluster, auto_density
+  strength    INT                 NULL,       -- 0–100
+  timeframe   VARCHAR(16)         NULL,
+  is_active   BOOLEAN             NOT NULL DEFAULT TRUE,
+  meta_json   JSON                NULL,
+  created_at  DATETIME            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME            NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_levels_symbol        (symbol),
+  INDEX idx_levels_active        (is_active),
+  INDEX idx_levels_symbol_active (symbol, is_active)
+) ENGINE=InnoDB;
+
+-- ─────────────────────────────────────────────
 -- System logs
 -- ─────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS system_logs (

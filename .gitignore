@@ -1,36 +1,63 @@
 # ─────────────────────────────────────────────
-# MySQL
+# Environment / secrets
 # ─────────────────────────────────────────────
-MYSQL_ROOT_PASSWORD=change_me_root
-MYSQL_DATABASE=trackista
-MYSQL_USER=trackista
-MYSQL_PASSWORD=change_me_password
+.env
+.env.local
+.env.development
+.env.production
 
 # ─────────────────────────────────────────────
-# DB connection (used by backend & collector)
+# Node.js dependencies
 # ─────────────────────────────────────────────
-DB_HOST=mysql
-DB_PORT=3306
+node_modules/
 
 # ─────────────────────────────────────────────
-# Redis
+# Build output & temporary files
 # ─────────────────────────────────────────────
-REDIS_HOST=redis
-REDIS_PORT=6379
+dist/
+build/
+coverage/
+tmp/
+temp/
 
 # ─────────────────────────────────────────────
-# Backend
+# Logs
 # ─────────────────────────────────────────────
-API_PORT=3000
-NODE_ENV=development
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # ─────────────────────────────────────────────
-# Binance WebSocket endpoints
+# OS / system files
 # ─────────────────────────────────────────────
-BINANCE_SPOT_WS=wss://stream.binance.com:9443/ws
-BINANCE_FUTURES_WS=wss://fstream.binance.com/ws
+.DS_Store
+Thumbs.db
 
 # ─────────────────────────────────────────────
-# Media output (inside container; bind-mounted from ./media)
+# Media & generated project files
 # ─────────────────────────────────────────────
-MEDIA_OUTPUT_DIR=/app/media
+media/
+screenshots/
+charts/
+exports/
+
+# ─────────────────────────────────────────────
+# IDE / editors
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ─────────────────────────────────────────────
+# Vim swap files
+# ─────────────────────────────────────────────
+*.swp
+*.swo
+
+# ─────────────────────────────────────────────
+# NOT ignored (committed to repo):
+#   .env.example
+#   docker-compose.yml
+#   Dockerfile
+#   package.json
+# ─────────────────────────────────────────────

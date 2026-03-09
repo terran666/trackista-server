@@ -1,5 +1,5 @@
 {
-  "name": "trackista-backend",
+  "name": "backend",
   "version": "1.0.0",
   "description": "Trackista backend API server",
   "main": "src/server.js",

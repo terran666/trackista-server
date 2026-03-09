@@ -1,5 +1,5 @@
 {
-  "name": "trackista-collector",
+  "name": "collector",
   "version": "1.0.0",
   "description": "Trackista Binance data collector",
   "main": "src/collector.js",

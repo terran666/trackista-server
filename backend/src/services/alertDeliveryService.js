@@ -160,7 +160,27 @@ function buildDeliveryKey(alert) {
 }
 
 // ─── Factory ─────────────────────────────────────────────────────
+// Глобальный rate limiter — макс N сообщений в минуту в Telegram
+const GLOBAL_RATE_LIMIT_PER_MIN = envInt('TELEGRAM_RATE_LIMIT_PER_MIN', 5);
+
 function createAlertDeliveryService(redis, telegramService) {
+  // ── Global rate limiter (in-memory, per minute) ───────────────
+  let sentThisMinute = 0;
+  let rateLimitResetAt = Date.now() + 60000;
+
+  function isRateLimited() {
+    const now = Date.now();
+    if (now >= rateLimitResetAt) {
+      sentThisMinute = 0;
+      rateLimitResetAt = now + 60000;
+    }
+    return sentThisMinute >= GLOBAL_RATE_LIMIT_PER_MIN;
+  }
+
+  function incrementRate() {
+    sentThisMinute++;
+  }
+
   // ── Cooldown ─────────────────────────────────────────────────
   async function isInCooldown(key) {
     const val = await redis.get(key);
@@ -194,6 +214,10 @@ function createAlertDeliveryService(redis, telegramService) {
       return { success: false, skipped: true, reason: 'delivery_cooldown' };
     }
 
+    if (isRateLimited()) {
+      return { success: false, skipped: true, reason: 'global_rate_limit' };
+    }
+
     const message = formatAlertMessage(alert);
     if (!message) {
       return { success: false, skipped: true, reason: 'empty_message' };
@@ -206,6 +230,7 @@ function createAlertDeliveryService(redis, telegramService) {
     }
 
     if (result.success) {
+      incrementRate();
       await markDelivered(key, alert.type);
       console.log(`[telegram] delivered type=${alert.type} symbol=${alert.symbol} messageId=${result.telegramMessageId}`);
       return { success: true, telegramMessageId: result.telegramMessageId };

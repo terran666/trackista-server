@@ -6,6 +6,7 @@ const mysql   = require('mysql2/promise');
 
 const { createLevelsService }        = require('./levelsService');
 const { createLevelMonitorService } = require('./services/levelMonitorService');
+const { createAlertEngineService }  = require('./services/alertEngineService');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -49,6 +50,9 @@ const levels  = createLevelsService(db, redis);
 // ─── Level monitor ────────────────────────────────────────────────
 const monitor = createLevelMonitorService(redis);
 monitor.start();
+
+const alertEngine = createAlertEngineService(redis);
+alertEngine.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -449,6 +453,58 @@ app.delete('/api/levels/:id', async (req, res) => {
     return res.json({ success: true, id: result.id, message: 'Level deactivated' });
   } catch (err) {
     console.error(`[backend] Error deactivating level ${id}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ─── Alert endpoints ───────────────────────────────────────────────
+
+// GET /api/alerts/recent?limit=50
+app.get('/api/alerts/recent', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '50', 10), 500);
+  try {
+    const raws = await redis.lrange('alerts:recent', 0, limit - 1);
+    const alerts = raws.map(r => { try { return JSON.parse(r); } catch (_) { return null; } }).filter(Boolean);
+    return res.json({ success: true, count: alerts.length, alerts });
+  } catch (err) {
+    console.error('[backend] Error reading alerts:recent:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/alerts/watchlist
+app.get('/api/alerts/watchlist', async (req, res) => {
+  try {
+    const raws = await redis.lrange('alerts:recent', 0, 499);
+    const seen = new Set();
+    for (const r of raws) {
+      try { const a = JSON.parse(r); if (a && a.symbol) seen.add(a.symbol); } catch (_) {}
+    }
+    const symbols = [...seen];
+    return res.json({ success: true, count: symbols.length, symbols });
+  } catch (err) {
+    console.error('[backend] Error reading alerts watchlist:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/alerts/:symbol?limit=20
+app.get('/api/alerts/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const limit  = Math.min(parseInt(req.query.limit || '20', 10), 500);
+  try {
+    const raws = await redis.lrange('alerts:recent', 0, 499);
+    const alerts = [];
+    for (const r of raws) {
+      if (alerts.length >= limit) break;
+      try {
+        const a = JSON.parse(r);
+        if (a && a.symbol === symbol) alerts.push(a);
+      } catch (_) {}
+    }
+    return res.json({ success: true, symbol, count: alerts.length, alerts });
+  } catch (err) {
+    console.error(`[backend] Error reading alerts for ${symbol}:`, err.message);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

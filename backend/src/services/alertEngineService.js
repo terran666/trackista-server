@@ -8,10 +8,9 @@ const COOLDOWN_LEVEL_APPROACHING_SEC = 60;
 const COOLDOWN_LEVEL_TOUCHED_SEC     = 60;
 const COOLDOWN_LEVEL_BREAKOUT_SEC    = 120;
 const COOLDOWN_LEVEL_BOUNCE_SEC      = 120;
-const COOLDOWN_MARKET_IMPULSE_SEC    = 60;
 const COOLDOWN_MARKET_INPLAY_SEC     = 90;
 
-const IMPULSE_ALERT_THRESHOLD    = parseInt(process.env.ALERT_IMPULSE_THRESHOLD    || '100', 10);
+// market_impulse is now handled by marketImpulseService (Phase 8.2)
 const INPLAY_ALERT_THRESHOLD     = parseInt(process.env.ALERT_INPLAY_THRESHOLD     || '100', 10);
 const ALERT_SIGNAL_CONFIDENCE_MIN = parseInt(process.env.ALERT_SIGNAL_CONFIDENCE_MIN || '70',  10);
 
@@ -187,6 +186,7 @@ function createAlertEngineService(redis, deliveryService = null) {
   }
 
   // ── Process market-based alerts for one symbol ──────────────
+  // Note: market_impulse is handled by marketImpulseService (Phase 8.2)
   async function processMarketAlerts(symbol, signal, now) {
     if (!signal) return;
     if (!signal.baselineReady) return;
@@ -198,16 +198,6 @@ function createAlertEngineService(redis, deliveryService = null) {
       inPlayScore:      signal.inPlayScore      ?? 0,
       signalConfidence: signal.signalConfidence ?? 0,
     };
-
-    // market_impulse
-    if ((signal.impulseScore ?? 0) >= IMPULSE_ALERT_THRESHOLD) {
-      const onCooldown = await isCooldownActive('market_impulse', symbol, 'generic');
-      if (!onCooldown) {
-        const event = buildAlertEvent('market_impulse', symbol, now, { signalContext });
-        await pushAlert(event);
-        await setCooldown('market_impulse', symbol, 'generic', COOLDOWN_MARKET_IMPULSE_SEC);
-      }
-    }
 
     // market_in_play
     if ((signal.inPlayScore ?? 0) >= INPLAY_ALERT_THRESHOLD) {

@@ -4,10 +4,11 @@ const express = require('express');
 const Redis   = require('ioredis');
 const mysql   = require('mysql2/promise');
 
-const { createLevelsService }        = require('./levelsService');
-const { createLevelMonitorService } = require('./services/levelMonitorService');
-const { createAlertEngineService }  = require('./services/alertEngineService');
-const { createTelegramService }     = require('./services/telegramService');
+const { createLevelsService }         = require('./levelsService');
+const { createLevelMonitorService }  = require('./services/levelMonitorService');
+const { createAlertEngineService }   = require('./services/alertEngineService');
+const { createMarketImpulseService } = require('./services/marketImpulseService');
+const { createTelegramService }      = require('./services/telegramService');
 const { createAlertDeliveryService } = require('./services/alertDeliveryService');
 
 // ─── Configuration ───────────────────────────────────────────────
@@ -56,8 +57,11 @@ monitor.start();
 const telegram      = createTelegramService();
 const alertDelivery = createAlertDeliveryService(redis, telegram);
 
-const alertEngine = createAlertEngineService(redis, alertDelivery);
+const alertEngine   = createAlertEngineService(redis, alertDelivery);
 alertEngine.start();
+
+const impulse       = createMarketImpulseService(redis, alertDelivery);
+impulse.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();

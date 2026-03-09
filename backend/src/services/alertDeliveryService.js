@@ -54,14 +54,18 @@ function formatAlertMessage(alert) {
 
   switch (alert.type) {
     case 'market_impulse': {
-      const score = fmtNum(sc.impulseScore, 1);
+      const move  = sc.priceMovePct5s != null ? parseFloat(sc.priceMovePct5s) : null;
+      const spike = sc.volumeSpikeRatio != null ? parseFloat(sc.volumeSpikeRatio) : null;
+      const score = fmtNum(sc.impulseScore, 0);
       const conf  = fmtNum(sc.signalConfidence, 0);
-      const price = fmtNum(alert.currentPrice || alert.price, 2);
+      const price = fmtNum(alert.currentPrice || alert.price, 4);
       let msg = `🚀 <b>MARKET IMPULSE</b>\n\nSymbol: <b>${alert.symbol}</b>`;
-      if (dir)   msg += `\nDirection: <b>${dir}</b>`;
-      if (score) msg += `\nScore: <b>${score}</b>`;
-      if (conf)  msg += `\nConfidence: <b>${conf}%</b>`;
-      if (price) msg += `\nPrice: <b>${price}</b>`;
+      if (dir)           msg += `\nDirection: <b>${dir}</b>`;
+      if (move !== null) msg += `\nMove (5s): <b>${move >= 0 ? '+' : ''}${move.toFixed(2)}%</b>`;
+      if (spike !== null) msg += `\nVolume Spike: <b>${spike.toFixed(2)}x</b>`;
+      if (score)         msg += `\nScore: <b>${score}</b>`;
+      if (conf)          msg += `\nConfidence: <b>${conf}%</b>`;
+      if (price)         msg += `\nPrice: <b>${price}</b>`;
       msg += `\nTime: <b>${time}</b>`;
       return msg;
     }

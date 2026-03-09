@@ -9,7 +9,7 @@ const BREAKOUT_INPLAY_SCORE_MIN      = 100;
 const BOUNCE_SIGNAL_CONFIDENCE_MIN   = 70;
 const MONITOR_INTERVAL_MS            = 1000;
 const SUMMARY_LOG_INTERVAL           = 30;   // тиков между summary-логами
-const LEVELSTATE_TTL_SEC             = 10;   // TTL ключа levelstate:<SYM> в Redis
+const LEVELSTATE_TTL_SEC             = 30;   // TTL ключа levelstate:<SYM> в Redis
 
 // ─── Factory ─────────────────────────────────────────────────────
 function createLevelMonitorService(redis) {
@@ -172,14 +172,21 @@ function createLevelMonitorService(redis) {
           levels:    computedLevels,
         };
 
-        writePipeline.set(`levelstate:${sym}`, JSON.stringify(state), 'EX', LEVELSTATE_TTL_SEC);
+        const redisKey = `levelstate:${sym}`;
+        writePipeline.setex(redisKey, LEVELSTATE_TTL_SEC, JSON.stringify(state));
+        console.log(`[monitor] wrote ${redisKey} levels=${computedLevels.length}`);
       }
 
-      await writePipeline.exec();
+      const writeResults = await writePipeline.exec();
+      if (writeResults) {
+        for (const [writeErr] of writeResults) {
+          if (writeErr) console.error('[monitor] pipeline write error:', writeErr.message);
+        }
+      }
 
-      if (logSummary && monitoredSymbols > 0) {
+      if (logSummary) {
         console.log(
-          `[monitor] symbols=${monitoredSymbols} levels=${monitoredLevels}` +
+          `[monitor] summary symbols=${monitoredSymbols} levels=${monitoredLevels}` +
           ` approaching=${approachingCount} touched=${touchedCount}` +
           ` breakout=${breakoutCount} bounce=${bounceCount}`
         );

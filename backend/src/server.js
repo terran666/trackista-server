@@ -4,7 +4,8 @@ const express = require('express');
 const Redis   = require('ioredis');
 const mysql   = require('mysql2/promise');
 
-const { createLevelsService } = require('./levelsService');
+const { createLevelsService }        = require('./levelsService');
+const { createLevelMonitorService } = require('./services/levelMonitorService');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -43,7 +44,11 @@ db.getConnection()
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
 
 // ─── Levels service ───────────────────────────────────────────────
-const levels = createLevelsService(db, redis);
+const levels  = createLevelsService(db, redis);
+
+// ─── Level monitor ────────────────────────────────────────────────
+const monitor = createLevelMonitorService(redis);
+monitor.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -319,6 +324,67 @@ app.get('/api/market/top-active', async (req, res) => {
 });
 
 // ─── Level endpoints ─────────────────────────────────────────────
+
+// GET /api/levels/state/:symbol
+app.get('/api/levels/state/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  try {
+    const raw = await redis.get(`levelstate:${symbol}`);
+    if (!raw) {
+      return res.status(404).json({
+        success: false,
+        symbol,
+        error: 'No level state found — symbol may have no active levels or monitor is warming up',
+      });
+    }
+    return res.json({ success: true, symbol, state: JSON.parse(raw) });
+  } catch (err) {
+    console.error(`[backend] Error reading levelstate:${symbol}:`, err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/levels/watchlist — symbols with approaching/touched/breakout/bounce
+app.get('/api/levels/watchlist', async (req, res) => {
+  try {
+    const rawSymbols = await redis.get('symbols:active:usdt');
+    if (!rawSymbols) {
+      return res.status(503).json({ success: false, error: 'Symbol list not available yet' });
+    }
+    const symbols = JSON.parse(rawSymbols);
+
+    const pipeline = redis.pipeline();
+    for (const sym of symbols) pipeline.get(`levelstate:${sym}`);
+    const results = await pipeline.exec();
+
+    const watchlist = [];
+    for (const [err, raw] of results) {
+      if (err || !raw) continue;
+      let state;
+      try { state = JSON.parse(raw); } catch (_) { continue; }
+      const { levels: lvls = [] } = state;
+      const approaching       = lvls.some(l => l.approaching);
+      const touched           = lvls.some(l => l.touched);
+      const breakoutCandidate = lvls.some(l => l.breakoutCandidate);
+      const bounceCandidate   = lvls.some(l => l.bounceCandidate);
+      if (!approaching && !touched && !breakoutCandidate && !bounceCandidate) continue;
+      watchlist.push({
+        symbol:             state.symbol,
+        updatedAt:          state.updatedAt,
+        levelCount:         lvls.length,
+        approaching,
+        touched,
+        breakoutCandidate,
+        bounceCandidate,
+      });
+    }
+
+    return res.json({ success: true, count: watchlist.length, watchlist });
+  } catch (err) {
+    console.error('[backend] Error in /api/levels/watchlist:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
 
 // GET /api/levels/:symbol
 app.get('/api/levels/:symbol', async (req, res) => {

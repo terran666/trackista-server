@@ -39,28 +39,42 @@ async function fetchJSON(url) {
   return res.json();
 }
 
+// ─── Stablecoin filter ───────────────────────────────────────────
+const STABLECOIN_BASES = new Set([
+  'USDT', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDP',
+  'USD1', 'PYUSD', 'USDS', 'EURI',
+]);
+
+function isStablecoin(asset) {
+  return STABLECOIN_BASES.has(asset);
+}
+
 // ─── Symbol fetching & filtering ─────────────────────────────────
 async function fetchValidSymbols() {
   console.log('[collector] Fetching exchangeInfo from Binance...');
   const exchangeInfo = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/exchangeInfo`);
 
-  const tradingUsdtSet = new Set();
+  // Build map: symbol → baseAsset for all TRADING/USDT pairs
+  const tradingUsdtMap = new Map(); // symbol → baseAsset
   for (const s of exchangeInfo.symbols) {
     if (s.status === 'TRADING' && s.quoteAsset === 'USDT') {
-      tradingUsdtSet.add(s.symbol);
+      tradingUsdtMap.set(s.symbol, s.baseAsset);
     }
   }
-  console.log(`[collector] exchangeInfo: ${exchangeInfo.symbols.length} total symbols, ${tradingUsdtSet.size} active USDT pairs`);
+  console.log(`[collector] exchangeInfo: ${exchangeInfo.symbols.length} total symbols, ${tradingUsdtMap.size} active USDT pairs`);
 
   console.log('[collector] Fetching ticker/24hr from Binance...');
   const tickers = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/ticker/24hr`);
 
   const validSymbols = [];
-  let excludedStatus = 0;
-  let excludedVolume = 0;
+  let excludedStatus     = 0;
+  let excludedVolume     = 0;
+  let excludedStablecoin = 0;
 
   for (const ticker of tickers) {
-    if (!tradingUsdtSet.has(ticker.symbol)) { excludedStatus++; continue; }
+    const baseAsset = tradingUsdtMap.get(ticker.symbol);
+    if (baseAsset === undefined) { excludedStatus++; continue; }
+    if (isStablecoin(baseAsset)) { excludedStablecoin++; continue; }
     const quoteVolume = parseFloat(ticker.quoteVolume);
     if (isNaN(quoteVolume) || quoteVolume < MIN_QUOTE_VOLUME) { excludedVolume++; continue; }
     validSymbols.push(ticker.symbol);
@@ -69,6 +83,7 @@ async function fetchValidSymbols() {
   console.log('[collector] Symbol filter results:');
   console.log(`[collector]   Valid symbols:                 ${validSymbols.length}`);
   console.log(`[collector]   Excluded (non-TRADING/USDT):  ${excludedStatus}`);
+  console.log(`[collector]   Excluded (stablecoin base):   ${excludedStablecoin}`);
   console.log(`[collector]   Excluded (volume < ${MIN_QUOTE_VOLUME} USDT): ${excludedVolume}`);
 
   return validSymbols;

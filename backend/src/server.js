@@ -195,6 +195,8 @@ app.get('/api/market/in-play', async (req, res) => {
       tradeAcceleration:    s.tradeAcceleration,
       deltaImbalancePct60s: s.deltaImbalancePct60s,
       impulseDirection:     s.impulseDirection,
+      signalConfidence:     s.signalConfidence,
+      baselineReady:        s.baselineReady,
     }));
 
     return res.json({ success: true, count: items.length, items });
@@ -228,6 +230,8 @@ app.get('/api/market/impulse', async (req, res) => {
       tradeAcceleration:    s.tradeAcceleration,
       deltaImbalancePct60s: s.deltaImbalancePct60s,
       priceVelocity60s:     s.priceVelocity60s,
+      signalConfidence:     s.signalConfidence,
+      baselineReady:        s.baselineReady,
     }));
 
     return res.json({ success: true, count: items.length, items });

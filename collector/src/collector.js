@@ -16,6 +16,16 @@ const SUMMARY_LOG_INTERVAL  = 30;        // print aggregation summary every N se
 const BUCKET_COUNT          = 60;        // rolling window: 60 one-second buckets
 const SIGNAL_HISTORY_SIZE   = 60;        // keep last 60 metric snapshots for baseline
 
+// ─── Signal stabilization constants ─────────────────────────────
+const BASELINE_MIN_VOL60    = 1000;   // min USDT baseline for 60s vol ratio
+const BASELINE_MIN_VOL15    = 200;    // min USDT baseline for 15s vol ratio
+const BASELINE_MIN_COUNT60  = 5;      // min trade count baseline
+const RATIO_CAP             = 20;     // max value for spike ratios
+const ACCEL_CAP             = 20;     // max value for tradeAcceleration
+const WARMUP_SNAPSHOTS      = 30;     // # snapshots before baselineReady
+const LIQUIDITY_MIN_VOL60   = 5000;   // min vol60s USDT for ranking eligibility
+const LIQUIDITY_MIN_COUNT60 = 20;     // min trade count for ranking eligibility
+
 // ─── Redis client ────────────────────────────────────────────────
 const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
 
@@ -186,6 +196,23 @@ function avgField(history, field) {
   return sum / history.length;
 }
 
+function cap(value, max) {
+  return Math.min(value, max);
+}
+
+function computeSignalConfidence(signalHistory, snapshot) {
+  let score = 0;
+  // Warmup: full confidence only after WARMUP_SNAPSHOTS
+  if (signalHistory.length >= WARMUP_SNAPSHOTS) score += 50;
+  else score += Math.round((signalHistory.length / WARMUP_SNAPSHOTS) * 50);
+  // Liquidity
+  if (snapshot.volumeUsdt60s >= LIQUIDITY_MIN_VOL60) score += 30;
+  else score += Math.round((snapshot.volumeUsdt60s / LIQUIDITY_MIN_VOL60) * 30);
+  if (snapshot.tradeCount60s >= LIQUIDITY_MIN_COUNT60) score += 20;
+  else score += Math.round((snapshot.tradeCount60s / LIQUIDITY_MIN_COUNT60) * 20);
+  return score; // 0–100
+}
+
 function computeInPlayScore(vsr60, vsr15, tradeAcc, pricePct60, deltaImb) {
   return (
     (vsr60 * 40) +
@@ -207,32 +234,52 @@ function computeImpulseScore(vsr15, tradeAcc, deltaImb, priceVel, pricePct60) {
 }
 
 function buildSignal(snapshot, signalHistory, nowMs) {
-  const prev = signalHistory; // array of past snapshots (excluding current)
+  const histLen = signalHistory.length;
+  const baselineReady = histLen >= WARMUP_SNAPSHOTS;
 
-  const avgVol60  = Math.max(avgField(prev, 'volumeUsdt60s'),  EPSILON);
-  const avgVol15  = Math.max(avgField(prev, 'volumeUsdt15s'),  EPSILON);
-  const avgCnt60  = Math.max(avgField(prev, 'tradeCount60s'),  EPSILON);
+  const rawAvgVol60  = avgField(signalHistory, 'volumeUsdt60s');
+  const rawAvgVol15  = avgField(signalHistory, 'volumeUsdt15s');
+  const rawAvgCnt60  = avgField(signalHistory, 'tradeCount60s');
 
-  const vsr60 = snapshot.volumeUsdt60s / avgVol60;
-  const vsr15 = snapshot.volumeUsdt15s / Math.max(avgVol15, EPSILON);
+  // Apply minimum baselines to prevent division explosions
+  const avgVol60 = Math.max(rawAvgVol60, BASELINE_MIN_VOL60);
+  const avgVol15 = Math.max(rawAvgVol15, BASELINE_MIN_VOL15);
+  const avgCnt60 = Math.max(rawAvgCnt60, BASELINE_MIN_COUNT60);
+
+  // Capped ratios
+  const vsr60 = cap(snapshot.volumeUsdt60s / avgVol60, RATIO_CAP);
+  const vsr15 = cap(snapshot.volumeUsdt15s / avgVol15, RATIO_CAP);
 
   // tradeAcceleration: current 5s trade rate vs expected 5s rate derived from 60s average
-  const expectedPer5s  = avgCnt60 / 12;
-  const tradeAcc       = snapshot.tradeCount5s / Math.max(expectedPer5s, EPSILON);
+  const expectedPer5s = avgCnt60 / 12;
+  const tradeAcc      = cap(snapshot.tradeCount5s / Math.max(expectedPer5s, EPSILON), ACCEL_CAP);
 
-  const vol60          = Math.max(snapshot.volumeUsdt60s, EPSILON);
-  const deltaImb       = snapshot.deltaUsdt60s / vol60;
-  const priceVel       = snapshot.priceChangePct60s / 60;
+  // deltaImbalance: clamped to [-1, 1]
+  const vol60    = Math.max(snapshot.volumeUsdt60s, EPSILON);
+  const deltaImb = Math.max(-1, Math.min(1, snapshot.deltaUsdt60s / vol60));
+  const priceVel = snapshot.priceChangePct60s / 60;
 
-  const inPlayScore  = computeInPlayScore(vsr60, vsr15, tradeAcc, snapshot.priceChangePct60s, deltaImb);
-  const impulseScore = computeImpulseScore(vsr15, tradeAcc, deltaImb, priceVel, snapshot.priceChangePct60s);
+  // Liquidity gate: don't produce meaningful scores for illiquid snapshots
+  const liquidityOk = snapshot.volumeUsdt60s >= LIQUIDITY_MIN_VOL60 &&
+                      snapshot.tradeCount60s  >= LIQUIDITY_MIN_COUNT60;
+
+  const inPlayScore  = liquidityOk
+    ? computeInPlayScore(vsr60, vsr15, tradeAcc, snapshot.priceChangePct60s, deltaImb)
+    : 0;
+  const impulseScore = liquidityOk
+    ? computeImpulseScore(vsr15, tradeAcc, deltaImb, priceVel, snapshot.priceChangePct60s)
+    : 0;
 
   let impulseDirection = 'mixed';
   if (snapshot.priceChangePct60s > 0 && deltaImb > 0) impulseDirection = 'up';
   else if (snapshot.priceChangePct60s < 0 && deltaImb < 0) impulseDirection = 'down';
 
+  const signalConfidence = computeSignalConfidence(signalHistory, snapshot);
+
   return {
     symbol:               snapshot.symbol,
+    baselineReady,
+    signalConfidence,
     volumeSpikeRatio60s:  vsr60,
     volumeSpikeRatio15s:  vsr15,
     tradeAcceleration:    tradeAcc,

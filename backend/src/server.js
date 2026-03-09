@@ -7,6 +7,8 @@ const mysql   = require('mysql2/promise');
 const { createLevelsService }        = require('./levelsService');
 const { createLevelMonitorService } = require('./services/levelMonitorService');
 const { createAlertEngineService }  = require('./services/alertEngineService');
+const { createTelegramService }     = require('./services/telegramService');
+const { createAlertDeliveryService } = require('./services/alertDeliveryService');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -51,7 +53,10 @@ const levels  = createLevelsService(db, redis);
 const monitor = createLevelMonitorService(redis);
 monitor.start();
 
-const alertEngine = createAlertEngineService(redis);
+const telegram      = createTelegramService();
+const alertDelivery = createAlertDeliveryService(redis, telegram);
+
+const alertEngine = createAlertEngineService(redis, alertDelivery);
 alertEngine.start();
 
 // ─── Express app ─────────────────────────────────────────────────
@@ -454,6 +459,47 @@ app.delete('/api/levels/:id', async (req, res) => {
   } catch (err) {
     console.error(`[backend] Error deactivating level ${id}:`, err.message);
     return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ─── Delivery endpoints ───────────────────────────────────────────
+
+// GET /api/delivery/status
+app.get('/api/delivery/status', async (_req, res) => {
+  try {
+    const recentCount = await redis.llen('alerts:recent');
+    return res.json({
+      success: true,
+      telegram: {
+        enabled:       telegram.enabled,
+        chatConfigured: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+      },
+      recentAlerts: recentCount,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// POST /api/delivery/test  (dev/internal only)
+app.post('/api/delivery/test', async (_req, res) => {
+  const testAlert = {
+    type:         'market_impulse',
+    symbol:       'TESTUSDT',
+    severity:     'high',
+    createdAt:    Date.now(),
+    signalContext: {
+      impulseScore:     999,
+      impulseDirection: 'up',
+      inPlayScore:      999,
+      signalConfidence: 100,
+    },
+  };
+  try {
+    const result = await alertDelivery.handleAlert(testAlert);
+    return res.json({ success: true, result });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

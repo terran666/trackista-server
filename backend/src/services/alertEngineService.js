@@ -121,7 +121,7 @@ function buildAlertEvent(type, symbol, now, opts = {}) {
 }
 
 // ─── Factory ─────────────────────────────────────────────────────
-function createAlertEngineService(redis) {
+function createAlertEngineService(redis, deliveryService = null) {
   let tickCount  = 0;
   let totalAlerts = 0;
 
@@ -147,6 +147,13 @@ function createAlertEngineService(redis) {
     await pipeline.exec();
     totalAlerts++;
     console.log(`[alerts] created type=${event.type} symbol=${event.symbol} severity=${event.severity}`);
+
+    // Delivery layer — без блокировки alert engine при ошибке доставки
+    if (deliveryService) {
+      deliveryService.handleAlert(event).catch(err =>
+        console.error('[alerts] delivery error:', err.message)
+      );
+    }
   }
 
   // ── Process level-based alerts for one level state entry ────

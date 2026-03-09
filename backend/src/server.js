@@ -486,22 +486,40 @@ app.get('/api/delivery/status', async (_req, res) => {
 });
 
 // POST /api/delivery/test  (dev/internal only)
-app.post('/api/delivery/test', async (_req, res) => {
+app.post('/api/delivery/test', async (req, res) => {
+  const body = req.body || {};
+  const symbol       = body.symbol       || 'BTCUSDT';
+  const direction    = body.direction    || 'UP';
+  const priceMovePct = body.priceMovePct || 10.0;
+  const volSpike     = body.volSpike     || 3.2;
+  const price        = body.price        || 82450.50;
+
+  const impulseScore      = parseFloat(((Math.abs(priceMovePct) * 40) + (volSpike * 50)).toFixed(1));
+  const priceFactor       = Math.abs(priceMovePct) / 2.5;
+  const volumeFactor      = volSpike / 2.0;
+  const signalConfidence  = Math.min(((priceFactor + volumeFactor) / 2) * 100, 100);
+  const severity          = (Math.abs(priceMovePct) >= 5.0 && volSpike >= 3.0) ? 'critical' : 'high';
+
   const testAlert = {
     type:         'market_impulse',
-    symbol:       'TESTUSDT',
-    severity:     'high',
+    symbol,
+    severity,
     createdAt:    Date.now(),
+    currentPrice: price,
     signalContext: {
-      impulseScore:     999,
-      impulseDirection: 'up',
-      inPlayScore:      999,
-      signalConfidence: 100,
+      impulseDirection:  direction,
+      impulseScore,
+      signalConfidence:  parseFloat(signalConfidence.toFixed(1)),
+      priceMovePct5s:    priceMovePct,
+      volume5s:          125000,
+      baselineVolume5s:  39062,
+      volumeSpikeRatio:  volSpike,
+      impulseWindowSec:  5,
     },
   };
   try {
     const result = await alertDelivery.handleAlert(testAlert);
-    return res.json({ success: true, result });
+    return res.json({ success: true, alert: testAlert, result });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }

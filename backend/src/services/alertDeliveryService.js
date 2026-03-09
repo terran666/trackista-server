@@ -158,7 +158,110 @@ function buildDeliveryKey(alert) {
       return `telegram:delivery:${alert.type}:${alert.symbol}:generic`;
   }
 }
+// ─── Quality filter config ──────────────────────────────────────
+const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
 
+function getSeverityRank(severity) {
+  return SEVERITY_RANK[(severity || '').toLowerCase()] ?? -1;
+}
+
+function getMinScore(type) {
+  switch (type) {
+    case 'market_impulse':  return envInt('TELEGRAM_MIN_SCORE_MARKET_IMPULSE', 250);
+    case 'market_in_play':  return envInt('TELEGRAM_MIN_SCORE_MARKET_IN_PLAY', 150);
+    default:                return null;
+  }
+}
+
+function getMinConfidence(type) {
+  switch (type) {
+    case 'market_impulse':  return envInt('TELEGRAM_MIN_CONFIDENCE_MARKET_IMPULSE', 80);
+    case 'market_in_play':  return envInt('TELEGRAM_MIN_CONFIDENCE_MARKET_IN_PLAY', 75);
+    default:                return null;
+  }
+}
+
+function getMinSeverity(type) {
+  switch (type) {
+    case 'market_impulse':           return (process.env.TELEGRAM_MIN_SEVERITY_MARKET_IMPULSE           || 'high').toLowerCase();
+    case 'market_in_play':           return (process.env.TELEGRAM_MIN_SEVERITY_MARKET_IN_PLAY           || 'medium').toLowerCase();
+    case 'level_breakout_candidate': return (process.env.TELEGRAM_MIN_SEVERITY_LEVEL_BREAKOUT_CANDIDATE || 'medium').toLowerCase();
+    case 'level_bounce_candidate':   return (process.env.TELEGRAM_MIN_SEVERITY_LEVEL_BOUNCE_CANDIDATE   || 'medium').toLowerCase();
+    default:                         return null;
+  }
+}
+
+function getBurstConfig(type) {
+  switch (type) {
+    case 'market_impulse':
+      return { max: envInt('TELEGRAM_MAX_ALERTS_PER_WINDOW_MARKET_IMPULSE', 3), window: envInt('TELEGRAM_WINDOW_SECONDS_MARKET_IMPULSE', 60) };
+    case 'market_in_play':
+      return { max: envInt('TELEGRAM_MAX_ALERTS_PER_WINDOW_MARKET_IN_PLAY', 5), window: envInt('TELEGRAM_WINDOW_SECONDS_MARKET_IN_PLAY', 60) };
+    default:
+      return null;
+  }
+}
+
+// ─── Quality filter functions ─────────────────────────────────────
+function passesScoreThreshold(alert) {
+  const minScore = getMinScore(alert.type);
+  if (minScore === null) return { pass: true };
+  const sc = alert.signalContext || {};
+  const score = parseFloat(alert.type === 'market_impulse' ? sc.impulseScore : sc.inPlayScore);
+  if (isNaN(score) || score < minScore) {
+    return { pass: false, reason: 'score_below_threshold', score, min: minScore };
+  }
+  return { pass: true };
+}
+
+function passesConfidenceThreshold(alert) {
+  const minConf = getMinConfidence(alert.type);
+  if (minConf === null) return { pass: true };
+  const sc = alert.signalContext || {};
+  const conf = parseFloat(sc.signalConfidence);
+  if (isNaN(conf) || conf < minConf) {
+    return { pass: false, reason: 'confidence_below_threshold', confidence: conf, min: minConf };
+  }
+  return { pass: true };
+}
+
+function passesDirectionFilter(alert) {
+  const DIRECTION_TYPES = ['market_impulse', 'market_in_play', 'level_breakout_candidate', 'level_bounce_candidate'];
+  if (!DIRECTION_TYPES.includes(alert.type)) return { pass: true };
+  if (envBool('TELEGRAM_ALLOW_MIXED_DIRECTION', false)) return { pass: true };
+  const sc = alert.signalContext || {};
+  if ((sc.impulseDirection || '').toUpperCase() === 'MIXED') {
+    return { pass: false, reason: 'mixed_direction' };
+  }
+  return { pass: true };
+}
+
+function passesSeverityFilter(alert) {
+  const severity = (alert.severity || '').toLowerCase();
+  if (!severity) return { pass: true };
+  const minSeverity = getMinSeverity(alert.type);
+  if (minSeverity === null) return { pass: true };
+  if (getSeverityRank(severity) < getSeverityRank(minSeverity)) {
+    return { pass: false, reason: 'severity_below_threshold', severity, min: minSeverity };
+  }
+  return { pass: true };
+}
+
+function passesQualityFilter(alert) {
+  for (const check of [passesDirectionFilter, passesScoreThreshold, passesConfidenceThreshold, passesSeverityFilter]) {
+    const result = check(alert);
+    if (!result.pass) return result;
+  }
+  return { pass: true };
+}
+
+function logQualitySkip(alert, result) {
+  let extra = '';
+  if (result.reason === 'score_below_threshold')           extra = ` score=${fmtNum(result.score, 1)} min=${result.min}`;
+  else if (result.reason === 'confidence_below_threshold') extra = ` confidence=${fmtNum(result.confidence, 0)} min=${result.min}`;
+  else if (result.reason === 'severity_below_threshold')   extra = ` severity=${result.severity} min=${result.min}`;
+  console.log(`[telegram] skipped type=${alert.type} symbol=${alert.symbol} reason=${result.reason}${extra}`);
+}
 // ─── Factory ─────────────────────────────────────────────────────
 // Глобальный rate limiter — макс N сообщений в минуту в Telegram
 const GLOBAL_RATE_LIMIT_PER_MIN = envInt('TELEGRAM_RATE_LIMIT_PER_MIN', 5);
@@ -179,6 +282,27 @@ function createAlertDeliveryService(redis, telegramService) {
 
   function incrementRate() {
     sentThisMinute++;
+  }
+
+  // ── Burst limit (Redis-based, per alert type) ─────────────────
+  async function passesBurstLimit(alert) {
+    const cfg = getBurstConfig(alert.type);
+    if (!cfg) return { pass: true };
+    const key = `telegram:burst:${alert.type}`;
+    const current = await redis.get(key);
+    const count = parseInt(current, 10) || 0;
+    if (count >= cfg.max) {
+      return { pass: false, reason: 'burst_limit', count, window: cfg.window };
+    }
+    return { pass: true };
+  }
+
+  async function incrementBurstCount(type) {
+    const cfg = getBurstConfig(type);
+    if (!cfg) return;
+    const key = `telegram:burst:${type}`;
+    const count = await redis.incr(key);
+    if (count === 1) await redis.expire(key, cfg.window);
   }
 
   // ── Cooldown ─────────────────────────────────────────────────
@@ -206,11 +330,21 @@ function createAlertDeliveryService(redis, telegramService) {
       return { success: false, skipped: true, reason: 'disabled_by_config' };
     }
 
-    const key = buildDeliveryKey(alert);
+    const quality = passesQualityFilter(alert);
+    if (!quality.pass) {
+      logQualitySkip(alert, quality);
+      return { success: false, skipped: true, reason: quality.reason };
+    }
 
+    const burst = await passesBurstLimit(alert);
+    if (!burst.pass) {
+      console.log(`[telegram] skipped type=${alert.type} symbol=${alert.symbol} reason=burst_limit count=${burst.count} window=${burst.window}`);
+      return { success: false, skipped: true, reason: 'burst_limit' };
+    }
+
+    const key = buildDeliveryKey(alert);
     const onCooldown = await isInCooldown(key);
     if (onCooldown) {
-      // Тихий пропуск — cooldown нормальное поведение, не логируем каждую секунду
       return { success: false, skipped: true, reason: 'delivery_cooldown' };
     }
 
@@ -231,12 +365,12 @@ function createAlertDeliveryService(redis, telegramService) {
 
     if (result.success) {
       incrementRate();
+      await incrementBurstCount(alert.type);
       await markDelivered(key, alert.type);
       console.log(`[telegram] delivered type=${alert.type} symbol=${alert.symbol} messageId=${result.telegramMessageId}`);
       return { success: true, telegramMessageId: result.telegramMessageId };
     }
 
-    // Ошибка отправки
     const statusCode = result.statusCode ?? 'network';
     console.error(`[telegram] failed type=${alert.type} symbol=${alert.symbol} status=${statusCode} error=${result.error}`);
     return { success: false, error: result.error };

@@ -5,6 +5,8 @@ const Redis   = require('ioredis');
 const mysql   = require('mysql2/promise');
 
 const { createLevelsService }         = require('./levelsService');
+const { levelsHandler }               = require('./routes/levelsEngineRoute');
+const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
@@ -337,6 +339,16 @@ app.get('/api/market/top-active', async (req, res) => {
 });
 
 // ─── Level endpoints ─────────────────────────────────────────────
+
+// GET /api/levels — DEPRECATED, use /api/autolevels
+console.log('[backend] registering /api/levels route (deprecated 410)');
+app.get('/api/levels', (_req, res) => {
+  res.status(410).json({ success: false, error: 'Deprecated. Use /api/autolevels' });
+});
+
+// GET /api/autolevels — AutoLevels engine (pivot grid clustering)
+console.log('[backend] registering /api/autolevels route');
+app.get('/api/autolevels', autoLevelsHandler);
 
 // GET /api/levels/state/:symbol
 app.get('/api/levels/state/:symbol', async (req, res) => {

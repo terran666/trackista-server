@@ -12,6 +12,7 @@ const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOn
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
 const { bulkHandler: trackedRaysBulk, listHandler: trackedRaysList, deleteOneHandler: trackedRaysDeleteOne, deleteManyHandler: trackedRaysDeleteMany, patchOneHandler: trackedRaysPatchOne, patchManyHandler: trackedRaysPatchMany, lineValueHandler: trackedRaysLineValue } = require('./routes/trackedRaysRoute');
+const { bulkHandler: savedRaysBulk, listHandler: savedRaysList, deleteOneHandler: savedRaysDeleteOne, deleteManyHandler: savedRaysDeleteMany, patchOneHandler: savedRaysPatchOne, patchManyHandler: savedRaysPatchMany } = require('./routes/savedRaysRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
@@ -388,6 +389,15 @@ app.post('/api/tracked-rays/delete-many', trackedRaysDeleteMany);
 app.patch('/api/tracked-rays/:id',        trackedRaysPatchOne);
 app.post('/api/tracked-rays/patch-many',  trackedRaysPatchMany);
 app.get('/api/tracked-rays/:id/value',    trackedRaysLineValue);
+
+// ─── Saved rays endpoints ────────────────────────────────────────
+console.log('[backend] registering /api/saved-rays routes');
+app.post('/api/saved-rays/bulk',        savedRaysBulk);
+app.get('/api/saved-rays',              savedRaysList);
+app.delete('/api/saved-rays/:id',       savedRaysDeleteOne);
+app.post('/api/saved-rays/delete-many', savedRaysDeleteMany);
+app.patch('/api/saved-rays/:id',        savedRaysPatchOne);
+app.post('/api/saved-rays/patch-many',  savedRaysPatchMany);
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');

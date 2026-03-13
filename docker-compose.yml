@@ -100,6 +100,7 @@ services:
       DB_NAME: ${MYSQL_DATABASE}
       BINANCE_SPOT_WS: ${BINANCE_SPOT_WS}
       BINANCE_FUTURES_WS: ${BINANCE_FUTURES_WS}
+      ORDERBOOK_SYMBOLS: ${ORDERBOOK_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
     depends_on:
       mysql:
         condition: service_healthy

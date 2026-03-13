@@ -19,6 +19,7 @@ const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
 const { createTelegramService }      = require('./services/telegramService');
 const { createAlertDeliveryService } = require('./services/alertDeliveryService');
+const { createOrderbookHandler }     = require('./routes/orderbookRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -344,6 +345,10 @@ app.get('/api/market/top-active', async (req, res) => {
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
+
+// ─── Orderbook endpoint ──────────────────────────────────────────
+console.log('[backend] registering /api/orderbook route');
+app.get('/api/orderbook', createOrderbookHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 

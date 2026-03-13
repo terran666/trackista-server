@@ -525,3 +525,10 @@ async function start() {
 }
 
 start();
+
+// ─── Orderbook collector ──────────────────────────────────────────
+// Runs independently of the trade collector — maintains a local order
+// book for each symbol in ORDERBOOK_SYMBOLS and writes normalised
+// top-50 snapshots to Redis (key: orderbook:${symbol}).
+const orderbookCollector = require('./orderbookCollector');
+orderbookCollector.start(redis);

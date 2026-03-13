@@ -7,6 +7,10 @@ const mysql   = require('mysql2/promise');
 const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
+const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete } = require('./routes/manualLevelsRoute');
+const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
+const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
+const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
@@ -349,6 +353,37 @@ app.get('/api/levels', (_req, res) => {
 // GET /api/autolevels — AutoLevels engine (pivot grid clustering)
 console.log('[backend] registering /api/autolevels route');
 app.get('/api/autolevels', autoLevelsHandler);
+
+// ─── Manual levels endpoints ──────────────────────────────────────
+console.log('[backend] registering /api/manual-levels routes');
+app.post('/api/manual-levels',       manualLevelsCreate);
+app.get('/api/manual-levels',        manualLevelsList);
+app.delete('/api/manual-levels/:id', manualLevelsDelete);
+
+// ─── Tracked levels endpoints ─────────────────────────────────────
+console.log('[backend] registering /api/tracked-levels routes');
+app.post('/api/tracked-levels/bulk',        trackedLevelsBulk);
+app.get('/api/tracked-levels',              trackedLevelsList);
+app.delete('/api/tracked-levels/:id',       trackedLevelsDeleteOne);
+app.post('/api/tracked-levels/delete-many', trackedLevelsDeleteMany);
+app.patch('/api/tracked-levels/:id',        trackedLevelsPatchOne);
+app.post('/api/tracked-levels/patch-many',  trackedLevelsPatchMany);
+
+// ─── Tracked extremes endpoints ──────────────────────────────────
+console.log('[backend] registering /api/tracked-extremes routes');
+app.post('/api/tracked-extremes/bulk',        trackedExtremesBulk);
+app.get('/api/tracked-extremes',              trackedExtremesList);
+app.delete('/api/tracked-extremes/:id',       trackedExtremesDeleteOne);
+app.post('/api/tracked-extremes/delete-many', trackedExtremesDeleteMany);
+app.patch('/api/tracked-extremes/:id',        trackedExtremesPatchOne);
+app.post('/api/tracked-extremes/patch-many',  trackedExtremesPatchMany);
+
+// ─── Extremes rays endpoints ──────────────────────────────────────
+console.log('[backend] registering /api/extremes-rays routes');
+app.post('/api/extremes-rays',        extremesRaysCreate);
+app.get('/api/extremes-rays',         extremesRaysList);
+app.patch('/api/extremes-rays/:id',   extremesRaysPatch);
+app.delete('/api/extremes-rays/:id',  extremesRaysDelete);
 
 // GET /api/levels/state/:symbol
 app.get('/api/levels/state/:symbol', async (req, res) => {

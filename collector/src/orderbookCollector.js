@@ -1,6 +1,7 @@
 'use strict';
 
-const WebSocket = require('ws');
+const WebSocket    = require('ws');
+const { buildWallsPayload } = require('./wallDetector');
 
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://api.binance.com';
@@ -138,6 +139,11 @@ function startFlushTimer(redis) {
       if (!state.dirty || !state.synced) continue;
       const snapshot = buildSnapshot(state);
       pipeline.set(`orderbook:${state.symbol}`, JSON.stringify(snapshot));
+
+      // Wall detection runs on the same snapshot — no extra Redis read needed.
+      const wallsPayload = buildWallsPayload(snapshot);
+      pipeline.set(`walls:${state.symbol}`, JSON.stringify(wallsPayload));
+
       state.dirty = false;
       count++;
     }

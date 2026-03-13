@@ -20,6 +20,7 @@ const { createMarketImpulseService } = require('./services/marketImpulseService'
 const { createTelegramService }      = require('./services/telegramService');
 const { createAlertDeliveryService } = require('./services/alertDeliveryService');
 const { createOrderbookHandler }     = require('./routes/orderbookRoute');
+const { createWallsHandler }         = require('./routes/wallsRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -349,6 +350,10 @@ app.get('/api/market/top-active', async (req, res) => {
 // ─── Orderbook endpoint ──────────────────────────────────────────
 console.log('[backend] registering /api/orderbook route');
 app.get('/api/orderbook', createOrderbookHandler(redis));
+
+// ─── Walls endpoint ───────────────────────────────────────────
+console.log('[backend] registering /api/walls route');
+app.get('/api/walls', createWallsHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 

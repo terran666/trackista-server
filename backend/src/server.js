@@ -13,6 +13,7 @@ const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, dele
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
 const { bulkHandler: trackedRaysBulk, listHandler: trackedRaysList, deleteOneHandler: trackedRaysDeleteOne, deleteManyHandler: trackedRaysDeleteMany, patchOneHandler: trackedRaysPatchOne, patchManyHandler: trackedRaysPatchMany, lineValueHandler: trackedRaysLineValue } = require('./routes/trackedRaysRoute');
 const { bulkHandler: savedRaysBulk, listHandler: savedRaysList, deleteOneHandler: savedRaysDeleteOne, deleteManyHandler: savedRaysDeleteMany, patchOneHandler: savedRaysPatchOne, patchManyHandler: savedRaysPatchMany } = require('./routes/savedRaysRoute');
+const { createHandler: manualSlopedCreate, listHandler: manualSlopedList, deleteHandler: manualSlopedDelete, patchHandler: manualSlopedPatch, lineValueHandler: manualSlopedLineValue } = require('./routes/manualSlopedLevelsRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
@@ -389,6 +390,14 @@ app.post('/api/tracked-rays/delete-many', trackedRaysDeleteMany);
 app.patch('/api/tracked-rays/:id',        trackedRaysPatchOne);
 app.post('/api/tracked-rays/patch-many',  trackedRaysPatchMany);
 app.get('/api/tracked-rays/:id/value',    trackedRaysLineValue);
+
+// ─── Manual sloped levels endpoints ────────────────────────────────
+console.log('[backend] registering /api/manual-sloped-levels routes');
+app.post('/api/manual-sloped-levels',             manualSlopedCreate);
+app.get('/api/manual-sloped-levels',              manualSlopedList);
+app.delete('/api/manual-sloped-levels/:id',       manualSlopedDelete);
+app.patch('/api/manual-sloped-levels/:id',        manualSlopedPatch);
+app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');

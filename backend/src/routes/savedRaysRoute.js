@@ -170,6 +170,9 @@ function listHandler(req, res) {
   try {
     const rays = store.getAll({ symbol, marketType });
     console.log(`[saved-rays] listed symbol=${symbol.toUpperCase()} marketType=${marketType} count=${rays.length}`);
+    for (const r of rays) {
+      console.log(`[saved-rays] list id=${r.id} points=${JSON.stringify(r.points)} updatedAt=${r.updatedAt}`);
+    }
     return res.json({ success: true, count: rays.length, rays });
   } catch (err) {
     console.error('[saved-rays] list error:', err.message);
@@ -248,7 +251,7 @@ function patchOneHandler(req, res) {
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Saved ray not found' });
     }
-    console.log(`[saved-rays] patched id=${id} fields=${Object.keys(patch).join(',')}`);
+    console.log(`[saved-rays] patched id=${id} fields=${Object.keys(patch).join(',')} points=${JSON.stringify(updated.points)} updatedAt=${updated.updatedAt}`);
     return res.json({ success: true, ray: updated });
   } catch (err) {
     console.error(`[saved-rays] patch error id=${id}:`, err.message);

@@ -63,19 +63,35 @@ function bulkHandler(req, res) {
   const body = req.body || {};
   const { symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays } = body;
 
-  function fail(reason) {
+  // Log the raw incoming envelope so validation failures are easy to diagnose.
+  const bodyPreview = {
+    symbol,
+    marketType,
+    source,
+    createdFrom,
+    visibleOnAllTimeframes,
+    persistent,
+    raysCount: Array.isArray(rays) ? rays.length : rays,
+    firstRay:  Array.isArray(rays) && rays.length > 0 ? rays[0] : undefined,
+  };
+  console.log(`[saved-rays] bulk received body=${JSON.stringify(bodyPreview)}`);
+
+  function fail(reason, extra) {
     console.log(`[saved-rays] bulk validation failed reason=${reason}`);
+    if (extra !== undefined) {
+      console.log(`[saved-rays] invalid body=${JSON.stringify(extra)}`);
+    }
     return res.status(400).json({ success: false, error: reason });
   }
 
   if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
-    return fail('Missing or invalid field: symbol (expected non-empty string, e.g. "BTCUSDT")');
+    return fail('Missing or invalid field: symbol (expected non-empty string, e.g. "BTCUSDT")', { symbol });
   }
   if (!VALID_MARKET_TYPES.has(marketType)) {
-    return fail(`Missing or invalid field: marketType (expected one of: ${[...VALID_MARKET_TYPES].join(', ')})`);
+    return fail(`Missing or invalid field: marketType (expected one of: ${[...VALID_MARKET_TYPES].join(', ')})`, { marketType });
   }
   if (!Array.isArray(rays) || rays.length === 0) {
-    return fail('Missing or invalid field: rays (expected non-empty array)');
+    return fail('Missing or invalid field: rays (expected non-empty array)', { rays });
   }
 
   console.log(`[saved-rays] bulk input symbol=${symbol.toUpperCase()} marketType=${marketType} source=${source || 'saved-rays'} createdFrom=${createdFrom || 'unknown'} count=${rays.length}`);
@@ -84,23 +100,23 @@ function bulkHandler(req, res) {
     const r = rays[i];
 
     if (!VALID_SIDES.has(r.side)) {
-      return fail(`rays[${i}].side must be one of: ${[...VALID_SIDES].join(', ')}`);
+      return fail(`rays[${i}].side must be one of: ${[...VALID_SIDES].join(', ')}`, { i, side: r.side });
     }
     if (r.kind !== undefined && !VALID_KINDS.has(r.kind)) {
-      return fail(`rays[${i}].kind must be one of: ${[...VALID_KINDS].join(', ')}`);
+      return fail(`rays[${i}].kind must be one of: ${[...VALID_KINDS].join(', ')}`, { i, kind: r.kind });
     }
 
     const shape = r.shape || 'sloped';
     if (!VALID_SHAPES.has(shape)) {
-      return fail(`rays[${i}].shape must be one of: ${[...VALID_SHAPES].join(', ')}`);
+      return fail(`rays[${i}].shape must be one of: ${[...VALID_SHAPES].join(', ')}`, { i, shape });
     }
     if (shape === 'sloped') {
       const err = validateSlopedPoints(r.points, `rays[${i}].points`);
-      if (err) return fail(err);
+      if (err) return fail(err, { i, points: r.points });
     }
     if (shape === 'horizontal') {
       if (r.price == null || isNaN(parseFloat(r.price)) || parseFloat(r.price) <= 0) {
-        return fail(`rays[${i}].price is required and must be a positive number for shape=horizontal`);
+        return fail(`rays[${i}].price is required and must be a positive number for shape=horizontal`, { i, price: r.price });
       }
     }
   }

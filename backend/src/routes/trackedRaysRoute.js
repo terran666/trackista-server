@@ -6,7 +6,7 @@ const { getLineValueAtTimestamp } = require('../engines/rays/rayGeometry');
 const VALID_MARKET_TYPES = new Set(['spot', 'futures']);
 const VALID_SIDES        = new Set(['support', 'resistance']);
 const VALID_SHAPES       = new Set(['horizontal', 'sloped']);
-const VALID_KINDS        = new Set(['level', 'extreme', 'ray']);
+const VALID_KINDS        = new Set(['level', 'extreme', 'ray', 'line']);
 const VALID_INTERVALS    = new Set([
   '1m','3m','5m','15m','30m',
   '1h','2h','4h','6h','8h','12h',
@@ -240,6 +240,61 @@ function patchOneHandler(req, res) {
   }
 }
 
+// ─── POST /api/tracked-rays/delete-many ─────────────────────────
+//
+// Request body:
+// { "ids": [1, 2, 3] }
+//
+// Response 200: { success: true, count: number }
+function deleteManyHandler(req, res) {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+  }
+
+  try {
+    const count = store.removeMany(ids);
+    console.log(`[tracked-rays] delete-many count=${count}`);
+    return res.json({ success: true, count });
+  } catch (err) {
+    console.error('[tracked-rays] delete-many error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ─── POST /api/tracked-rays/patch-many ───────────────────────────
+//
+// Request body:
+// { "ids": [1, 2, 3], "patch": { "alertEnabled": true } }
+//
+// Accepted patch fields: points, price, alertEnabled, tracked
+//
+// Response 200: { success: true, count: number }
+function patchManyHandler(req, res) {
+  const { ids, patch } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+  }
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
+    return res.status(400).json({ success: false, error: 'patch must be a non-empty object' });
+  }
+
+  const PATCHABLE = new Set(['points', 'price', 'alertEnabled', 'tracked']);
+  const unknown   = Object.keys(patch).filter(k => !PATCHABLE.has(k));
+  if (unknown.length > 0) {
+    return res.status(400).json({ success: false, error: `Unknown patch fields: ${unknown.join(', ')}. Accepted: ${[...PATCHABLE].join(', ')}` });
+  }
+
+  try {
+    const count = store.patchMany(ids, patch);
+    console.log(`[tracked-rays] patch-many count=${count} fields=${Object.keys(patch).join(',')}`);
+    return res.json({ success: true, count });
+  } catch (err) {
+    console.error('[tracked-rays] patch-many error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
 // ─── GET /api/tracked-rays/:id/value?ts=<timestamp> ──────────────
 //
 // Compute the line's value at a given timestamp for a sloped ray.
@@ -279,4 +334,4 @@ function lineValueHandler(req, res) {
   }
 }
 
-module.exports = { bulkHandler, listHandler, deleteOneHandler, patchOneHandler, lineValueHandler };
+module.exports = { bulkHandler, listHandler, deleteOneHandler, deleteManyHandler, patchOneHandler, patchManyHandler, lineValueHandler };

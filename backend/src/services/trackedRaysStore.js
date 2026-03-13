@@ -116,4 +116,41 @@ function patchOne(id, patch) {
   return store.rays[idx];
 }
 
-module.exports = { bulkSave, getAll, removeOne, patchOne };
+/**
+ * Delete multiple rays by ids array.
+ * Returns count of removed records.
+ */
+function removeMany(ids) {
+  const idSet = new Set(ids);
+  const store = readStore();
+  const before = store.rays.length;
+  store.rays = store.rays.filter(r => !idSet.has(r.id));
+  const count = before - store.rays.length;
+  writeStore(store);
+  return count;
+}
+
+/**
+ * Patch multiple rays with the same patch object.
+ * Patchable fields: points, price, alertEnabled, tracked.
+ * Returns count of updated records.
+ */
+function patchMany(ids, patch) {
+  const PATCHABLE = new Set(['points', 'price', 'alertEnabled', 'tracked']);
+  const idSet     = new Set(ids);
+  const store     = readStore();
+  const now       = Date.now();
+  let count       = 0;
+  for (const r of store.rays) {
+    if (!idSet.has(r.id)) continue;
+    for (const key of Object.keys(patch)) {
+      if (PATCHABLE.has(key)) r[key] = patch[key];
+    }
+    r.updatedAt = now;
+    count++;
+  }
+  writeStore(store);
+  return count;
+}
+
+module.exports = { bulkSave, getAll, removeOne, removeMany, patchOne, patchMany };

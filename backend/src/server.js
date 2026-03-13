@@ -11,6 +11,7 @@ const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, delete
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
+const { bulkHandler: trackedRaysBulk, listHandler: trackedRaysList, deleteOneHandler: trackedRaysDeleteOne, patchOneHandler: trackedRaysPatchOne, lineValueHandler: trackedRaysLineValue } = require('./routes/trackedRaysRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
@@ -377,6 +378,14 @@ app.delete('/api/tracked-extremes/:id',       trackedExtremesDeleteOne);
 app.post('/api/tracked-extremes/delete-many', trackedExtremesDeleteMany);
 app.patch('/api/tracked-extremes/:id',        trackedExtremesPatchOne);
 app.post('/api/tracked-extremes/patch-many',  trackedExtremesPatchMany);
+
+// ─── Tracked rays endpoints ──────────────────────────────────────
+console.log('[backend] registering /api/tracked-rays routes');
+app.post('/api/tracked-rays/bulk',      trackedRaysBulk);
+app.get('/api/tracked-rays',            trackedRaysList);
+app.delete('/api/tracked-rays/:id',     trackedRaysDeleteOne);
+app.patch('/api/tracked-rays/:id',      trackedRaysPatchOne);
+app.get('/api/tracked-rays/:id/value',  trackedRaysLineValue);
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');

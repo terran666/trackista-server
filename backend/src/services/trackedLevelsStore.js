@@ -1,7 +1,19 @@
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
+
+// Stable fingerprint of an input items array (geometry/data fields only).
+// Items are key-sorted before stringify so field order doesn't matter.
+function computeFingerprint(items) {
+  const normalized = items.map(item => {
+    const obj = {};
+    for (const k of Object.keys(item).sort()) obj[k] = item[k];
+    return obj;
+  });
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
 
 const DATA_DIR  = path.join(__dirname, '..', '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tracked-levels.json');
@@ -11,7 +23,7 @@ function ensureFile() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 1, levels: [] }), 'utf8');
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 1, levels: [], fingerprints: {} }), 'utf8');
   }
 }
 
@@ -25,12 +37,25 @@ function writeStore(store) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
 }
 
-// Replace all records for symbol+marketType+tf+source with a fresh set,
-// assigning new ids. Returns the created records.
+// Replace all records for symbol+marketType+tf+source with a fresh set.
+// If the incoming payload is identical to the last saved snapshot (by fingerprint),
+// skip the write and return { skipped: true, items: existingRecords }.
+// Otherwise replace and return { skipped: false, items: createdRecords }.
 function bulkSave({ symbol, marketType, tf, source, levels }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
+
+  if (!store.fingerprints) store.fingerprints = {};
+  const fpKey    = `${sym}:${marketType}:${tf}:${source}`;
+  const incoming = computeFingerprint(levels);
+
+  if (store.fingerprints[fpKey] === incoming) {
+    const existing = store.levels.filter(
+      l => l.symbol === sym && l.marketType === marketType && l.tf === tf && l.source === source
+    );
+    return { skipped: true, items: existing };
+  }
 
   // Remove old records for this combination
   store.levels = store.levels.filter(
@@ -58,8 +83,9 @@ function bulkSave({ symbol, marketType, tf, source, levels }) {
   }));
 
   store.levels.push(...created);
+  store.fingerprints[fpKey] = incoming;
   writeStore(store);
-  return created;
+  return { skipped: false, items: created };
 }
 
 function getAll({ symbol, marketType, tf, source } = {}) {

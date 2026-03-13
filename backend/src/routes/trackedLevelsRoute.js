@@ -44,9 +44,13 @@ function bulkHandler(req, res) {
   }
 
   try {
-    const created = store.bulkSave({ symbol, marketType, tf, source, levels });
-    console.log(`[tracked-levels] bulk saved symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${created.length}`);
-    return res.status(200).json({ success: true, count: created.length, levels: created });
+    const result = store.bulkSave({ symbol, marketType, tf, source, levels });
+    if (result.skipped) {
+      console.log(`[tracked-levels] bulk skipped unchanged snapshot symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${result.items.length}`);
+      return res.status(200).json({ success: true, skipped: true, count: result.items.length, levels: result.items });
+    }
+    console.log(`[tracked-levels] bulk replaced snapshot symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${result.items.length}`);
+    return res.status(200).json({ success: true, skipped: false, count: result.items.length, levels: result.items });
   } catch (err) {
     console.error('[tracked-levels] bulk save error:', err.message);
     return res.status(500).json({ success: false, error: 'Internal server error' });

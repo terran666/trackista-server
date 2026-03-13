@@ -1,7 +1,17 @@
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
+
+function computeFingerprint(items) {
+  const normalized = items.map(item => {
+    const obj = {};
+    for (const k of Object.keys(item).sort()) obj[k] = item[k];
+    return obj;
+  });
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
 
 const DATA_DIR  = path.join(__dirname, '..', '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tracked-extremes.json');
@@ -13,7 +23,7 @@ function ensureFile() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 1, extremes: [] }), 'utf8');
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ nextId: 1, extremes: [], fingerprints: {} }), 'utf8');
   }
 }
 
@@ -37,6 +47,17 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
+
+  if (!store.fingerprints) store.fingerprints = {};
+  const fpKey    = `${sym}:${marketType}:${tf}:${source}`;
+  const incoming = computeFingerprint(extremes);
+
+  if (store.fingerprints[fpKey] === incoming) {
+    const existing = store.extremes.filter(
+      e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source
+    );
+    return { skipped: true, items: existing };
+  }
 
   // Remove old snapshot for this combination
   store.extremes = store.extremes.filter(
@@ -63,8 +84,9 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
   }));
 
   store.extremes.push(...created);
+  store.fingerprints[fpKey] = incoming;
   writeStore(store);
-  return created;
+  return { skipped: false, items: created };
 }
 
 /**

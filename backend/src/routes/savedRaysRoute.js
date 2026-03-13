@@ -106,20 +106,24 @@ function bulkHandler(req, res) {
   }
 
   try {
-    const { saved, skippedCount } = store.bulkSave({
+    const { replaced, oldCount } = store.bulkSave({
       symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays,
     });
 
-    console.log(`[saved-rays] bulk saved symbol=${symbol.toUpperCase()} marketType=${marketType} count=${saved.length}`);
-    if (skippedCount > 0) {
-      console.log(`[saved-rays] dedupe skipped count=${skippedCount}`);
+    const sym = symbol.toUpperCase();
+    if (oldCount > 0) {
+      console.log(`[saved-rays] replacing existing snapshot symbol=${sym} marketType=${marketType} createdFrom=${createdFrom || 'unknown'}`);
+      console.log(`[saved-rays] old count=${oldCount}`);
     }
+    console.log(`[saved-rays] bulk saved symbol=${sym} marketType=${marketType} createdFrom=${createdFrom || 'unknown'} count=${replaced.length}`);
+    console.log(`[saved-rays] new count=${replaced.length}`);
 
     return res.status(200).json({
-      success:      true,
-      savedCount:   saved.length,
-      skippedCount,
-      rays:         saved,
+      success:  true,
+      count:    replaced.length,
+      replaced: oldCount > 0,
+      oldCount,
+      rays:     replaced,
     });
   } catch (err) {
     console.error('[saved-rays] bulk save error:', err.message);

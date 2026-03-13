@@ -61,29 +61,41 @@ function computeRayFingerprint(sym, marketType, ray) {
 // ─── Public API ───────────────────────────────────────────────────
 
 /**
- * Additive bulk save with per-ray geometry deduplication.
+ * Snapshot-replace bulk save.
  *
- * Unlike snapshot-replace stores, this does NOT wipe existing rays; it only
- * adds rays whose geometry fingerprint is not yet stored.
+ * Removes ALL existing saved rays for symbol + marketType + createdFrom,
+ * then inserts the new set.  Per-ray geometry fingerprints of the removed
+ * records are cleaned up so the same geometry can be re-saved without
+ * being treated as a duplicate.
  *
- * Returns { saved: Ray[], skippedCount: number }.
+ * "Same saved set" key: symbol + marketType + createdFrom.
+ *
+ * Returns { replaced: Ray[], oldCount: number }.
  */
 function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
 
-  const savedRays   = [];
-  let   skippedCount = 0;
+  // ── 1. Remove old snapshot for this scope ──────────────────────
+  const isOld = r =>
+    r.symbol === sym &&
+    r.marketType === marketType &&
+    r.createdFrom === (createdFrom || null);
 
-  for (const r of rays) {
-    const fp = computeRayFingerprint(sym, marketType, r);
+  const oldRecords = store.rays.filter(isOld);
+  const oldIds     = new Set(oldRecords.map(r => r.id));
 
-    if (store.rayFingerprints[fp] !== undefined) {
-      skippedCount++;
-      continue;
-    }
+  // Clean fingerprints of old records.
+  for (const [fp, rayId] of Object.entries(store.rayFingerprints)) {
+    if (oldIds.has(rayId)) delete store.rayFingerprints[fp];
+  }
 
+  store.rays = store.rays.filter(r => !isOld(r));
+
+  // ── 2. Insert new snapshot ─────────────────────────────────────
+  const replaced = rays.map(r => {
+    const fp     = computeRayFingerprint(sym, marketType, r);
     const record = {
       id:                   store.nextId++,
       symbol:               sym,
@@ -93,7 +105,7 @@ function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimefra
       side:                 r.side,
       kind:                 r.kind        || 'ray',
       shape:                r.shape       || 'sloped',
-      points:               r.points,
+      points:               r.points      || null,
       strength:             r.strength  != null ? parseFloat(r.strength)  : null,
       touches:              r.touches   != null ? parseInt(r.touches, 10) : null,
       persistent:           true,
@@ -103,14 +115,13 @@ function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimefra
       createdAt:            now,
       updatedAt:            now,
     };
-
     store.rays.push(record);
     store.rayFingerprints[fp] = record.id;
-    savedRays.push(record);
-  }
+    return record;
+  });
 
   writeStore(store);
-  return { saved: savedRays, skippedCount };
+  return { replaced, oldCount: oldIds.size };
 }
 
 /**

@@ -1,15 +1,51 @@
 'use strict';
 
+// ─── Volume tiers → minimum wall USD threshold ────────────────────
+//
+// Walls should be sized relative to a symbol's liquidity.
+// A $100k wall is noise on BTC but significant on a small-cap coin.
+//
+// quoteVolume24h (USDT)  → minWallSizeUSD
+//  ≥ 1,000,000,000       → 3,000,000
+//  ≥   500,000,000       → 1,000,000
+//  ≥   300,000,000       →   500,000
+//  ≥   100,000,000       →   200,000
+//  <   100,000,000       →   100,000   (also used as fallback)
+//
+const VOLUME_TIERS = [
+  { minVolume: 1_000_000_000, threshold: 3_000_000 },
+  { minVolume:   500_000_000, threshold: 1_000_000 },
+  { minVolume:   300_000_000, threshold:   500_000 },
+  { minVolume:   100_000_000, threshold:   200_000 },
+];
+const FALLBACK_THRESHOLD = 100_000;
+
+/**
+ * Return the appropriate wall USD threshold for a given 24h quote volume.
+ *
+ * @param {number|null|undefined} volume24h  24h USDT quoteVolume for the symbol
+ * @returns {number}
+ */
+function getWallThreshold(volume24h) {
+  if (volume24h != null && isFinite(volume24h)) {
+    for (const tier of VOLUME_TIERS) {
+      if (volume24h >= tier.minVolume) return tier.threshold;
+    }
+  }
+  // Fall back to env override or fixed default
+  return parseFloat(process.env.MIN_WALL_SIZE_USD || String(FALLBACK_THRESHOLD));
+}
+
 // ─── Configuration ────────────────────────────────────────────────
 //
-// Read from env so thresholds can be tuned without a code change.
-// ENV variables are re-read each call so a future hot-config manager
-// can update them at runtime without restarting the collector.
+// maxDistancePct is still read from env so it can be tuned without
+// a code change.  minWallSizeUSD is now driven by volume tier logic
+// (see getWallThreshold above) but can be globally overridden via
+// MIN_WALL_SIZE_USD env var when volume24h is not available.
 
 function cfg() {
   return {
-    minWallSizeUSD:    parseFloat(process.env.MIN_WALL_SIZE_USD    || '100000'),
-    maxDistancePct:    parseFloat(process.env.MAX_WALL_DISTANCE_PCT || '0.5'),
+    maxDistancePct: parseFloat(process.env.MAX_WALL_DISTANCE_PCT || '0.5'),
   };
 }
 
@@ -23,7 +59,7 @@ function cfg() {
 //   Each level: { price, size, usdValue }
 //
 // Wall criteria per level:
-//   usdValue >= minWallSizeUSD
+//   usdValue >= minWallSizeUSD  (volume-tier based, passed by caller)
 //   distancePct <= maxDistancePct
 //
 // distancePct:
@@ -32,17 +68,22 @@ function cfg() {
 //
 // Returns walls sorted by usdValue descending.
 //
-function detectWalls(snapshot) {
+function detectWalls(snapshot, minWallSizeUSD) {
   if (!snapshot || snapshot.midPrice === null || snapshot.midPrice <= 0) {
     return [];
   }
 
-  const { minWallSizeUSD, maxDistancePct } = cfg();
+  // Allow caller to provide the threshold; fall back to env/tier default.
+  const threshold = (minWallSizeUSD != null && isFinite(minWallSizeUSD))
+    ? minWallSizeUSD
+    : getWallThreshold(null);
+
+  const { maxDistancePct } = cfg();
   const mid = snapshot.midPrice;
   const walls = [];
 
   for (const level of snapshot.asks) {
-    if (level.usdValue < minWallSizeUSD) continue;
+    if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((level.price - mid) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
     walls.push({
@@ -55,7 +96,7 @@ function detectWalls(snapshot) {
   }
 
   for (const level of snapshot.bids) {
-    if (level.usdValue < minWallSizeUSD) continue;
+    if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((mid - level.price) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
     walls.push({
@@ -76,17 +117,20 @@ function detectWalls(snapshot) {
 // ─── buildWallsPayload ────────────────────────────────────────────
 //
 // Wraps detectWalls result into the full payload written to Redis.
+// minWallSizeUSD is computed by the caller from the symbol's 24h volume
+// via getWallThreshold() and passed here so detectWalls stays pure.
 //
-function buildWallsPayload(snapshot) {
-  const walls = detectWalls(snapshot);
+function buildWallsPayload(snapshot, minWallSizeUSD) {
+  const walls = detectWalls(snapshot, minWallSizeUSD);
   return {
-    symbol:    snapshot.symbol,
-    updatedAt: snapshot.updatedAt,
-    bestBid:   snapshot.bestBid,
-    bestAsk:   snapshot.bestAsk,
-    midPrice:  snapshot.midPrice,
+    symbol:       snapshot.symbol,
+    updatedAt:    snapshot.updatedAt,
+    bestBid:      snapshot.bestBid,
+    bestAsk:      snapshot.bestAsk,
+    midPrice:     snapshot.midPrice,
+    wallThreshold: minWallSizeUSD ?? getWallThreshold(null),
     walls,
   };
 }
 
-module.exports = { detectWalls, buildWallsPayload };
+module.exports = { detectWalls, buildWallsPayload, getWallThreshold };

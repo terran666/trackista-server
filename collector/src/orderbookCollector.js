@@ -1,7 +1,7 @@
 'use strict';
 
 const WebSocket    = require('ws');
-const { buildWallsPayload } = require('./wallDetector');
+const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
 
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://api.binance.com';
@@ -10,6 +10,53 @@ const TOP_LEVELS         = 50;          // top N bids / asks in snapshot
 const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth
 const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
 const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
+const VOLUME_REFRESH_MS  = 60 * 60 * 1000; // refresh 24h volumes every hour
+
+// ─── 24h volume cache ─────────────────────────────────────────────
+//
+// Map<symbol, quoteVolume24h (USDT)>
+// Populated on startup and refreshed hourly via Binance /api/v3/ticker/24hr.
+// Used to compute per-symbol wall detection thresholds.
+//
+const volumeCache = new Map();
+
+async function refreshVolumeCache(symbols) {
+  try {
+    const url = `${BINANCE_REST_BASE}/api/v3/ticker/24hr`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const tickers = await res.json();
+
+    const symbolSet = new Set(symbols);
+    let updated = 0;
+    for (const t of tickers) {
+      if (!symbolSet.has(t.symbol)) continue;
+      const vol = parseFloat(t.quoteVolume);
+      if (isFinite(vol)) {
+        volumeCache.set(t.symbol, vol);
+        updated++;
+      }
+    }
+    console.log(`[orderbook] volume cache refreshed: ${updated}/${symbols.length} symbols`);
+
+    // Log thresholds for the tracked symbols so they are visible in logs
+    for (const sym of symbols) {
+      const vol = volumeCache.get(sym);
+      const thr = getWallThreshold(vol);
+      console.log(
+        `[orderbook] ${sym}: volume24h=${vol != null ? Math.round(vol).toLocaleString() : 'n/a'} USD` +
+        ` → wallThreshold=${thr.toLocaleString()} USD`,
+      );
+    }
+  } catch (err) {
+    console.error('[orderbook] volume cache refresh failed:', err.message);
+  }
+}
+
+function startVolumeRefresh(symbols) {
+  refreshVolumeCache(symbols); // initial fetch (fire-and-forget)
+  setInterval(() => refreshVolumeCache(symbols), VOLUME_REFRESH_MS);
+}
 
 // ─── Watchlist ────────────────────────────────────────────────────
 //
@@ -141,7 +188,10 @@ function startFlushTimer(redis) {
       pipeline.set(`orderbook:${state.symbol}`, JSON.stringify(snapshot));
 
       // Wall detection runs on the same snapshot — no extra Redis read needed.
-      const wallsPayload = buildWallsPayload(snapshot);
+      // Use the per-symbol threshold derived from its 24h volume tier.
+      const volume24h    = volumeCache.get(state.symbol);
+      const wallThreshold = getWallThreshold(volume24h);
+      const wallsPayload = buildWallsPayload(snapshot, wallThreshold);
       pipeline.set(`walls:${state.symbol}`, JSON.stringify(wallsPayload));
 
       state.dirty = false;
@@ -323,6 +373,10 @@ function connectOrderbook(symbol) {
 function start(redis) {
   const symbols = getWatchlistSymbols();
   console.log(`[orderbook] Starting orderbook collector for: ${symbols.join(', ')}`);
+
+  // Fetch 24h volumes immediately and refresh every hour so that wall
+  // detection thresholds stay accurate as market conditions change.
+  startVolumeRefresh(symbols);
 
   startFlushTimer(redis);
 

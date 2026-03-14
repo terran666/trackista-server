@@ -16,23 +16,26 @@
 //   success:   true,
 //   symbol:    "SOLUSDT",
 //   orderbook: {
-//     symbol:    string,
-//     updatedAt: number (unix ms),
-//     bestBid:   number | null,   // highest bid price
-//     bestAsk:   number | null,   // lowest  ask price
-//     midPrice:  number | null,   // (bestBid + bestAsk) / 2
+//     symbol:     string,
+//     marketType: "spot",
+//     ladderMode: "raw",
+//     updatedAt:  number (unix ms),
+//     bestBid:    number | null,   // highest bid price
+//     bestAsk:    number | null,   // lowest  ask price
+//     midPrice:   number | null,   // (bestBid + bestAsk) / 2
 //
-//     bids: [                     // top 50 bid levels, sorted descending by price
+//     bids: [                      // top 200 bid levels, sorted descending by price
 //       {
-//         price:    number,       // EXACT Binance price level — no rounding, no bucketing
-//         size:     number,       // EXACT quantity at that price
-//         usdValue: number,       // parseFloat((price * size).toFixed(2))
+//         price:    number,        // EXACT Binance price level — no rounding, no bucketing
+//         rawPrice: number,        // identical to price — confirms no transformation applied
+//         size:     number,        // EXACT quantity at that price
+//         usdValue: number,        // parseFloat((price * size).toFixed(2))
 //       },
 //       ...
 //     ],
 //
-//     asks: [                     // top 50 ask levels, sorted ascending by price
-//       { price, size, usdValue },
+//     asks: [                      // top 200 ask levels, sorted ascending by price
+//       { price, rawPrice, size, usdValue },
 //       ...
 //     ],
 //   }

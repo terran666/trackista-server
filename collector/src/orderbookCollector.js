@@ -203,6 +203,7 @@ function buildSnapshot(state) {
     .slice(0, TOP_LEVELS)
     .map(l => ({
       price:    l.price,
+      rawPrice: l.price,
       size:     l.size,
       usdValue: parseFloat((l.price * l.size).toFixed(2)),
     }));
@@ -213,6 +214,7 @@ function buildSnapshot(state) {
     .slice(0, TOP_LEVELS)
     .map(l => ({
       price:    l.price,
+      rawPrice: l.price,
       size:     l.size,
       usdValue: parseFloat((l.price * l.size).toFixed(2)),
     }));
@@ -226,6 +228,7 @@ function buildSnapshot(state) {
   return {
     symbol:     state.symbol,
     marketType: 'spot',
+    ladderMode: 'raw',
     updatedAt:  state.updatedAt || Date.now(),
     bestBid,
     bestAsk,

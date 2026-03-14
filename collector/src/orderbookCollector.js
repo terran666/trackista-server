@@ -190,6 +190,12 @@ function applyEvent(state, event) {
 // Builds a normalised TOP_LEVELS snapshot from the current local book.
 // bids sorted descending by price, asks ascending.
 //
+// RAW CONTRACT: every entry in bids/asks is a single Binance price level
+// (one key from the Map<priceStr, sizeNum>).  No levels are merged or
+// bucketed before serialisation.  usdValue = round2(price * size).
+// This snapshot is the canonical source for /api/orderbook, /api/walls,
+// and /api/density-view — all three must reflect the same raw levels.
+//
 function buildSnapshot(state) {
   const bids = [...state.bids.entries()]
     .map(([p, s]) => ({ price: parseFloat(p), size: s }))

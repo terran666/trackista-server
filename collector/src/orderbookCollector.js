@@ -58,6 +58,59 @@ function startVolumeRefresh(symbols) {
   setInterval(() => refreshVolumeCache(symbols), VOLUME_REFRESH_MS);
 }
 
+// ─── Wall lifetime state store ────────────────────────────────────
+//
+// Tracks when each wall was first and last seen so we can compute
+// lifetimeMs per wall.  Identity key: `${symbol}:${side}:${price}`.
+//
+// Map<key, { firstSeenTs, lastSeenTs }>
+//
+// After a restart all times reset — this is acceptable for MVP.
+// Entries for walls that have disappeared are kept for one extra cycle
+// (to allow downstream analysis of pulled walls) then pruned.
+//
+const wallLifetimes = new Map();
+
+/**
+ * Merge lifetime tracking into a freshly detected walls array.
+ * Updates wallLifetimes in-place and annotates each wall with
+ * firstSeenTs / lastSeenTs / lifetimeMs.
+ *
+ * @param {string} symbol
+ * @param {Array<object>} walls   output of detectWalls()
+ * @param {number} now            current timestamp ms
+ * @returns {Array<object>}       same array, walls annotated in-place
+ */
+function applyWallLifetime(symbol, walls, now) {
+  const activeKeys = new Set();
+
+  for (const wall of walls) {
+    const key = `${symbol}:${wall.side}:${wall.price}`;
+    activeKeys.add(key);
+
+    if (wallLifetimes.has(key)) {
+      const entry = wallLifetimes.get(key);
+      entry.lastSeenTs = now;
+      wall.firstSeenTs  = entry.firstSeenTs;
+      wall.lastSeenTs   = now;
+      wall.lifetimeMs   = now - entry.firstSeenTs;
+    } else {
+      wallLifetimes.set(key, { firstSeenTs: now, lastSeenTs: now });
+      wall.firstSeenTs = now;
+      wall.lastSeenTs  = now;
+      wall.lifetimeMs  = 0;
+    }
+  }
+
+  // Prune stale entries (walls no longer present for this symbol)
+  for (const key of wallLifetimes.keys()) {
+    if (!key.startsWith(`${symbol}:`)) continue;
+    if (!activeKeys.has(key)) wallLifetimes.delete(key);
+  }
+
+  return walls;
+}
+
 // ─── Watchlist ────────────────────────────────────────────────────
 //
 // ORDERBOOK_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
@@ -189,9 +242,13 @@ function startFlushTimer(redis) {
 
       // Wall detection runs on the same snapshot — no extra Redis read needed.
       // Use the per-symbol threshold derived from its 24h volume tier.
-      const volume24h    = volumeCache.get(state.symbol);
+      const volume24h     = volumeCache.get(state.symbol);
       const wallThreshold = getWallThreshold(volume24h);
-      const wallsPayload = buildWallsPayload(snapshot, wallThreshold);
+      const wallsPayload  = buildWallsPayload(snapshot, wallThreshold);
+
+      // Annotate walls with lifetime data (firstSeenTs / lastSeenTs / lifetimeMs)
+      applyWallLifetime(state.symbol, wallsPayload.walls, snapshot.updatedAt);
+
       pipeline.set(`walls:${state.symbol}`, JSON.stringify(wallsPayload));
 
       state.dirty = false;

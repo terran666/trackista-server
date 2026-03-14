@@ -68,6 +68,45 @@ function cfg() {
 //
 // Returns walls sorted by usdValue descending.
 //
+// ─── detectWalls ─────────────────────────────────────────────────
+//
+// Pure function: takes an orderbook snapshot (already built by
+// orderbookCollector.buildSnapshot) and returns a sorted walls array.
+//
+// snapshot shape:
+//   { symbol, updatedAt, bestBid, bestAsk, midPrice, bids[], asks[] }
+//   Each level: { price, size, usdValue }
+//
+// Wall criteria per level:
+//   usdValue >= minWallSizeUSD  (volume-tier based, passed by caller)
+//   distancePct <= maxDistancePct
+//
+// distancePct:
+//   ask: ((price - midPrice) / midPrice) * 100
+//   bid: ((midPrice - price) / midPrice) * 100
+//
+// strength  = wallUsdValue / median(top-N usdValues, same side)
+//   N = STRENGTH_TOP_N levels, capped to available levels.
+//   If median is 0 or unavailable → null.
+//
+// Returns walls sorted by usdValue descending.
+
+const STRENGTH_TOP_N = 20; // levels used for strength baseline per side
+
+/**
+ * Compute the median of an array of numbers.
+ * @param {number[]} arr
+ * @returns {number|null}
+ */
+function median(arr) {
+  if (arr.length === 0) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
 function detectWalls(snapshot, minWallSizeUSD) {
   if (!snapshot || snapshot.midPrice === null || snapshot.midPrice <= 0) {
     return [];
@@ -82,16 +121,30 @@ function detectWalls(snapshot, minWallSizeUSD) {
   const mid = snapshot.midPrice;
   const walls = [];
 
+  // Pre-compute per-side median from TOP_N levels for strength calculation.
+  // Uses ALL top-N levels (not just walls) as denominator so strength is
+  // relative to the normal depth context.
+  const askMedian = median(
+    snapshot.asks.slice(0, STRENGTH_TOP_N).map(l => l.usdValue),
+  );
+  const bidMedian = median(
+    snapshot.bids.slice(0, STRENGTH_TOP_N).map(l => l.usdValue),
+  );
+
   for (const level of snapshot.asks) {
     if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((level.price - mid) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
+    const strength = (askMedian && askMedian > 0)
+      ? parseFloat((level.usdValue / askMedian).toFixed(2))
+      : null;
     walls.push({
       side:        'ask',
       price:       level.price,
       size:        level.size,
       usdValue:    level.usdValue,
       distancePct,
+      strength,
     });
   }
 
@@ -99,12 +152,16 @@ function detectWalls(snapshot, minWallSizeUSD) {
     if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((mid - level.price) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
+    const strength = (bidMedian && bidMedian > 0)
+      ? parseFloat((level.usdValue / bidMedian).toFixed(2))
+      : null;
     walls.push({
       side:        'bid',
       price:       level.price,
       size:        level.size,
       usdValue:    level.usdValue,
       distancePct,
+      strength,
     });
   }
 

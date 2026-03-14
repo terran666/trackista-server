@@ -6,6 +6,50 @@ const BIAS_RANGE_PCT = 0.005;
 
 const MAX_LIMIT = 500;
 
+// ─── Liquidity score reference baselines ─────────────────────────
+// Used to normalise raw metric values into a 0–100 score.
+// These are approximate "very active" benchmarks; values above them
+// simply clamp the contribution to 100%.
+const LSCORE_VOL_REF    = 5_000_000;  // volumeUsdt60s considered "high"
+const LSCORE_COUNT_REF  = 5_000;      // tradeCount60s considered "high"
+const LSCORE_SPREAD_REF = 0.001;      // spreadPct above this is "wide" (penalised)
+const LSCORE_ACT_REF    = 500_000;    // activityScore considered "high"
+
+/**
+ * Compute a 0–100 liquidity score from available per-symbol metrics.
+ * Higher = more liquid.
+ *
+ * Weights:
+ *   40% volumeUsdt60s     (normalised vs LSCORE_VOL_REF)
+ *   25% tradeCount60s     (normalised vs LSCORE_COUNT_REF)
+ *   20% activityScore     (normalised vs LSCORE_ACT_REF)
+ *   15% spreadPct         (penalised — higher spread → lower score)
+ *
+ * @param {object|null} metrics
+ * @param {object|null} ob
+ * @returns {number}  integer 0–100
+ */
+function computeLiquidityScore(metrics, ob) {
+  const vol60s    = metrics?.volumeUsdt60s  ?? 0;
+  const count60s  = metrics?.tradeCount60s  ?? 0;
+  const actScore  = metrics?.activityScore  ?? 0;
+  const bestBid   = ob?.bestBid             ?? null;
+  const bestAsk   = ob?.bestAsk             ?? null;
+  const midPrice  = ob?.midPrice            ?? null;
+
+  const spread = (bestBid != null && bestAsk != null && midPrice)
+    ? (bestAsk - bestBid) / midPrice
+    : LSCORE_SPREAD_REF; // treat missing spread as "wide"
+
+  const vScore  = Math.min(vol60s   / LSCORE_VOL_REF,   1) * 40;
+  const cScore  = Math.min(count60s / LSCORE_COUNT_REF, 1) * 25;
+  const aScore  = Math.min(actScore / LSCORE_ACT_REF,   1) * 20;
+  // Spread: 0 spread → full 15 pts; at or above ref → 0 pts
+  const sScore  = Math.max(1 - (spread / LSCORE_SPREAD_REF), 0) * 15;
+
+  return Math.round(vScore + cScore + aScore + sScore);
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────
 
 /**
@@ -113,10 +157,29 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
   const bidWallsCount = walls.filter(w => w.side === 'bid').length;
   const askWallsCount = walls.filter(w => w.side === 'ask').length;
 
-  let nearestWallDistancePct = null;
+  let nearestWallDistancePct  = null;
+  let nearestWallLifetimeMs   = null;
+  let topWallStrength         = null;
+
   if (walls.length > 0) {
-    nearestWallDistancePct = Math.min(...walls.map(w => Math.abs(w.distancePct ?? Infinity)));
-    if (!isFinite(nearestWallDistancePct)) nearestWallDistancePct = null;
+    // Nearest wall by absolute distancePct
+    let nearestWall = null;
+    let minDist = Infinity;
+    for (const w of walls) {
+      const d = Math.abs(w.distancePct ?? Infinity);
+      if (d < minDist) { minDist = d; nearestWall = w; }
+    }
+    if (isFinite(minDist)) {
+      nearestWallDistancePct = minDist;
+      nearestWallLifetimeMs  = nearestWall?.lifetimeMs ?? null;
+    }
+
+    // Top strength across all walls
+    for (const w of walls) {
+      if (w.strength != null && (topWallStrength === null || w.strength > topWallStrength)) {
+        topWallStrength = w.strength;
+      }
+    }
   }
 
   // ── Bias ────────────────────────────────────────────────────────
@@ -126,6 +189,9 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
     const rangeHigh = midPrice * (1 + BIAS_RANGE_PCT);
     bias = computeBias(walls, rangeLow, rangeHigh);
   }
+
+  // ── Liquidity score ─────────────────────────────────────────────
+  const liquidityScore = computeLiquidityScore(metrics, ob);
 
   // ── Metrics fields ──────────────────────────────────────────────
   const volumeUsdt60s  = metrics?.volumeUsdt60s  ?? null;
@@ -150,6 +216,9 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
     bidWallsCount,
     askWallsCount,
     nearestWallDistancePct,
+    nearestWallLifetimeMs,
+    topWallStrength,
+    liquidityScore,
     volumeUsdt60s,
     tradeCount60s,
     deltaImbalancePct60s,

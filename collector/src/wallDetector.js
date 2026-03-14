@@ -139,12 +139,16 @@ function detectWalls(snapshot, minWallSizeUSD) {
       ? parseFloat((level.usdValue / askMedian).toFixed(2))
       : null;
     walls.push({
-      side:        'ask',
-      price:       level.price,
-      size:        level.size,
-      usdValue:    level.usdValue,
+      side:               'ask',
+      price:              level.price,
+      rawPrice:           level.price,
+      size:               level.size,
+      usdValue:           level.usdValue,
       distancePct,
       strength,
+      source:             'orderbook',
+      sourceUpdatedAt:    snapshot.updatedAt,
+      exactLevelMatched:  true,
     });
   }
 
@@ -156,12 +160,16 @@ function detectWalls(snapshot, minWallSizeUSD) {
       ? parseFloat((level.usdValue / bidMedian).toFixed(2))
       : null;
     walls.push({
-      side:        'bid',
-      price:       level.price,
-      size:        level.size,
-      usdValue:    level.usdValue,
+      side:               'bid',
+      price:              level.price,
+      rawPrice:           level.price,
+      size:               level.size,
+      usdValue:           level.usdValue,
       distancePct,
       strength,
+      source:             'orderbook',
+      sourceUpdatedAt:    snapshot.updatedAt,
+      exactLevelMatched:  true,
     });
   }
 
@@ -180,11 +188,12 @@ function detectWalls(snapshot, minWallSizeUSD) {
 function buildWallsPayload(snapshot, minWallSizeUSD) {
   const walls = detectWalls(snapshot, minWallSizeUSD);
   return {
-    symbol:       snapshot.symbol,
-    updatedAt:    snapshot.updatedAt,
-    bestBid:      snapshot.bestBid,
-    bestAsk:      snapshot.bestAsk,
-    midPrice:     snapshot.midPrice,
+    symbol:        snapshot.symbol,
+    marketType:    'spot',
+    updatedAt:     snapshot.updatedAt,
+    bestBid:       snapshot.bestBid,
+    bestAsk:       snapshot.bestAsk,
+    midPrice:      snapshot.midPrice,
     wallThreshold: minWallSizeUSD ?? getWallThreshold(null),
     walls,
   };

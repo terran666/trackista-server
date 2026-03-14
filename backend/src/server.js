@@ -20,6 +20,7 @@ const { createMarketImpulseService } = require('./services/marketImpulseService'
 const { createTelegramService }      = require('./services/telegramService');
 const { createAlertDeliveryService } = require('./services/alertDeliveryService');
 const { createOrderbookHandler }      = require('./routes/orderbookRoute');
+const { createOrderbookDebugHandler } = require('./routes/orderbookDebugRoute');
 const { createWallsHandler }          = require('./routes/wallsRoute');
 const { createDensityViewHandler }    = require('./routes/densityViewRoute');
 const { createDensitySummaryHandler } = require('./routes/densitySummaryRoute');
@@ -352,6 +353,10 @@ app.get('/api/market/top-active', async (req, res) => {
 // ─── Orderbook endpoint ──────────────────────────────────────────
 console.log('[backend] registering /api/orderbook route');
 app.get('/api/orderbook', createOrderbookHandler(redis));
+
+// ─── Orderbook debug-compare endpoint ────────────────────────────
+console.log('[backend] registering /api/orderbook/debug-compare route');
+app.get('/api/orderbook/debug-compare', createOrderbookDebugHandler(redis));
 
 // ─── Walls endpoint ───────────────────────────────────────────
 console.log('[backend] registering /api/walls route');

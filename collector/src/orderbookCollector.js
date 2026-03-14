@@ -6,8 +6,8 @@ const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://api.binance.com';
 const BINANCE_WS_BASE    = 'wss://stream.binance.com:9443';
-const TOP_LEVELS         = 50;          // top N bids / asks in snapshot
-const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth
+const TOP_LEVELS         = 200;         // top N bids / asks stored in Redis per side
+const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth (full book)
 const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
 const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
 const VOLUME_REFRESH_MS  = 60 * 60 * 1000; // refresh 24h volumes every hour
@@ -224,8 +224,9 @@ function buildSnapshot(state) {
     : null;
 
   return {
-    symbol:    state.symbol,
-    updatedAt: state.updatedAt || Date.now(),
+    symbol:     state.symbol,
+    marketType: 'spot',
+    updatedAt:  state.updatedAt || Date.now(),
     bestBid,
     bestAsk,
     midPrice,

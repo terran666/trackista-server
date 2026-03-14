@@ -26,7 +26,9 @@ const { buildDensityView } = require('../services/density/densityViewBuilder');
 //   "stats":      null   // TODO: 24h metrics
 // }
 //
-// Response 404 if orderbook data is not yet available in Redis.
+// Response 200 { tracked: false, ladder: { bids:[], asks:[] }, ... } when orderbook data is
+// not available (symbol not tracked or collector still initialising).
+// This prevents the frontend from treating a missing-data state as a route error.
 //
 function createDensityViewHandler(redis) {
   return async function densityViewHandler(req, res) {
@@ -44,15 +46,28 @@ function createDensityViewHandler(redis) {
       const payload = await buildDensityView(redis, symbol, scale || undefined);
 
       if (payload === null) {
-        return res.status(404).json({
-          success: false,
-          error:   'Orderbook data not available — symbol may not be tracked or collector is still initialising',
+        console.log(`[density-view] GET /api/density-view symbol=${symbol} scale=${scale || 'x5'} → not tracked, returning empty 200`);
+        return res.json({
+          success:      true,
           symbol,
+          tracked:      false,
+          updatedAt:    null,
+          bestBid:      null,
+          bestAsk:      null,
+          midPrice:     null,
+          scale:        scale || 'x5',
+          rangePct:     null,
+          rangeLow:     null,
+          rangeHigh:    null,
+          ladder:       { bids: [], asks: [] },
+          visibleWalls: [],
+          depth:        { bids: [], asks: [] },
+          stats:        null,
         });
       }
 
       console.log(`[density-view] GET /api/density-view symbol=${symbol} scale=${payload.scale}`);
-      return res.json({ success: true, ...payload });
+      return res.json({ success: true, tracked: true, ...payload });
     } catch (err) {
       console.error(`[density-view] GET /api/density-view error symbol=${symbol}:`, err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

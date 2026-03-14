@@ -47,6 +47,10 @@
 // Response 404 if symbol not tracked or detector not yet flushed.
 // Does NOT silently fall back to spot when futures key is absent.
 //
+// Response 200 { tracked: false, walls: { walls: [] } } when symbol is not in the
+// tracked watchlist or wall detector has not yet flushed for this symbol.
+// This prevents the frontend from treating a missing-data state as a route error.
+//
 function createWallsHandler(redis) {
   return async function wallsHandler(req, res) {
     const symbol     = (req.query.symbol     || '').toUpperCase().trim();
@@ -76,16 +80,26 @@ function createWallsHandler(redis) {
       console.log(`[walls] GET /api/walls symbol=${symbol} marketType=${marketType} key=${redisKey} found=${raw !== null}`);
 
       if (raw === null) {
-        return res.status(404).json({
-          success:    false,
-          error:      `Walls data not available — symbol may not be tracked or ${marketType} detector is still initialising`,
+        console.log(`[walls] GET /api/walls symbol=${symbol} marketType=${marketType} key=${redisKey} found=false → returning empty 200`);
+        return res.json({
+          success:    true,
           symbol,
           marketType,
-          redisKey,
+          tracked:    false,
+          walls: {
+            symbol,
+            marketType,
+            updatedAt:      null,
+            bestBid:        null,
+            bestAsk:        null,
+            midPrice:       null,
+            wallThreshold:  null,
+            walls:          [],
+          },
         });
       }
 
-      return res.json({ success: true, symbol, marketType, walls: JSON.parse(raw) });
+      return res.json({ success: true, symbol, marketType, tracked: true, walls: JSON.parse(raw) });
     } catch (err) {
       console.error(`[walls] GET /api/walls error symbol=${symbol} marketType=${marketType}:`, err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

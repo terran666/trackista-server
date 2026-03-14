@@ -6,6 +6,36 @@ const { calculateAutoLevels, AUTO_LEVELS_DEFAULTS } = require('../engines/autole
 const BINANCE_SPOT_BASE    = 'https://api.binance.com/api/v3/klines';
 const BINANCE_FUTURES_BASE = 'https://fapi.binance.com/fapi/v1/klines';
 
+// ─── In-memory klines cache ───────────────────────────────────────
+//
+// Prevents repeated Binance klines fetches for identical requests.
+// TTL is 15s by default (configurable via KLINES_CACHE_TTL_MS).
+// Cache key: "${symbol}:${tf}:${marketType}:${limit}"
+//
+const KLINES_CACHE_TTL_MS = parseInt(process.env.KLINES_CACHE_TTL_MS || '15000', 10);
+const klinesCache = new Map(); // key → { bars, expiresAt }
+
+function getCachedBars(key) {
+  const entry = klinesCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    klinesCache.delete(key);
+    return null;
+  }
+  return entry.bars;
+}
+
+function setCachedBars(key, bars) {
+  klinesCache.set(key, { bars, expiresAt: Date.now() + KLINES_CACHE_TTL_MS });
+  // Evict expired entries when cache grows (simple GC)
+  if (klinesCache.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of klinesCache) {
+      if (now > v.expiresAt) klinesCache.delete(k);
+    }
+  }
+}
+
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     https.get(url, res => {
@@ -77,11 +107,18 @@ async function autoLevelsHandler(req, res) {
     return res.status(400).json({ error: 'symbol is required' });
   }
 
-  const limit = Math.min(2000, Math.max(200, parseNum(lookbackBars, AUTO_LEVELS_DEFAULTS.lookbackBars) + 50));
-
   let bars;
   try {
-    bars = await fetchBars(symbol.toUpperCase(), tf, limit, marketType);
+    const limit = Math.min(2000, Math.max(200, parseNum(lookbackBars, AUTO_LEVELS_DEFAULTS.lookbackBars) + 50));
+    const cacheKey = `${symbol.toUpperCase()}:${tf}:${marketType}:${limit}`;
+    bars = getCachedBars(cacheKey);
+    if (bars) {
+      console.log(`[autolevels] cache HIT: ${cacheKey}`);
+    } else {
+      console.log(`[autolevels] cache MISS: ${cacheKey} — fetching from Binance`);
+      bars = await fetchBars(symbol.toUpperCase(), tf, limit, marketType);
+      if (bars.length) setCachedBars(cacheKey, bars);
+    }
   } catch (err) {
     console.error('[autolevels] fetchBars error:', err.message);
     return res.json([]);

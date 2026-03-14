@@ -13,9 +13,11 @@ const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
 const VOLUME_REFRESH_MS  = 60 * 60 * 1000;
 
 // ─── Rate limit safeguards ────────────────────────────────────────
-const RESYNC_COOLDOWN_MS     = 15_000; // min ms between live-gap resyncs per symbol
-const MAX_SYNC_RETRIES       = 3;      // max REST snapshot attempts on transient failure
-const RESYNC_BACKOFF_BASE_MS = 5_000;  // initial backoff on 429/418 — doubles each retry
+const RESYNC_COOLDOWN_MS     = parseInt(process.env.ORDERBOOK_RESYNC_COOLDOWN_MS     || '15000', 10);
+const MAX_SYNC_RETRIES       = 3;
+const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS  || '10000', 10);
+const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS || '300000', 10);
+const STATS_LOG_INTERVAL_MS  = 60_000;
 
 // ─── Redis key helpers ────────────────────────────────────────────
 // Futures data lives under a dedicated namespace so spot/futures
@@ -117,17 +119,20 @@ function getOrCreateBook(symbol) {
   if (!bookStates.has(symbol)) {
     bookStates.set(symbol, {
       symbol,
-      bids:               new Map(),
-      asks:               new Map(),
-      lastUpdateId:       0,
-      synced:             false,
-      syncing:            false,  // true while syncBook is running (concurrency guard)
-      buffer:             [],
-      dirty:              false,
-      updatedAt:          0,
-      lastResyncAt:       0,      // timestamp of last live-gap resync attempt
-      resyncCount:        0,      // total live-gap resyncs since startup
-      snapshotFetchCount: 0,      // total REST /depth calls since startup
+      bids:                     new Map(),
+      asks:                     new Map(),
+      lastUpdateId:             0,
+      synced:                   false,
+      syncing:                  false,
+      buffer:                   [],
+      dirty:                    false,
+      updatedAt:                0,
+      lastResyncAt:             0,
+      resyncCount:              0,
+      resyncSkippedCooldown:    0,
+      snapshotFetchCount:       0,
+      rateLimitCount:           0,
+      rateLimitBackoffUntilMs:  0,
     });
   }
   return bookStates.get(symbol);
@@ -254,6 +259,17 @@ async function syncBook(state) {
   }
   state.syncing = true;
   state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
+
+  // ── Rate limit backoff guard ───────────────────────────────
+  const backoffRemaining = state.rateLimitBackoffUntilMs - Date.now();
+  if (backoffRemaining > 0) {
+    state.syncing = false;
+    console.warn(
+      `[futures-ob] ${sym}: in rate-limit backoff — skipping sync for ${Math.ceil(backoffRemaining / 1000)}s`,
+    );
+    return false;
+  }
+
   console.log(
     `[futures-ob] ${sym}: fetching REST depth snapshot` +
     ` (limit=${SNAPSHOT_LIMIT} fetch#${state.snapshotFetchCount} totalResyncs=${state.resyncCount})`,
@@ -275,12 +291,15 @@ async function syncBook(state) {
       if (res.status === 429 || res.status === 418) {
         const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
         const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : backoffMs;
+        state.rateLimitCount = (state.rateLimitCount || 0) + 1;
+        state.rateLimitBackoffUntilMs = Date.now() + Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
         console.error(
           `[futures-ob] ${sym}: Binance rate limit HTTP ${res.status}` +
-          ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}`,
+          ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
+          ` rateLimitCount=${state.rateLimitCount}`,
         );
         await new Promise(r => setTimeout(r, waitMs));
-        backoffMs = Math.min(backoffMs * 2, 60_000);
+        backoffMs = Math.min(backoffMs * 2, RESYNC_BACKOFF_MAX_MS);
         continue;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -297,7 +316,7 @@ async function syncBook(state) {
         `[futures-ob] ${sym}: snapshot attempt ${attempt} error (${err.message}), retrying in ${backoffMs}ms...`,
       );
       await new Promise(r => setTimeout(r, backoffMs));
-      backoffMs = Math.min(backoffMs * 2, 60_000);
+      backoffMs = Math.min(backoffMs * 2, RESYNC_BACKOFF_MAX_MS);
     }
   }
 
@@ -399,12 +418,23 @@ function connectOrderbook(symbol) {
     if (msg.u <= state.lastUpdateId) return;
 
     if (msg.U > state.lastUpdateId + 1) {
+      const now = Date.now();
+      const msSinceLast = now - (state.lastResyncAt || 0);
+
+      // Cooldown: drop the gap event if too soon
+      if (msSinceLast < RESYNC_COOLDOWN_MS && state.lastResyncAt !== 0) {
+        state.resyncSkippedCooldown = (state.resyncSkippedCooldown || 0) + 1;
+        console.warn(
+          `[futures-ob] ${symbol}: live gap skipped — cooldown (${Math.round(msSinceLast)}ms < ${RESYNC_COOLDOWN_MS}ms)` +
+          ` skippedTotal=${state.resyncSkippedCooldown}`,
+        );
+        return;
+      }
+
       state.resyncCount = (state.resyncCount || 0) + 1;
       state.synced = false;
       state.buffer = [msg];
 
-      const now = Date.now();
-      const msSinceLast = now - (state.lastResyncAt || 0);
       const delay = Math.max(0, RESYNC_COOLDOWN_MS - msSinceLast);
       state.lastResyncAt = now;
 
@@ -430,17 +460,65 @@ function connectOrderbook(symbol) {
   });
 
   ws.on('close', code => {
-    console.warn(`[futures-ob] ${symbol}: WS closed (code=${code}), reconnecting in ${RECONNECT_DELAY_MS}ms...`);
-    setTimeout(() => connectOrderbook(symbol), RECONNECT_DELAY_MS);
+    const backoffRemaining = Math.max(0, (state.rateLimitBackoffUntilMs || 0) - Date.now());
+    const reconnectDelay   = Math.max(RECONNECT_DELAY_MS, backoffRemaining);
+    if (backoffRemaining > 0) {
+      console.warn(
+        `[futures-ob] ${symbol}: WS closed (code=${code}), reconnecting after rate-limit backoff in ${Math.ceil(reconnectDelay / 1000)}s...`,
+      );
+    } else {
+      console.warn(`[futures-ob] ${symbol}: WS closed (code=${code}), reconnecting in ${RECONNECT_DELAY_MS}ms...`);
+    }
+    setTimeout(() => connectOrderbook(symbol), reconnectDelay);
   });
 }
 
+// ─── Periodic stats logger ────────────────────────────────────────
+function startStatsLogger(symbols) {
+  setInterval(() => {
+    for (const sym of symbols) {
+      const state = bookStates.get(sym);
+      if (!state) continue;
+      const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
+      console.log(
+        `[futures-ob:stats] ${sym}:` +
+        ` synced=${state.synced}` +
+        ` snapshotFetches=${state.snapshotFetchCount}` +
+        ` resyncs=${state.resyncCount}` +
+        ` skippedCooldown=${state.resyncSkippedCooldown || 0}` +
+        ` rateLimits=${state.rateLimitCount || 0}` +
+        ` inBackoff=${inBackoff}`,
+      );
+    }
+  }, STATS_LOG_INTERVAL_MS);
+}
+
 // ─── Public API ───────────────────────────────────────────────────
+function startStatsLogger(symbols) {
+  setInterval(() => {
+    for (const sym of symbols) {
+      const state = bookStates.get(sym);
+      if (!state) continue;
+      const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
+      console.log(
+        `[futures-ob:stats] ${sym}:` +
+        ` synced=${state.synced}` +
+        ` snapshotFetches=${state.snapshotFetchCount}` +
+        ` resyncs=${state.resyncCount}` +
+        ` skippedCooldown=${state.resyncSkippedCooldown || 0}` +
+        ` rateLimits=${state.rateLimitCount || 0}` +
+        ` inBackoff=${inBackoff}`,
+      );
+    }
+  }, STATS_LOG_INTERVAL_MS);
+}
+
 function start(redis) {
   const symbols = getWatchlistSymbols();
   console.log(`[futures-ob] Starting futures orderbook collector for: ${symbols.join(', ')}`);
 
   startVolumeRefresh(symbols);
+  startStatsLogger(symbols);
   startFlushTimer(redis);
 
   for (const sym of symbols) {

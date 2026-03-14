@@ -22,8 +22,9 @@ const { createAlertDeliveryService } = require('./services/alertDeliveryService'
 const { createOrderbookHandler }      = require('./routes/orderbookRoute');
 const { createOrderbookDebugHandler } = require('./routes/orderbookDebugRoute');
 const { createWallsHandler }          = require('./routes/wallsRoute');
-const { createDensityViewHandler }    = require('./routes/densityViewRoute');
-const { createDensitySummaryHandler } = require('./routes/densitySummaryRoute');
+const { createDensityViewHandler }      = require('./routes/densityViewRoute');
+const { createDensitySummaryHandler }   = require('./routes/densitySummaryRoute');
+const { createWallWatchlistHandler }    = require('./routes/wallWatchlistRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -368,6 +369,9 @@ app.get('/api/density-view', createDensityViewHandler(redis));
 
 console.log('[backend] registering /api/density-summary route');
 app.get('/api/density-summary', createDensitySummaryHandler(redis));
+
+console.log('[backend] registering /api/wall-watchlist route');
+app.get('/api/wall-watchlist', createWallWatchlistHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 

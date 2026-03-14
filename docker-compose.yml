@@ -73,6 +73,10 @@ services:
       KLINES_CACHE_TTL_MS: ${KLINES_CACHE_TTL_MS:-15000}
       # ── Debug-compare throttle (already hardcoded to 60s; kept here for visibility)
       ORDERBOOK_DEBUG_COMPARE_TTL_MS: ${ORDERBOOK_DEBUG_COMPARE_TTL_MS:-60000}
+      # ── Dynamic tracked symbols manager
+      DENSITY_TRACKED_SYMBOLS_LIMIT: ${DENSITY_TRACKED_SYMBOLS_LIMIT:-20}
+      DENSITY_TRACKED_REFRESH_MS: ${DENSITY_TRACKED_REFRESH_MS:-15000}
+      DENSITY_TRACKED_MIN_HOLD_MS: ${DENSITY_TRACKED_MIN_HOLD_MS:-60000}
     depends_on:
       mysql:
         condition: service_healthy
@@ -112,6 +116,8 @@ services:
       ORDERBOOK_RESYNC_COOLDOWN_MS: ${ORDERBOOK_RESYNC_COOLDOWN_MS:-15000}
       ORDERBOOK_RATE_LIMIT_BACKOFF_MS: ${ORDERBOOK_RATE_LIMIT_BACKOFF_MS:-10000}
       ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS: ${ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS:-300000}
+      # ── Dynamic tracked symbols (collector reads Redis key on startup + polls for new additions)
+      DENSITY_TRACKED_REFRESH_MS: ${DENSITY_TRACKED_REFRESH_MS:-15000}
     depends_on:
       mysql:
         condition: service_healthy

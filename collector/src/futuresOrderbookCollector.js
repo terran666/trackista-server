@@ -66,7 +66,7 @@ async function refreshVolumeCache(symbols) {
 
 function startVolumeRefresh(symbols) {
   refreshVolumeCache(symbols);
-  setInterval(() => refreshVolumeCache(symbols), VOLUME_REFRESH_MS);
+  setInterval(() => refreshVolumeCache([...bookStates.keys()]), VOLUME_REFRESH_MS);
 }
 
 // ─── Wall lifetime state ──────────────────────────────────────────
@@ -102,14 +102,22 @@ function applyWallLifetime(symbol, walls, now) {
 }
 
 // ─── Watchlist ────────────────────────────────────────────────────
-function getWatchlistSymbols() {
+async function getWatchlistSymbols(redis) {
+  try {
+    const raw = await redis.get('density:symbols:tracked:futures');
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.symbols) && data.symbols.length > 0) {
+        console.log(`[futures-ob] using dynamic tracked list (${data.symbols.length} symbols)`);
+        return data.symbols;
+      }
+    }
+  } catch (_) {}
+  // Fallback: static ENV list
   const raw = process.env.FUTURES_ORDERBOOK_SYMBOLS ||
               process.env.ORDERBOOK_SYMBOLS ||
               'BTCUSDT';
-  return raw
-    .split(',')
-    .map(s => s.trim().toUpperCase())
-    .filter(Boolean);
+  return raw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 }
 
 // ─── Per-symbol book state ────────────────────────────────────────
@@ -474,11 +482,9 @@ function connectOrderbook(symbol) {
 }
 
 // ─── Periodic stats logger ────────────────────────────────────────
-function startStatsLogger(symbols) {
+function startStatsLogger() {
   setInterval(() => {
-    for (const sym of symbols) {
-      const state = bookStates.get(sym);
-      if (!state) continue;
+    for (const [sym, state] of bookStates.entries()) {
       const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
       console.log(
         `[futures-ob:stats] ${sym}:` +
@@ -491,6 +497,31 @@ function startStatsLogger(symbols) {
       );
     }
   }, STATS_LOG_INTERVAL_MS);
+}
+
+function startSymbolWatcher(redis) {
+  const CHECK_MS = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  setInterval(async () => {
+    try {
+      const raw = await redis.get('density:symbols:tracked:futures');
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data.symbols)) return;
+      let added = 0;
+      for (const sym of data.symbols) {
+        if (!bookStates.has(sym)) {
+          console.log(`[futures-ob] symbol watcher: dynamically adding ${sym}`);
+          connectOrderbook(sym);
+          added++;
+        }
+      }
+      if (added > 0) {
+        console.log(`[futures-ob] symbol watcher: added ${added} new symbol(s), total=${bookStates.size + added}`);
+      }
+    } catch (err) {
+      console.error('[futures-ob] symbol watcher error:', err.message);
+    }
+  }, CHECK_MS);
 }
 
 // ─── Public API ───────────────────────────────────────────────────
@@ -513,13 +544,14 @@ function startStatsLogger(symbols) {
   }, STATS_LOG_INTERVAL_MS);
 }
 
-function start(redis) {
-  const symbols = getWatchlistSymbols();
+async function start(redis) {
+  const symbols = await getWatchlistSymbols(redis);
   console.log(`[futures-ob] Starting futures orderbook collector for: ${symbols.join(', ')}`);
 
   startVolumeRefresh(symbols);
-  startStatsLogger(symbols);
+  startStatsLogger();
   startFlushTimer(redis);
+  startSymbolWatcher(redis);
 
   for (const sym of symbols) {
     connectOrderbook(sym);

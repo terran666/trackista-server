@@ -62,7 +62,9 @@ async function refreshVolumeCache(symbols) {
 
 function startVolumeRefresh(symbols) {
   refreshVolumeCache(symbols); // initial fetch (fire-and-forget)
-  setInterval(() => refreshVolumeCache(symbols), VOLUME_REFRESH_MS);
+  // Use bookStates.keys() on each tick so symbols added dynamically
+  // after startup are included in subsequent hourly refreshes.
+  setInterval(() => refreshVolumeCache([...bookStates.keys()]), VOLUME_REFRESH_MS);
 }
 
 // ─── Wall lifetime state store ────────────────────────────────────
@@ -120,19 +122,29 @@ function applyWallLifetime(symbol, walls, now) {
 
 // ─── Watchlist ────────────────────────────────────────────────────
 //
-// ORDERBOOK_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+// On startup: reads density:symbols:tracked:spot from Redis (written by
+// the backend dynamicTrackedSymbolsManager).  Falls back to the
+// ORDERBOOK_SYMBOLS env var when the manager hasn't run yet.
 //
-// Architecture note: this function is the single entry point for the
-// symbol list.  To add a dynamic watchlist manager later, replace this
-// function with one that reads from Redis or a DB at runtime — the rest
-// of the collector does not need to change.
+// At runtime: startSymbolWatcher() re-reads the Redis key on every
+// DENSITY_TRACKED_REFRESH_MS interval and calls connectOrderbook() for
+// any newly-tracked symbols not yet in bookStates (one-way expansion;
+// removal happens on collector restart).
 //
-function getWatchlistSymbols() {
+async function getWatchlistSymbols(redis) {
+  try {
+    const raw = await redis.get('density:symbols:tracked:spot');
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.symbols) && data.symbols.length > 0) {
+        console.log(`[orderbook] using dynamic tracked list (${data.symbols.length} symbols)`);
+        return data.symbols;
+      }
+    }
+  } catch (_) {}
+  // Fallback: static ENV list
   const raw = process.env.ORDERBOOK_SYMBOLS || 'BTCUSDT';
-  return raw
-    .split(',')
-    .map(s => s.trim().toUpperCase())
-    .filter(Boolean);
+  return raw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 }
 
 // ─── Per-symbol book state ────────────────────────────────────────
@@ -541,11 +553,9 @@ function connectOrderbook(symbol) {
 
 // ─── Public API ───────────────────────────────────────────────────
 
-function startStatsLogger(symbols) {
+function startStatsLogger() {
   setInterval(() => {
-    for (const sym of symbols) {
-      const state = bookStates.get(sym);
-      if (!state) continue;
+    for (const [sym, state] of bookStates.entries()) {
       const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
       console.log(
         `[orderbook:stats] ${sym}:` +
@@ -560,16 +570,48 @@ function startStatsLogger(symbols) {
   }, STATS_LOG_INTERVAL_MS);
 }
 
-function start(redis) {
-  const symbols = getWatchlistSymbols();
+// ─── Dynamic symbol expansion ────────────────────────────────────
+//
+// Polls density:symbols:tracked:spot every DENSITY_TRACKED_REFRESH_MS and
+// starts a WS connection for any newly-tracked symbol not yet in bookStates.
+// Symbols are never removed mid-session — removal happens on restart.
+//
+function startSymbolWatcher(redis) {
+  const CHECK_MS = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  setInterval(async () => {
+    try {
+      const raw = await redis.get('density:symbols:tracked:spot');
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data.symbols)) return;
+      let added = 0;
+      for (const sym of data.symbols) {
+        if (!bookStates.has(sym)) {
+          console.log(`[orderbook] symbol watcher: dynamically adding ${sym}`);
+          connectOrderbook(sym);
+          added++;
+        }
+      }
+      if (added > 0) {
+        console.log(`[orderbook] symbol watcher: added ${added} new symbol(s), total=${bookStates.size + added}`);
+      }
+    } catch (err) {
+      console.error('[orderbook] symbol watcher error:', err.message);
+    }
+  }, CHECK_MS);
+}
+
+async function start(redis) {
+  const symbols = await getWatchlistSymbols(redis);
   console.log(`[orderbook] Starting orderbook collector for: ${symbols.join(', ')}`);
 
   // Fetch 24h volumes immediately and refresh every hour so that wall
   // detection thresholds stay accurate as market conditions change.
   startVolumeRefresh(symbols);
-  startStatsLogger(symbols);
+  startStatsLogger();
 
   startFlushTimer(redis);
+  startSymbolWatcher(redis);
 
   for (const sym of symbols) {
     connectOrderbook(sym);

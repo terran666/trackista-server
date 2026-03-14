@@ -24,7 +24,9 @@ const { createOrderbookDebugHandler } = require('./routes/orderbookDebugRoute');
 const { createWallsHandler }          = require('./routes/wallsRoute');
 const { createDensityViewHandler }      = require('./routes/densityViewRoute');
 const { createDensitySummaryHandler }   = require('./routes/densitySummaryRoute');
-const { createWallWatchlistHandler }    = require('./routes/wallWatchlistRoute');
+const { createWallWatchlistHandler }        = require('./routes/wallWatchlistRoute');
+const { createDensityTrackedSymbolsHandler } = require('./routes/densityTrackedSymbolsRoute');
+const dynamicTrackedSymbolsManager           = require('./services/density/dynamicTrackedSymbolsManager');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -77,6 +79,8 @@ alertEngine.start();
 
 const impulse       = createMarketImpulseService(redis, alertDelivery);
 impulse.start();
+
+dynamicTrackedSymbolsManager.start(redis);
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -372,6 +376,9 @@ app.get('/api/density-summary', createDensitySummaryHandler(redis));
 
 console.log('[backend] registering /api/wall-watchlist route');
 app.get('/api/wall-watchlist', createWallWatchlistHandler(redis));
+
+console.log('[backend] registering /api/density-tracked-symbols route');
+app.get('/api/density-tracked-symbols', createDensityTrackedSymbolsHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 

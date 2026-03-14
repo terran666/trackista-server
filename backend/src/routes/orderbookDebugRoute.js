@@ -46,6 +46,12 @@ const BINANCE_DEPTH_LIMIT  = 1000;
 const MATCH_TOLERANCE_PCT  = 0.5;  // sizes within 0.5% are considered matching
 const MAX_LEVELS_PARAM     = 50;
 
+// ─── Rate limit: debug-compare is a MANUAL debug tool ────────────────────
+// Each call triggers a live Binance REST /depth fetch.
+// Never poll this from production UI code.
+const DEBUG_COOLDOWN_MS = 60_000; // 60s between calls per symbol+marketType
+const lastDebugCallTs   = new Map(); // key: `${symbol}:${marketType}`
+
 function createOrderbookDebugHandler(redis) {
   return async function orderbookDebugHandler(req, res) {
     // ── validate params ───────────────────────────────────────────
@@ -64,6 +70,30 @@ function createOrderbookDebugHandler(redis) {
     if (marketType !== 'spot' && marketType !== 'futures') {
       return res.status(400).json({ success: false, error: 'marketType must be "spot" or "futures"' });
     }
+
+    // ── Rate limit guard ─────────────────────────────────────────
+    const cooldownKey = `${symbol}:${marketType}`;
+    const lastCall    = lastDebugCallTs.get(cooldownKey) || 0;
+    const msSinceLast = Date.now() - lastCall;
+    if (msSinceLast < DEBUG_COOLDOWN_MS) {
+      const retryAfterSec = Math.ceil((DEBUG_COOLDOWN_MS - msSinceLast) / 1000);
+      console.warn(
+        `[orderbook/debug-compare] rate limited: ${symbol} ${marketType}` +
+        ` — retry in ${retryAfterSec}s`,
+      );
+      return res.status(429).json({
+        success: false,
+        error:   `debug-compare rate limited — this endpoint makes a live Binance REST call. Wait ${retryAfterSec}s.`,
+        symbol,
+        marketType,
+        retryAfterSec,
+      });
+    }
+    lastDebugCallTs.set(cooldownKey, Date.now());
+    console.warn(
+      `[orderbook/debug-compare] LIVE BINANCE REST CALL: symbol=${symbol} marketType=${marketType}` +
+      ` — manual debug tool, do not call from production UI`,
+    );
 
     const levels = Math.min(
       parseInt(req.query.levels, 10) || 20,

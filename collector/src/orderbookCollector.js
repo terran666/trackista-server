@@ -12,6 +12,11 @@ const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
 const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
 const VOLUME_REFRESH_MS  = 60 * 60 * 1000; // refresh 24h volumes every hour
 
+// ─── Rate limit safeguards ────────────────────────────────────────
+const RESYNC_COOLDOWN_MS     = 15_000; // min ms between live-gap resyncs per symbol
+const MAX_SYNC_RETRIES       = 3;      // max REST snapshot attempts on transient failure
+const RESYNC_BACKOFF_BASE_MS = 5_000;  // initial backoff on 429/418 — doubles each retry
+
 // ─── 24h volume cache ─────────────────────────────────────────────
 //
 // Map<symbol, quoteVolume24h (USDT)>
@@ -149,13 +154,17 @@ function getOrCreateBook(symbol) {
   if (!bookStates.has(symbol)) {
     bookStates.set(symbol, {
       symbol,
-      bids:         new Map(),
-      asks:         new Map(),
-      lastUpdateId: 0,
-      synced:       false,
-      buffer:       [],
-      dirty:        false,
-      updatedAt:    0,
+      bids:               new Map(),
+      asks:               new Map(),
+      lastUpdateId:       0,
+      synced:             false,
+      syncing:            false,  // true while syncBook is running (concurrency guard)
+      buffer:             [],
+      dirty:              false,
+      updatedAt:          0,
+      lastResyncAt:       0,      // timestamp of last live-gap resync attempt
+      resyncCount:        0,      // total live-gap resyncs since startup
+      snapshotFetchCount: 0,      // total REST /depth calls since startup
     });
   }
   return bookStates.get(symbol);
@@ -291,19 +300,62 @@ function startFlushTimer(redis) {
 //
 async function syncBook(state) {
   const sym = state.symbol;
-  console.log(`[orderbook] ${sym}: fetching REST depth snapshot (limit=${SNAPSHOT_LIMIT})...`);
 
-  let snapshot;
-  try {
-    const res = await fetch(
-      `${BINANCE_REST_BASE}/api/v3/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`,
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    snapshot = await res.json();
-  } catch (err) {
-    console.error(`[orderbook] ${sym}: REST snapshot failed — ${err.message}`);
+  // ── Concurrency guard ─────────────────────────────────────────
+  if (state.syncing) {
+    console.warn(`[orderbook] ${sym}: syncBook already in progress, skipping duplicate call`);
     return false;
   }
+  state.syncing = true;
+  state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
+  console.log(
+    `[orderbook] ${sym}: fetching REST depth snapshot` +
+    ` (limit=${SNAPSHOT_LIMIT} fetch#${state.snapshotFetchCount} totalResyncs=${state.resyncCount})`,
+  );
+
+  try {
+
+  // ── REST snapshot with 429/418 backoff ────────────────────────
+  let snapshot;
+  let attempt = 0;
+  let backoffMs = RESYNC_BACKOFF_BASE_MS;
+
+  while (attempt < MAX_SYNC_RETRIES) {
+    attempt++;
+    try {
+      const res = await fetch(
+        `${BINANCE_REST_BASE}/api/v3/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`,
+      );
+      if (res.status === 429 || res.status === 418) {
+        const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
+        const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : backoffMs;
+        console.error(
+          `[orderbook] ${sym}: Binance rate limit HTTP ${res.status}` +
+          ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}`,
+        );
+        await new Promise(r => setTimeout(r, waitMs));
+        backoffMs = Math.min(backoffMs * 2, 60_000);
+        continue;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      snapshot = await res.json();
+      break; // success
+    } catch (err) {
+      if (attempt >= MAX_SYNC_RETRIES) {
+        console.error(
+          `[orderbook] ${sym}: REST snapshot failed after ${MAX_SYNC_RETRIES} attempts — ${err.message}`,
+        );
+        return false;
+      }
+      console.warn(
+        `[orderbook] ${sym}: snapshot attempt ${attempt} error (${err.message}), retrying in ${backoffMs}ms...`,
+      );
+      await new Promise(r => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 60_000);
+    }
+  }
+
+  if (!snapshot) return false;
 
   const snapId = snapshot.lastUpdateId;
   console.log(
@@ -342,7 +394,7 @@ async function syncBook(state) {
         ` (U=${event.U} > lastUpdateId+1=${state.lastUpdateId + 1}), resyncing...`,
       );
       state.buffer = [];
-      return false;
+      return false; // syncBook will retry via connectOrderbook after ws.terminate()
     }
 
     applyEvent(state, event);
@@ -360,6 +412,10 @@ async function syncBook(state) {
     ` lastUpdateId=${state.lastUpdateId}`,
   );
   return true;
+
+  } finally {
+    state.syncing = false;
+  }
 }
 
 // ─── WS connection per symbol ─────────────────────────────────────
@@ -410,15 +466,26 @@ function connectOrderbook(symbol) {
 
     // Live sequence check: U must equal previous u + 1
     if (msg.U > state.lastUpdateId + 1) {
-      console.warn(
-        `[orderbook] ${symbol}: live sequence gap` +
-        ` (U=${msg.U} > lastUpdateId+1=${state.lastUpdateId + 1}), resyncing...`,
-      );
+      state.resyncCount = (state.resyncCount || 0) + 1;
       state.synced = false;
       state.buffer = [msg];
-      syncBook(state).then(ok => {
-        if (!ok) ws.terminate();
-      });
+
+      const now = Date.now();
+      const msSinceLast = now - (state.lastResyncAt || 0);
+      const delay = Math.max(0, RESYNC_COOLDOWN_MS - msSinceLast);
+      state.lastResyncAt = now;
+
+      console.warn(
+        `[orderbook] ${symbol}: live sequence gap` +
+        ` (U=${msg.U} expected=${state.lastUpdateId + 1})` +
+        ` resync#${state.resyncCount} in ${delay}ms`,
+      );
+
+      setTimeout(() => {
+        syncBook(state).then(ok => {
+          if (!ok) ws.terminate();
+        });
+      }, delay);
       return;
     }
 

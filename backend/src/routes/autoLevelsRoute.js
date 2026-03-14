@@ -1,68 +1,33 @@
 'use strict';
 
-const https = require('https');
 const { calculateAutoLevels, AUTO_LEVELS_DEFAULTS } = require('../engines/autolevels/autoLevelsEngine');
+const { getCachedBars, setCachedBars } = require('../utils/klinesCache');
+const { binanceFetch } = require('../utils/binanceRestLogger');
 
 const BINANCE_SPOT_BASE    = 'https://api.binance.com/api/v3/klines';
 const BINANCE_FUTURES_BASE = 'https://fapi.binance.com/fapi/v1/klines';
 
-// ─── In-memory klines cache ───────────────────────────────────────
-//
-// Prevents repeated Binance klines fetches for identical requests.
-// TTL is 15s by default (configurable via KLINES_CACHE_TTL_MS).
-// Cache key: "${symbol}:${tf}:${marketType}:${limit}"
-//
-const KLINES_CACHE_TTL_MS = parseInt(process.env.KLINES_CACHE_TTL_MS || '15000', 10);
-const klinesCache = new Map(); // key → { bars, expiresAt }
-
-function getCachedBars(key) {
-  const entry = klinesCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    klinesCache.delete(key);
-    return null;
-  }
-  return entry.bars;
-}
-
-function setCachedBars(key, bars) {
-  klinesCache.set(key, { bars, expiresAt: Date.now() + KLINES_CACHE_TTL_MS });
-  // Evict expired entries when cache grows (simple GC)
-  if (klinesCache.size > 200) {
-    const now = Date.now();
-    for (const [k, v] of klinesCache) {
-      if (now > v.expiresAt) klinesCache.delete(k);
-    }
-  }
-}
-
-function fetchJson(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, res => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(e); }
-      });
-    }).on('error', reject);
-  });
-}
+// klines cache is shared — see backend/src/utils/klinesCache.js
 
 function fetchBars(symbol, interval, limit, marketType) {
   const base  = marketType === 'futures' ? BINANCE_FUTURES_BASE : BINANCE_SPOT_BASE;
   const url   = `${base}?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  return fetchJson(url).then(raw => {
-    if (!Array.isArray(raw)) return [];
-    return raw.map(k => ({
-      timestamp: Number(k[0]),
-      open:      Number(k[1]),
-      high:      Number(k[2]),
-      low:       Number(k[3]),
-      close:     Number(k[4]),
-      volume:    Number(k[5]),
-    }));
-  });
+  return binanceFetch(url, undefined, 'autoLevelsRoute', symbol, `klines:${interval}:${limit}`)
+    .then(res => {
+      if (!res.ok) throw new Error(`Binance ${res.status}`);
+      return res.json();
+    })
+    .then(raw => {
+      if (!Array.isArray(raw)) return [];
+      return raw.map(k => ({
+        timestamp: Number(k[0]),
+        open:      Number(k[1]),
+        high:      Number(k[2]),
+        low:       Number(k[3]),
+        close:     Number(k[4]),
+        volume:    Number(k[5]),
+      }));
+    });
 }
 
 function parseBool(val, fallback) {

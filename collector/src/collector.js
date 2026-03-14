@@ -2,6 +2,7 @@
 
 const WebSocket = require('ws');
 const Redis     = require('ioredis');
+const { binanceFetch } = require('./binanceRestLogger');
 
 // ─── Configuration ───────────────────────────────────────────────
 const REDIS_HOST            = process.env.REDIS_HOST || 'localhost';
@@ -33,8 +34,8 @@ redis.on('connect', () => console.log('[collector] Connected to Redis'));
 redis.on('error',   (err) => console.error('[collector] Redis error:', err.message));
 
 // ─── REST helper ─────────────────────────────────────────────────
-async function fetchJSON(url) {
-  const res = await fetch(url);
+async function fetchJSON(url, service, symbol, reason) {
+  const res = await binanceFetch(url, undefined, service || 'collector', symbol || '*', reason || '');
   if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
   return res.json();
 }
@@ -52,7 +53,7 @@ function isStablecoin(asset) {
 // ─── Symbol fetching & filtering ─────────────────────────────────
 async function fetchValidSymbols() {
   console.log('[collector] Fetching exchangeInfo from Binance...');
-  const exchangeInfo = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/exchangeInfo`);
+  const exchangeInfo = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/exchangeInfo`, 'collector', '*', 'exchangeInfo');
 
   // Build map: symbol → baseAsset for all TRADING/USDT pairs
   const tradingUsdtMap = new Map(); // symbol → baseAsset
@@ -64,7 +65,7 @@ async function fetchValidSymbols() {
   console.log(`[collector] exchangeInfo: ${exchangeInfo.symbols.length} total symbols, ${tradingUsdtMap.size} active USDT pairs`);
 
   console.log('[collector] Fetching ticker/24hr from Binance...');
-  const tickers = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/ticker/24hr`);
+  const tickers = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/ticker/24hr`, 'collector', '*', 'ticker24hr');
 
   const validSymbols = [];
   let excludedStatus     = 0;

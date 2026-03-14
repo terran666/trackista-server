@@ -2,6 +2,7 @@
 
 const WebSocket    = require('ws');
 const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
+const { binanceFetch } = require('./binanceRestLogger');
 
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://api.binance.com';
@@ -10,6 +11,7 @@ const TOP_LEVELS         = 200;         // top N bids / asks stored in Redis per
 const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth (full book)
 const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
 const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
+const STARTUP_STAGGER_MS = 400;         // ms between each symbol’s initial connectOrderbook()
 const VOLUME_REFRESH_MS  = 60 * 60 * 1000; // refresh 24h volumes every hour
 
 // ─── Rate limit safeguards ────────────────────────────────────────
@@ -18,6 +20,30 @@ const MAX_SYNC_RETRIES       = 3;
 const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS  || '10000', 10);
 const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS || '300000', 10);
 const STATS_LOG_INTERVAL_MS  = 60_000; // print per-symbol stats every 60s
+
+// ─── Global IP-level backoff ─────────────────────────────────────────────────
+//
+// Binance 418 = IP-level temporary ban. Unlike 429 (per-endpoint throttle)
+// a 418 means ALL REST calls to api.binance.com from this IP will fail.
+// We track this globally so every subsequent syncBook can bail immediately
+// instead of piling on and extending the ban.
+//
+const globalBackoff = { until: 0 };
+
+function isGloballyBanned() {
+  return Date.now() < globalBackoff.until;
+}
+
+function setGlobalBackoff(durationMs) {
+  const newUntil = Date.now() + durationMs;
+  if (newUntil > globalBackoff.until) {
+    globalBackoff.until = newUntil;
+    console.error(
+      `[orderbook] GLOBAL IP BACKOFF set — all depth calls paused for ${Math.ceil(durationMs / 1000)}s` +
+      ` (until ${new Date(newUntil).toISOString()})`,
+    );
+  }
+}
 
 // ─── 24h volume cache ─────────────────────────────────────────────
 //
@@ -30,7 +56,7 @@ const volumeCache = new Map();
 async function refreshVolumeCache(symbols) {
   try {
     const url = `${BINANCE_REST_BASE}/api/v3/ticker/24hr`;
-    const res = await fetch(url);
+    const res = await binanceFetch(url, undefined, 'orderbookCollector', '*', 'volumeRefresh');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const tickers = await res.json();
 
@@ -331,6 +357,15 @@ async function syncBook(state) {
     );
     return false;
   }
+  // ── Global IP-level backoff guard ─────────────────────────────────────────
+  if (isGloballyBanned()) {
+    const globalRemaining = globalBackoff.until - Date.now();
+    state.syncing = false;
+    console.warn(
+      `[orderbook] ${sym}: global IP backoff active — skipping sync for ${Math.ceil(globalRemaining / 1000)}s`,
+    );
+    return false;
+  }
   state.syncing = true;
   state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
   console.log(
@@ -348,15 +383,26 @@ async function syncBook(state) {
   while (attempt < MAX_SYNC_RETRIES) {
     attempt++;
     try {
-      const res = await fetch(
+      const syncReason = state.resyncCount === 0 ? 'initialSync' : `resync#${state.resyncCount}`;
+      const res = await binanceFetch(
         `${BINANCE_REST_BASE}/api/v3/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`,
+        undefined,
+        'orderbookCollector',
+        sym,
+        syncReason,
       );
+      if (res.status === 400) {
+        console.warn(`[orderbook] ${sym}: HTTP 400 from depth — symbol may not exist on spot, skipping`);
+        return false;
+      }
       if (res.status === 429 || res.status === 418) {
         const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
         const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : backoffMs;
+        const boundedWait = Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
         state.rateLimitCount = (state.rateLimitCount || 0) + 1;
         // Store backoff in state so reconnect loop knows to wait
-        state.rateLimitBackoffUntilMs = Date.now() + Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
+        state.rateLimitBackoffUntilMs = Date.now() + boundedWait;
+        if (res.status === 418) setGlobalBackoff(boundedWait);
         console.error(
           `[orderbook] ${sym}: Binance rate limit HTTP ${res.status}` +
           ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
@@ -570,31 +616,45 @@ function startStatsLogger() {
   }, STATS_LOG_INTERVAL_MS);
 }
 
+// ─── Pending-connection guard ───────────────────────────────────────
+// Symbols queued for staggered connection but not yet in bookStates.
+// Prevents the symbol watcher from double-connecting a symbol that was
+// already scheduled but whose WS hasn't opened yet.
+const pendingSymbols = new Set();
+
 // ─── Dynamic symbol expansion ────────────────────────────────────
 //
 // Polls density:symbols:tracked:spot every DENSITY_TRACKED_REFRESH_MS and
 // starts a WS connection for any newly-tracked symbol not yet in bookStates.
 // Symbols are never removed mid-session — removal happens on restart.
+// New symbols are staggered 1500 ms apart to avoid a REST depth burst.
 //
 function startSymbolWatcher(redis) {
-  const CHECK_MS = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  const CHECK_MS    = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  const ADD_STAGGER = 1500; // ms between each newly-discovered symbol’s connection
   setInterval(async () => {
     try {
       const raw = await redis.get('density:symbols:tracked:spot');
       if (!raw) return;
       const data = JSON.parse(raw);
       if (!Array.isArray(data.symbols)) return;
-      let added = 0;
-      for (const sym of data.symbols) {
-        if (!bookStates.has(sym)) {
-          console.log(`[orderbook] symbol watcher: dynamically adding ${sym}`);
+
+      const newSymbols = data.symbols.filter(sym => !bookStates.has(sym) && !pendingSymbols.has(sym));
+      if (newSymbols.length === 0) return;
+
+      console.log(
+        `[orderbook] symbol watcher: queuing ${newSymbols.length} new symbol(s)` +
+        ` (staggered by ${ADD_STAGGER}ms each)...`,
+      );
+
+      newSymbols.forEach((sym, i) => {
+        pendingSymbols.add(sym);
+        setTimeout(() => {
+          pendingSymbols.delete(sym);
+          console.log(`[orderbook] symbol watcher: connecting ${sym} (${i + 1}/${newSymbols.length})`);
           connectOrderbook(sym);
-          added++;
-        }
-      }
-      if (added > 0) {
-        console.log(`[orderbook] symbol watcher: added ${added} new symbol(s), total=${bookStates.size + added}`);
-      }
+        }, i * ADD_STAGGER);
+      });
     } catch (err) {
       console.error('[orderbook] symbol watcher error:', err.message);
     }
@@ -613,9 +673,12 @@ async function start(redis) {
   startFlushTimer(redis);
   startSymbolWatcher(redis);
 
-  for (const sym of symbols) {
-    connectOrderbook(sym);
-  }
+  // Stagger initial connections to spread the burst of REST depth fetches.
+  // Without stagger, all N symbols fire /api/v3/depth simultaneously.
+  console.log(`[orderbook] connecting ${symbols.length} symbols (stagger=${STARTUP_STAGGER_MS}ms each)...`);
+  symbols.forEach((sym, i) => {
+    setTimeout(() => connectOrderbook(sym), i * STARTUP_STAGGER_MS);
+  });
 }
 
 module.exports = { start };

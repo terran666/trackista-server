@@ -2,6 +2,7 @@
 
 const WebSocket    = require('ws');
 const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
+const { binanceFetch } = require('./binanceRestLogger');
 
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://fapi.binance.com';
@@ -11,6 +12,7 @@ const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth
 const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
 const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
 const VOLUME_REFRESH_MS  = 60 * 60 * 1000;
+const STARTUP_STAGGER_MS = 400;         // ms between each symbol’s initial connectOrderbook()
 
 // ─── Rate limit safeguards ────────────────────────────────────────
 const RESYNC_COOLDOWN_MS     = parseInt(process.env.ORDERBOOK_RESYNC_COOLDOWN_MS     || '15000', 10);
@@ -18,6 +20,30 @@ const MAX_SYNC_RETRIES       = 3;
 const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS  || '10000', 10);
 const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS || '300000', 10);
 const STATS_LOG_INTERVAL_MS  = 60_000;
+
+// ─── Global IP-level backoff ────────────────────────────────────────────
+//
+// Binance 418 = IP-level temporary ban. Unlike 429 (per-symbol throttle)
+// a 418 means ALL REST calls to fapi.binance.com from this IP will fail.
+// We track this globally so every subsequent syncBook can bail immediately
+// instead of piling on and extending the ban.
+//
+const globalBackoff = { until: 0 };
+
+function isGloballyBanned() {
+  return Date.now() < globalBackoff.until;
+}
+
+function setGlobalBackoff(durationMs) {
+  const newUntil = Date.now() + durationMs;
+  if (newUntil > globalBackoff.until) {
+    globalBackoff.until = newUntil;
+    console.error(
+      `[futures-ob] GLOBAL IP BACKOFF set — all depth calls paused for ${Math.ceil(durationMs / 1000)}s` +
+      ` (until ${new Date(newUntil).toISOString()})`,
+    );
+  }
+}
 
 // ─── Redis key helpers ────────────────────────────────────────────
 // Futures data lives under a dedicated namespace so spot/futures
@@ -35,7 +61,7 @@ const volumeCache = new Map();
 async function refreshVolumeCache(symbols) {
   try {
     const url = `${BINANCE_REST_BASE}/fapi/v1/ticker/24hr`;
-    const res = await fetch(url);
+    const res = await binanceFetch(url, undefined, 'futuresOrderbookCollector', '*', 'volumeRefresh');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const tickers = await res.json();
 
@@ -268,12 +294,22 @@ async function syncBook(state) {
   state.syncing = true;
   state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
 
-  // ── Rate limit backoff guard ───────────────────────────────
+  // ── Rate limit backoff guard (per-symbol) ─────────────────────
   const backoffRemaining = state.rateLimitBackoffUntilMs - Date.now();
   if (backoffRemaining > 0) {
     state.syncing = false;
     console.warn(
       `[futures-ob] ${sym}: in rate-limit backoff — skipping sync for ${Math.ceil(backoffRemaining / 1000)}s`,
+    );
+    return false;
+  }
+
+  // ── Global IP-level backoff guard ─────────────────────────────
+  if (isGloballyBanned()) {
+    const globalRemaining = globalBackoff.until - Date.now();
+    state.syncing = false;
+    console.warn(
+      `[futures-ob] ${sym}: global IP backoff active — skipping sync for ${Math.ceil(globalRemaining / 1000)}s`,
     );
     return false;
   }
@@ -293,22 +329,34 @@ async function syncBook(state) {
   while (attempt < MAX_SYNC_RETRIES) {
     attempt++;
     try {
-      const res = await fetch(
+      const syncReason = state.resyncCount === 0 ? 'initialSync' : `resync#${state.resyncCount}`;
+      const res = await binanceFetch(
         `${BINANCE_REST_BASE}/fapi/v1/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`,
+        undefined,
+        'futuresOrderbookCollector',
+        sym,
+        syncReason,
       );
       if (res.status === 429 || res.status === 418) {
         const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
         const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : backoffMs;
+        const boundedWait = Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
         state.rateLimitCount = (state.rateLimitCount || 0) + 1;
-        state.rateLimitBackoffUntilMs = Date.now() + Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
+        state.rateLimitBackoffUntilMs = Date.now() + boundedWait;
+        // 418 = IP-level ban — block ALL depth calls globally, not just this symbol
+        if (res.status === 418) setGlobalBackoff(boundedWait);
         console.error(
           `[futures-ob] ${sym}: Binance rate limit HTTP ${res.status}` +
-          ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
+          ` — waiting ${boundedWait}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
           ` rateLimitCount=${state.rateLimitCount}`,
         );
         await new Promise(r => setTimeout(r, waitMs));
         backoffMs = Math.min(backoffMs * 2, RESYNC_BACKOFF_MAX_MS);
         continue;
+      }
+      if (res.status === 400) {
+        console.warn(`[futures-ob] ${sym}: HTTP 400 from depth — symbol may not exist on futures, skipping`);
+        return false;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       snapshot = await res.json();
@@ -499,49 +547,39 @@ function startStatsLogger() {
   }, STATS_LOG_INTERVAL_MS);
 }
 
+// ─── Pending-connection guard ─────────────────────────────────────────────────
+const pendingSymbols = new Set();
+
 function startSymbolWatcher(redis) {
-  const CHECK_MS = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  const CHECK_MS    = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
+  const ADD_STAGGER = 1500;
   setInterval(async () => {
     try {
       const raw = await redis.get('density:symbols:tracked:futures');
       if (!raw) return;
       const data = JSON.parse(raw);
       if (!Array.isArray(data.symbols)) return;
-      let added = 0;
-      for (const sym of data.symbols) {
-        if (!bookStates.has(sym)) {
-          console.log(`[futures-ob] symbol watcher: dynamically adding ${sym}`);
+
+      const newSymbols = data.symbols.filter(sym => !bookStates.has(sym) && !pendingSymbols.has(sym));
+      if (newSymbols.length === 0) return;
+
+      console.log(
+        `[futures-ob] symbol watcher: queuing ${newSymbols.length} new symbol(s)` +
+        ` (staggered by ${ADD_STAGGER}ms each)...`,
+      );
+
+      newSymbols.forEach((sym, i) => {
+        pendingSymbols.add(sym);
+        setTimeout(() => {
+          pendingSymbols.delete(sym);
+          console.log(`[futures-ob] symbol watcher: connecting ${sym} (${i + 1}/${newSymbols.length})`);
           connectOrderbook(sym);
-          added++;
-        }
-      }
-      if (added > 0) {
-        console.log(`[futures-ob] symbol watcher: added ${added} new symbol(s), total=${bookStates.size + added}`);
-      }
+        }, i * ADD_STAGGER);
+      });
     } catch (err) {
       console.error('[futures-ob] symbol watcher error:', err.message);
     }
   }, CHECK_MS);
-}
-
-// ─── Public API ───────────────────────────────────────────────────
-function startStatsLogger(symbols) {
-  setInterval(() => {
-    for (const sym of symbols) {
-      const state = bookStates.get(sym);
-      if (!state) continue;
-      const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
-      console.log(
-        `[futures-ob:stats] ${sym}:` +
-        ` synced=${state.synced}` +
-        ` snapshotFetches=${state.snapshotFetchCount}` +
-        ` resyncs=${state.resyncCount}` +
-        ` skippedCooldown=${state.resyncSkippedCooldown || 0}` +
-        ` rateLimits=${state.rateLimitCount || 0}` +
-        ` inBackoff=${inBackoff}`,
-      );
-    }
-  }, STATS_LOG_INTERVAL_MS);
 }
 
 async function start(redis) {
@@ -553,9 +591,11 @@ async function start(redis) {
   startFlushTimer(redis);
   startSymbolWatcher(redis);
 
-  for (const sym of symbols) {
-    connectOrderbook(sym);
-  }
+  // Stagger initial connections to spread REST depth burst.
+  console.log(`[futures-ob] connecting ${symbols.length} symbols (stagger=${STARTUP_STAGGER_MS}ms each)...`);
+  symbols.forEach((sym, i) => {
+    setTimeout(() => connectOrderbook(sym), i * STARTUP_STAGGER_MS);
+  });
 }
 
 module.exports = { start };

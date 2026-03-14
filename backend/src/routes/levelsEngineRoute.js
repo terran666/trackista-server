@@ -1,38 +1,13 @@
 'use strict';
 
 const { calculateLevels } = require('../engines/levels/levelsEngine');
+const { getCachedBars, setCachedBars } = require('../utils/klinesCache');
+const { binanceFetch } = require('../utils/binanceRestLogger');
 
 const BINANCE_SPOT_BASE    = 'https://api.binance.com';
 const BINANCE_FUTURES_BASE = 'https://fapi.binance.com';
 
-// ─── In-memory klines cache ───────────────────────────────────────
-//
-// Prevents repeated Binance klines fetches for identical requests.
-// TTL is read from KLINES_CACHE_TTL_MS env (shared with autoLevelsRoute).
-// Cache key: "${symbol}:${interval}:${marketType}:${limit}"
-//
-const KLINES_CACHE_TTL_MS = parseInt(process.env.KLINES_CACHE_TTL_MS || '15000', 10);
-const klinesCache = new Map(); // key → { bars, expiresAt }
-
-function getCachedBars(key) {
-  const entry = klinesCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    klinesCache.delete(key);
-    return null;
-  }
-  return entry.bars;
-}
-
-function setCachedBars(key, bars) {
-  klinesCache.set(key, { bars, expiresAt: Date.now() + KLINES_CACHE_TTL_MS });
-  if (klinesCache.size > 200) {
-    const now = Date.now();
-    for (const [k, v] of klinesCache) {
-      if (now > v.expiresAt) klinesCache.delete(k);
-    }
-  }
-}
+// klines cache is shared — see backend/src/utils/klinesCache.js
 
 const VALID_INTERVALS = new Set([
   '1m','3m','5m','15m','30m',
@@ -78,7 +53,7 @@ async function fetchBars(symbol, interval, limit, marketType){
 
   const url = `${base}${path}?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
 
-  const res = await fetch(url);
+  const res = await binanceFetch(url, undefined, 'levelsEngineRoute', symbol, `klines:${interval}:${limit}`);
 
   if(!res.ok){
 

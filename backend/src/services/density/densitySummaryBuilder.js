@@ -235,8 +235,11 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
 /**
  * Build a density summary for the requested symbol list.
  *
- * Reads (per symbol) via a single Redis pipeline:
- *   orderbook:${sym}  walls:${sym}  metrics:${sym}  signal:${sym}
+ * For spot:    orderbook:${sym}         walls:${sym}
+ *             metrics:${sym}            signal:${sym}
+ *
+ * For futures: futures:orderbook:${sym} futures:walls:${sym}
+ *             metrics:${sym}            signal:${sym}  (spot metrics reused)
  *
  * Returns items sorted by activityScore DESC (nulls last).
  *
@@ -244,21 +247,25 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
  * @param {{
  *   symbolsParam?: string,
  *   limit?:        number,
+ *   marketType?:   'spot' | 'futures',
  * }} opts
- * @returns {Promise<{ symbols: string[], items: object[] }>}
+ * @returns {Promise<{ symbols: string[], items: object[], marketType: string }>}
  */
-async function buildDensitySummary(redis, { symbolsParam, limit } = {}) {
+async function buildDensitySummary(redis, { symbolsParam, limit, marketType = 'spot' } = {}) {
+  const mt      = marketType === 'futures' ? 'futures' : 'spot';
   const symbols = await resolveSymbols(redis, symbolsParam, limit);
 
   if (symbols.length === 0) {
-    return { symbols: [], items: [] };
+    return { symbols: [], items: [], marketType: mt };
   }
 
   // ── One pipeline for all symbols, 4 keys each ──────────────────
+  // futures:orderbook / futures:walls for futures; spot keys otherwise.
+  // metrics and signal are always spot keys (spot collector only).
   const pipeline = redis.pipeline();
   for (const sym of symbols) {
-    pipeline.get(`orderbook:${sym}`);
-    pipeline.get(`walls:${sym}`);
+    pipeline.get(mt === 'futures' ? `futures:orderbook:${sym}` : `orderbook:${sym}`);
+    pipeline.get(mt === 'futures' ? `futures:walls:${sym}`     : `walls:${sym}`);
     pipeline.get(`metrics:${sym}`);
     pipeline.get(`signal:${sym}`);
   }
@@ -274,7 +281,9 @@ async function buildDensitySummary(redis, { symbolsParam, limit } = {}) {
     const metrics  = safeParse(results[base + 2][1]);
     const signal   = safeParse(results[base + 3][1]);
 
-    items.push(buildItem(symbol, ob, wallsDoc, metrics, signal));
+    const item = buildItem(symbol, ob, wallsDoc, metrics, signal);
+    item.marketType = mt;
+    items.push(item);
   }
 
   // Sort by activityScore DESC, nulls at the end
@@ -285,7 +294,7 @@ async function buildDensitySummary(redis, { symbolsParam, limit } = {}) {
     return b.activityScore - a.activityScore;
   });
 
-  return { symbols, items };
+  return { symbols, items, marketType: mt };
 }
 
 module.exports = { buildDensitySummary };

@@ -526,9 +526,15 @@ async function start() {
 
 start();
 
-// ─── Orderbook collector ──────────────────────────────────────────
-// Runs independently of the trade collector — maintains a local order
-// book for each symbol in ORDERBOOK_SYMBOLS and writes normalised
-// top-50 snapshots to Redis (key: orderbook:${symbol}).
+// ─── Spot orderbook collector ─────────────────────────────────────
+// Maintains a local spot order book for each symbol in ORDERBOOK_SYMBOLS.
+// Writes to Redis keys: orderbook:${symbol}  walls:${symbol}
 const orderbookCollector = require('./orderbookCollector');
 orderbookCollector.start(redis);
+
+// ─── Futures orderbook collector ──────────────────────────────────
+// Maintains a local futures order book using Binance Futures endpoints.
+// Symbols: FUTURES_ORDERBOOK_SYMBOLS (falls back to ORDERBOOK_SYMBOLS).
+// Writes to Redis keys: futures:orderbook:${symbol}  futures:walls:${symbol}
+const futuresOrderbookCollector = require('./futuresOrderbookCollector');
+futuresOrderbookCollector.start(redis);

@@ -43,17 +43,26 @@ const { buildDensitySummary } = require('../services/density/densitySummaryBuild
 //
 function createDensitySummaryHandler(redis) {
   return async function densitySummaryHandler(req, res) {
-    const symbolsParam = (req.query.symbols || '').trim() || undefined;
+    const symbolsParam = (req.query.symbols    || '').trim() || undefined;
     const limitRaw     = parseInt(req.query.limit || '0', 10);
     const limit        = limitRaw > 0 ? limitRaw : undefined;
+    const marketType   = (req.query.marketType || 'spot').toLowerCase();
+
+    if (marketType !== 'spot' && marketType !== 'futures') {
+      return res.status(400).json({
+        success: false,
+        error:   'Query param "marketType" must be "spot" or "futures"',
+      });
+    }
 
     try {
-      const { items } = await buildDensitySummary(redis, { symbolsParam, limit });
+      const { items, marketType: mt } = await buildDensitySummary(redis, { symbolsParam, limit, marketType });
 
-      console.log(`[density-summary] GET /api/density-summary count=${items.length}`);
+      console.log(`[density-summary] GET /api/density-summary marketType=${mt} count=${items.length}`);
       return res.json({
-        success: true,
-        count:   items.length,
+        success:    true,
+        marketType: mt,
+        count:      items.length,
         items,
       });
     } catch (err) {

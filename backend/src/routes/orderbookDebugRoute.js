@@ -40,7 +40,8 @@
 // MATCH_TOLERANCE_PCT of each other (default 0.5% — allows for normal
 // order-fill updates between fetch and snapshot timestamps).
 //
-const BINANCE_REST_BASE    = 'https://api.binance.com';
+const BINANCE_SPOT_REST    = 'https://api.binance.com';
+const BINANCE_FUTURES_REST = 'https://fapi.binance.com';
 const BINANCE_DEPTH_LIMIT  = 1000;
 const MATCH_TOLERANCE_PCT  = 0.5;  // sizes within 0.5% are considered matching
 const MAX_LEVELS_PARAM     = 50;
@@ -48,7 +49,8 @@ const MAX_LEVELS_PARAM     = 50;
 function createOrderbookDebugHandler(redis) {
   return async function orderbookDebugHandler(req, res) {
     // ── validate params ───────────────────────────────────────────
-    const symbol = (req.query.symbol || '').toUpperCase().trim();
+    const symbol     = (req.query.symbol     || '').toUpperCase().trim();
+    const marketType = (req.query.marketType || 'spot').toLowerCase();
     if (!symbol) {
       return res.status(400).json({
         success: false,
@@ -59,6 +61,9 @@ function createOrderbookDebugHandler(redis) {
     if (!/^[A-Z0-9]{2,20}$/.test(symbol)) {
       return res.status(400).json({ success: false, error: 'Invalid symbol format' });
     }
+    if (marketType !== 'spot' && marketType !== 'futures') {
+      return res.status(400).json({ success: false, error: 'marketType must be "spot" or "futures"' });
+    }
 
     const levels = Math.min(
       parseInt(req.query.levels, 10) || 20,
@@ -66,12 +71,17 @@ function createOrderbookDebugHandler(redis) {
     );
 
     // ── read local Trackista state from Redis ─────────────────────
-    const raw = await redis.get(`orderbook:${symbol}`).catch(() => null);
+    const redisKey = marketType === 'futures'
+      ? `futures:orderbook:${symbol}`
+      : `orderbook:${symbol}`;
+
+    const raw = await redis.get(redisKey).catch(() => null);
     if (!raw) {
       return res.status(404).json({
         success: false,
-        error:   'Orderbook not found in Redis — symbol not tracked or collector still syncing',
+        error:   `Orderbook not found in Redis — ${marketType} symbol not tracked or collector still syncing`,
         symbol,
+        marketType,
       });
     }
 
@@ -86,15 +96,17 @@ function createOrderbookDebugHandler(redis) {
     let binance;
     const binanceFetchedAt = Date.now();
     try {
-      const resp = await fetch(
-        `${BINANCE_REST_BASE}/api/v3/depth?symbol=${symbol}&limit=${BINANCE_DEPTH_LIMIT}`,
-      );
+      const base = marketType === 'futures' ? BINANCE_FUTURES_REST : BINANCE_SPOT_REST;
+      const path = marketType === 'futures'
+        ? `/fapi/v1/depth?symbol=${symbol}&limit=${BINANCE_DEPTH_LIMIT}`
+        : `/api/v3/depth?symbol=${symbol}&limit=${BINANCE_DEPTH_LIMIT}`;
+      const resp = await fetch(`${base}${path}`);
       if (!resp.ok) throw new Error(`Binance HTTP ${resp.status}`);
       binance = await resp.json();
     } catch (err) {
       return res.status(502).json({
         success: false,
-        error:   `Failed to fetch Binance snapshot: ${err.message}`,
+        error:   `Failed to fetch Binance ${marketType} snapshot: ${err.message}`,
       });
     }
 
@@ -182,14 +194,14 @@ function createOrderbookDebugHandler(redis) {
     }
 
     console.log(
-      `[orderbook/debug-compare] ${symbol}: ${summary}` +
+      `[orderbook/debug-compare] ${symbol} (${marketType}): ${summary}` +
       ` staleness=${staleness}ms levels=${levels}`,
     );
 
     return res.json({
       success:            true,
       symbol,
-      marketType:         'spot',
+      marketType,
       ladderMode:         'raw',
       levels,
       comparedLevels:     { bids: topBids.length, asks: topAsks.length },

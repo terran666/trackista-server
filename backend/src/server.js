@@ -22,10 +22,12 @@ const { createAlertDeliveryService } = require('./services/alertDeliveryService'
 const { createOrderbookHandler }      = require('./routes/orderbookRoute');
 const { createOrderbookDebugHandler } = require('./routes/orderbookDebugRoute');
 const { createWallsHandler }          = require('./routes/wallsRoute');
+const { createWallsBatchHandler }      = require('./routes/wallsBatchRoute');
 const { createDensityViewHandler }      = require('./routes/densityViewRoute');
 const { createDensitySummaryHandler }   = require('./routes/densitySummaryRoute');
 const { createWallWatchlistHandler }        = require('./routes/wallWatchlistRoute');
 const { createDensityTrackedSymbolsHandler } = require('./routes/densityTrackedSymbolsRoute');
+const { createBinanceRateLimitStateHandler }  = require('./routes/binanceRateLimitStateRoute');
 const dynamicTrackedSymbolsManager           = require('./services/density/dynamicTrackedSymbolsManager');
 
 // ─── Configuration ───────────────────────────────────────────────
@@ -367,6 +369,9 @@ app.get('/api/orderbook/debug-compare', createOrderbookDebugHandler(redis));
 console.log('[backend] registering /api/walls route');
 app.get('/api/walls', createWallsHandler(redis));
 
+console.log('[backend] registering /api/walls-batch route');
+app.get('/api/walls-batch', createWallsBatchHandler(redis));
+
 // ─── Density endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/density-view route');
 app.get('/api/density-view', createDensityViewHandler(redis));
@@ -379,6 +384,10 @@ app.get('/api/wall-watchlist', createWallWatchlistHandler(redis));
 
 console.log('[backend] registering /api/density-tracked-symbols route');
 app.get('/api/density-tracked-symbols', createDensityTrackedSymbolsHandler(redis));
+
+// ─── Binance rate-limit state debug endpoint ──────────────────────
+console.log('[backend] registering /api/binance-rate-limit-state route');
+app.get('/api/binance-rate-limit-state', createBinanceRateLimitStateHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 

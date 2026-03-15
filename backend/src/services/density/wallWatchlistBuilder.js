@@ -111,10 +111,10 @@ async function resolveSymbols(redis, symbolsParam, limit) {
  */
 async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'spot' } = {}) {
   const mt      = marketType === 'futures' ? 'futures' : 'spot';
-  const symbols = await resolveSymbols(redis, symbolsParam, limit);
+  const symbols = await resolveSymbols(redis, symbolsParam, mt);
 
   if (symbols.length === 0) {
-    return { items: [], marketType: mt };
+    return { items: [], marketType: mt, updatedAt: Date.now() };
   }
 
   // Fetch 3 keys per symbol in one pipeline
@@ -152,6 +152,7 @@ async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'sp
 
     items.push({
       symbol,
+      tracked:      true,
       side:         bestWall.side,
       wallUsd:      bestWall.usdValue       ?? null,
       price:        bestWall.price          ?? null,
@@ -183,7 +184,11 @@ async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'sp
     return (b.wallUsd ?? 0) - (a.wallUsd ?? 0);
   });
 
-  return { items, marketType: mt };
+  // Apply limit after building rows so we limit on items with real walls
+  const cappedLimit = limit && limit > 0 ? Math.min(limit, MAX_LIMIT) : MAX_LIMIT;
+  const trimmed = items.slice(0, cappedLimit);
+
+  return { items: trimmed, marketType: mt, updatedAt: Date.now() };
 }
 
 module.exports = { buildWallWatchlist };

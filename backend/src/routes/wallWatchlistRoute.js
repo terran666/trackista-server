@@ -51,7 +51,7 @@ function createWallWatchlistHandler(redis) {
     }
 
     try {
-      const { items, marketType: mt } = await buildWallWatchlist(redis, {
+      const { items, marketType: mt, updatedAt } = await buildWallWatchlist(redis, {
         symbolsParam,
         limit,
         marketType,
@@ -62,6 +62,7 @@ function createWallWatchlistHandler(redis) {
         success:    true,
         marketType: mt,
         count:      items.length,
+        updatedAt,
         items,
       });
     } catch (err) {

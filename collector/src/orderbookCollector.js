@@ -3,6 +3,7 @@
 const WebSocket    = require('ws');
 const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
 const { binanceFetch } = require('./binanceRestLogger');
+const rateLimitStateStore = require('./shared/binanceRateLimitStateStore');
 
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://api.binance.com';
@@ -20,6 +21,9 @@ const MAX_SYNC_RETRIES       = 3;
 const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS  || '10000', 10);
 const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS || '300000', 10);
 const STATS_LOG_INTERVAL_MS  = 60_000; // print per-symbol stats every 60s
+// Hard cap on simultaneously tracked symbols — prevents unbounded accumulation
+// after symbol rotation in the density watched list.
+const MAX_BOOK_SYMBOLS = parseInt(process.env.SPOT_MAX_SYMBOLS || '40', 10);
 
 // ─── Global IP-level backoff ─────────────────────────────────────────────────
 //
@@ -54,6 +58,11 @@ function setGlobalBackoff(durationMs) {
 const volumeCache = new Map();
 
 async function refreshVolumeCache(symbols) {
+  if (isGloballyBanned()) {
+    const remainingS = Math.ceil((globalBackoff.until - Date.now()) / 1000);
+    console.log(`[orderbook] volume refresh skipped — global IP backoff active (${remainingS}s remaining)`);
+    return;
+  }
   try {
     const url = `${BINANCE_REST_BASE}/api/v3/ticker/24hr`;
     const res = await binanceFetch(url, undefined, 'orderbookCollector', '*', 'volumeRefresh');
@@ -87,7 +96,15 @@ async function refreshVolumeCache(symbols) {
 }
 
 function startVolumeRefresh(symbols) {
-  refreshVolumeCache(symbols); // initial fetch (fire-and-forget)
+  // Delay initial fetch if a global IP ban is still active — avoids hitting
+  // Binance immediately after a restart during an active ban period.
+  const backoffRemaining = Math.max(0, globalBackoff.until - Date.now());
+  if (backoffRemaining > 0) {
+    console.log(`[orderbook] volume refresh startup delayed by ${Math.ceil(backoffRemaining / 1000)}s (global IP backoff active)`);
+    setTimeout(() => refreshVolumeCache([...bookStates.keys()]), backoffRemaining + 2000);
+  } else {
+    refreshVolumeCache(symbols); // initial fetch (fire-and-forget)
+  }
   // Use bookStates.keys() on each tick so symbols added dynamically
   // after startup are included in subsequent hourly refreshes.
   setInterval(() => refreshVolumeCache([...bookStates.keys()]), VOLUME_REFRESH_MS);
@@ -208,6 +225,8 @@ function getOrCreateBook(symbol) {
       snapshotFetchCount:       0,      // total REST /depth calls
       rateLimitCount:           0,      // total 429/418 hits
       rateLimitBackoffUntilMs:  0,      // do not attempt REST before this ts
+      deactivated:              false,  // set true by symbol watcher to stop reconnect cycle
+      ws:                       null,   // live WebSocket ref for forced close
     });
   }
   return bookStates.get(symbol);
@@ -361,6 +380,7 @@ async function syncBook(state) {
   if (isGloballyBanned()) {
     const globalRemaining = globalBackoff.until - Date.now();
     state.syncing = false;
+    rateLimitStateStore.incSkipped('spot');
     console.warn(
       `[orderbook] ${sym}: global IP backoff active — skipping sync for ${Math.ceil(globalRemaining / 1000)}s`,
     );
@@ -403,6 +423,22 @@ async function syncBook(state) {
         // Store backoff in state so reconnect loop knows to wait
         state.rateLimitBackoffUntilMs = Date.now() + boundedWait;
         if (res.status === 418) setGlobalBackoff(boundedWait);
+        // Mirror rate-limit event to Redis
+        {
+          const rlNow = Date.now();
+          const is418 = res.status === 418;
+          rateLimitStateStore.patchMarketState('spot', {
+            rateLimitCount:        state.rateLimitCount,
+            lastRateLimitedSymbol: sym,
+            lastRateLimitStatus:   res.status,
+            backoffUntilTs:        rlNow + boundedWait,
+            backoffDurationMs:     boundedWait,
+            lastBackoffSetTs:      rlNow,
+            lastBackoffReason:     is418 ? 'HTTP 418 IP ban' : 'HTTP 429 rate limit',
+            ...(is418 ? { last418Ts: rlNow } : { last429Ts: rlNow }),
+          });
+          rateLimitStateStore.persist();
+        }
         console.error(
           `[orderbook] ${sym}: Binance rate limit HTTP ${res.status}` +
           ` — waiting ${waitMs}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
@@ -480,6 +516,16 @@ async function syncBook(state) {
   state.synced  = true;
   state.dirty   = true;
 
+  // Mirror success to Redis rate-limit state if we were previously in backoff
+  if (rateLimitStateStore.getMarketState('spot').backoffUntilTs !== null) {
+    const wasBackoffActive = rateLimitStateStore.getMarketState('spot').globalBackoffActive;
+    rateLimitStateStore.patchMarketState('spot', { lastSuccessTs: Date.now() });
+    rateLimitStateStore.persist();
+    if (wasBackoffActive) {
+      console.log('[rate-limit-state] backoff cleared market=spot');
+    }
+  }
+
   console.log(
     `[orderbook] ${sym}: synced!` +
     ` dropped=${dropped} applied=${applied}` +
@@ -497,6 +543,7 @@ async function syncBook(state) {
 
 function connectOrderbook(symbol) {
   const state     = getOrCreateBook(symbol);
+  if (state.deactivated) return; // symbol removed by watcher — stop reconnect cycle
   state.synced    = false;
   state.buffer    = [];
 
@@ -507,6 +554,7 @@ function connectOrderbook(symbol) {
 
   console.log(`[orderbook] ${symbol}: connecting WS...`);
   const ws = new WebSocket(url);
+  state.ws = ws;
 
   ws.on('open', () => {
     console.log(`[orderbook] ${symbol}: WS open — buffering events, fetching REST snapshot...`);
@@ -583,15 +631,20 @@ function connectOrderbook(symbol) {
   });
 
   ws.on('close', code => {
+    if (state.deactivated) return; // removed by watcher — stop reconnect cycle
     // If we're in a rate-limit backoff, delay reconnect until it expires
-    const backoffRemaining = Math.max(0, (state.rateLimitBackoffUntilMs || 0) - Date.now());
-    const reconnectDelay   = Math.max(RECONNECT_DELAY_MS, backoffRemaining);
-    if (backoffRemaining > 0) {
+    const perSymBackoff   = Math.max(0, (state.rateLimitBackoffUntilMs || 0) - Date.now());
+    const globalRemaining = Math.max(0, globalBackoff.until - Date.now());
+    const baseDelay       = Math.max(RECONNECT_DELAY_MS, perSymBackoff, globalRemaining);
+    // Spread reconnects across symbols after global backoff expires to avoid burst
+    const jitter          = globalRemaining > 0 ? Math.floor(Math.random() * 3000) : 0;
+    const reconnectDelay  = baseDelay + jitter;
+    if (globalRemaining > 0 || perSymBackoff > 0) {
       console.warn(
-        `[orderbook] ${symbol}: WS closed (code=${code}), reconnecting after rate-limit backoff in ${Math.ceil(reconnectDelay / 1000)}s...`,
+        `[orderbook] ${symbol}: WS closed (code=${code}), reconnecting after backoff in ${Math.ceil(reconnectDelay / 1000)}s...`,
       );
     } else {
-      console.warn(`[orderbook] ${symbol}: WS closed (code=${code}), reconnecting in ${RECONNECT_DELAY_MS}ms...`);
+      console.warn(`[orderbook] ${symbol}: WS closed (code=${code}), reconnecting in ${reconnectDelay}ms...`);
     }
     setTimeout(() => connectOrderbook(symbol), reconnectDelay);
   });
@@ -639,12 +692,30 @@ function startSymbolWatcher(redis) {
       const data = JSON.parse(raw);
       if (!Array.isArray(data.symbols)) return;
 
-      const newSymbols = data.symbols.filter(sym => !bookStates.has(sym) && !pendingSymbols.has(sym));
+      const trackedSet = new Set(data.symbols);
+
+      // -- Disconnect symbols that left the tracked list
+      for (const [sym, state] of bookStates.entries()) {
+        if (!trackedSet.has(sym)) {
+          state.deactivated = true;
+          state.ws?.terminate();
+          bookStates.delete(sym);
+          console.log(`[orderbook] symbol watcher: disconnecting ${sym} (removed from tracked list)`);
+        }
+      }
+
+      // -- Add new symbols, respecting hard cap
+      const slotsAvailable = MAX_BOOK_SYMBOLS - bookStates.size - pendingSymbols.size;
+      if (slotsAvailable <= 0) return;
+
+      const newSymbols = data.symbols
+        .filter(sym => !bookStates.has(sym) && !pendingSymbols.has(sym))
+        .slice(0, slotsAvailable);
       if (newSymbols.length === 0) return;
 
       console.log(
         `[orderbook] symbol watcher: queuing ${newSymbols.length} new symbol(s)` +
-        ` (staggered by ${ADD_STAGGER}ms each)...`,
+        ` (staggered by ${ADD_STAGGER}ms each, tracked=${bookStates.size + pendingSymbols.size + newSymbols.length}/${MAX_BOOK_SYMBOLS})...`,
       );
 
       newSymbols.forEach((sym, i) => {
@@ -662,6 +733,15 @@ function startSymbolWatcher(redis) {
 }
 
 async function start(redis) {
+  await rateLimitStateStore.initAndRestore(redis, { spot: globalBackoff });
+
+  // Log restored backoff prominently so it's visible in startup output.
+  if (isGloballyBanned()) {
+    console.log(
+      `[orderbook] restored global IP backoff from Redis — remaining ${Math.ceil((globalBackoff.until - Date.now()) / 1000)}s`,
+    );
+  }
+
   const symbols = await getWatchlistSymbols(redis);
   console.log(`[orderbook] Starting orderbook collector for: ${symbols.join(', ')}`);
 
@@ -675,8 +755,10 @@ async function start(redis) {
 
   // Stagger initial connections to spread the burst of REST depth fetches.
   // Without stagger, all N symbols fire /api/v3/depth simultaneously.
-  console.log(`[orderbook] connecting ${symbols.length} symbols (stagger=${STARTUP_STAGGER_MS}ms each)...`);
-  symbols.forEach((sym, i) => {
+  // Cap at MAX_BOOK_SYMBOLS so startup never exceeds the allowed limit.
+  const startupSymbols = symbols.slice(0, MAX_BOOK_SYMBOLS);
+  console.log(`[orderbook] connecting ${startupSymbols.length}/${symbols.length} symbols (cap=${MAX_BOOK_SYMBOLS}, stagger=${STARTUP_STAGGER_MS}ms each)...`);
+  startupSymbols.forEach((sym, i) => {
     setTimeout(() => connectOrderbook(sym), i * STARTUP_STAGGER_MS);
   });
 }

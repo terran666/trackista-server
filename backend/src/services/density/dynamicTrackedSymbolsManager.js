@@ -18,9 +18,9 @@
 // Future: separate futures metrics when a futures signal collector exists.
 //
 // ENV:
-//   DENSITY_TRACKED_SYMBOLS_LIMIT  (default 20)
+//   DENSITY_TRACKED_SYMBOLS_LIMIT  (default 100)
 //   DENSITY_TRACKED_REFRESH_MS     (default 15000)
-//   DENSITY_TRACKED_MIN_HOLD_MS    (default 60000)
+//   DENSITY_TRACKED_MIN_HOLD_MS    (default 180000 — 3 min hysteresis)
 
 // ─── Score reference baselines ────────────────────────────────────
 // Values at or above these are treated as 100% contribution.
@@ -33,10 +33,12 @@ const IMP_REF = 150;       // impulseScore reference ceiling
 const INP_REF = 120;       // inPlayScore reference ceiling
 
 // ─── Config ───────────────────────────────────────────────────────
-const LIMIT    = parseInt(process.env.DENSITY_TRACKED_SYMBOLS_LIMIT || '20',    10);
+const LIMIT    = parseInt(process.env.DENSITY_TRACKED_SYMBOLS_LIMIT || '100',   10);
 const REFRESH  = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS    || '15000', 10);
-const MIN_HOLD = parseInt(process.env.DENSITY_TRACKED_MIN_HOLD_MS   || '60000', 10);
-
+const MIN_HOLD = parseInt(process.env.DENSITY_TRACKED_MIN_HOLD_MS   || '180000', 10);
+// Futures liquidity filter: minimum 24h trade count to be considered liquid.
+// Only applies to futures market. Symbols below this threshold are excluded.
+const MIN_TRADE_COUNT_24H = parseInt(process.env.DENSITY_FUTURES_MIN_TRADE_COUNT_24H || '700000', 10);
 // ─── Redis keys ───────────────────────────────────────────────────
 const TRACKED_KEY = {
   spot:    'density:symbols:tracked:spot',
@@ -162,11 +164,75 @@ async function runRefresh(redis) {
       console.log(`[density-track] ${mt} updated: ${addStr}${remStr} → total=${finalList.length}`);
     }
 
-    // 5. Write to Redis
+    // 5. For futures: apply liquidity filters.
+    // - Exclude spot-only symbols (no futures:orderbook:* key)
+    // - Exclude low-liquidity symbols (tradeCount24h < MIN_TRADE_COUNT_24H)
+    let writeList = finalList;
+    if (mt === 'futures' && finalList.length > 0) {
+      const filterPipeline = redis.pipeline();
+      for (const sym of finalList) {
+        filterPipeline.exists(`futures:orderbook:${sym}`);
+        filterPipeline.get(`futures:ticker24h:${sym}`);
+      }
+      const filterResults = await filterPipeline.exec();
+      const hasAnyData = filterResults.some(([, v], idx) => idx % 2 === 0 && v === 1);
+      
+      if (hasAnyData) {
+        const filtered = [];
+        let spotOnlyCount = 0;
+        let lowLiquidityCount = 0;
+        
+        for (let i = 0; i < finalList.length; i++) {
+          const sym = finalList[i];
+          const existsResult = filterResults[i * 2]?.[1] ?? 0;
+          const tickerRaw = filterResults[i * 2 + 1]?.[1];
+          
+          // Skip spot-only symbols
+          if (existsResult === 0) {
+            spotOnlyCount++;
+            continue;
+          }
+          
+          // Check trade count liquidity threshold
+          if (tickerRaw) {
+            try {
+              const ticker = JSON.parse(tickerRaw);
+              if (ticker.tradeCount24h < MIN_TRADE_COUNT_24H) {
+                lowLiquidityCount++;
+                console.log(
+                  `[density-track] futures: ${sym} excluded (low liquidity) — ` +
+                  `trades24h=${ticker.tradeCount24h.toLocaleString()} < ${MIN_TRADE_COUNT_24H.toLocaleString()}`,
+                );
+                continue;
+              }
+            } catch (_) {
+              // ticker parse error — keep symbol (futures collector may not have refreshed yet)
+            }
+          }
+          // else: no ticker data yet — keep symbol to allow futures collector to start tracking
+          
+          filtered.push(sym);
+        }
+        
+        if (filtered.length > 0) {
+          writeList = filtered;
+          const totalFiltered = finalList.length - writeList.length;
+          if (totalFiltered > 0) {
+            console.log(
+              `[density-track] futures: filtered ${totalFiltered} symbol(s)` +
+              ` (spot-only=${spotOnlyCount}, low-liquidity=${lowLiquidityCount})` +
+              ` → ${writeList.length} valid futures symbols`,
+            );
+          }
+        }
+      }
+    }
+
+    // 6. Write to Redis
     const payload = {
       updatedAt: now,
       limit:     LIMIT,
-      symbols:   finalList,
+      symbols:   writeList,
       // Include top 50 scored items for the debug endpoint
       scored:    scored.slice(0, Math.min(50, scored.length)),
     };

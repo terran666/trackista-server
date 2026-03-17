@@ -1,7 +1,7 @@
 'use strict';
 
 const WebSocket    = require('ws');
-const { buildWallsPayload, getWallThreshold } = require('./wallDetector');
+const { getWallThreshold, detectWallsFromBook } = require('./wallDetector');
 const { binanceFetch } = require('./binanceRestLogger');
 const rateLimitStateStore = require('./shared/binanceRateLimitStateStore');
 
@@ -10,10 +10,14 @@ const BINANCE_REST_BASE  = 'https://api.binance.com';
 const BINANCE_WS_BASE    = 'wss://stream.binance.com:9443';
 const TOP_LEVELS         = 200;         // top N bids / asks stored in Redis per side
 const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth (full book)
-const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
-const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
-const STARTUP_STAGGER_MS = 400;         // ms between each symbol’s initial connectOrderbook()
-const VOLUME_REFRESH_MS  = 60 * 60 * 1000; // refresh 24h volumes every hour
+const FLUSH_INTERVAL_MS      = parseInt(process.env.ORDERBOOK_FLUSH_INTERVAL_MS || '1000', 10); // write orderbook snapshots to Redis (default 1s)
+const WALL_SCAN_INTERVAL_MS  = parseInt(process.env.WALL_SCAN_INTERVAL_MS || '10000', 10); // write walls independently (default 10s)
+const RECONNECT_DELAY_MS     = 5000;            // WS reconnect delay after close
+// Spot /api/v3/depth?limit=1000 = 20 weight per call.
+// Spot IP limit: 6000 weight/min = 100 weight/s → max 5 calls/s → min 200ms stagger.
+// Use 2000ms for safe margin — futures and spot share one IP so conservative is better.
+const STARTUP_STAGGER_MS     = parseInt(process.env.SPOT_STARTUP_STAGGER_MS || '2000', 10);
+const VOLUME_REFRESH_MS      = 60 * 60 * 1000; // refresh 24h volumes every hour
 
 // ─── Rate limit safeguards ────────────────────────────────────────
 const RESYNC_COOLDOWN_MS     = parseInt(process.env.ORDERBOOK_RESYNC_COOLDOWN_MS     || '15000', 10);
@@ -23,7 +27,7 @@ const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF
 const STATS_LOG_INTERVAL_MS  = 60_000; // print per-symbol stats every 60s
 // Hard cap on simultaneously tracked symbols — prevents unbounded accumulation
 // after symbol rotation in the density watched list.
-const MAX_BOOK_SYMBOLS = parseInt(process.env.SPOT_MAX_SYMBOLS || '40', 10);
+const MAX_BOOK_SYMBOLS = parseInt(process.env.SPOT_MAX_SYMBOLS || '200', 10);
 
 // ─── Global IP-level backoff ─────────────────────────────────────────────────
 //
@@ -309,8 +313,11 @@ function buildSnapshot(state) {
   };
 }
 
-// ─── Periodic Redis flush ─────────────────────────────────────────
-
+// ─── Periodic Redis flush (orderbook snapshots only) ─────────────────────────
+//
+// Runs every FLUSH_INTERVAL_MS (200ms). Writes orderbook:SYM for dirty books.
+// Wall detection is intentionally decoupled — see startWallScanTimer below.
+//
 function startFlushTimer(redis) {
   setInterval(() => {
     const pipeline = redis.pipeline();
@@ -320,18 +327,6 @@ function startFlushTimer(redis) {
       if (!state.dirty || !state.synced) continue;
       const snapshot = buildSnapshot(state);
       pipeline.set(`orderbook:${state.symbol}`, JSON.stringify(snapshot));
-
-      // Wall detection runs on the same snapshot — no extra Redis read needed.
-      // Use the per-symbol threshold derived from its 24h volume tier.
-      const volume24h     = volumeCache.get(state.symbol);
-      const wallThreshold = getWallThreshold(volume24h);
-      const wallsPayload  = buildWallsPayload(snapshot, wallThreshold);
-
-      // Annotate walls with lifetime data (firstSeenTs / lastSeenTs / lifetimeMs)
-      applyWallLifetime(state.symbol, wallsPayload.walls, snapshot.updatedAt);
-
-      pipeline.set(`walls:${state.symbol}`, JSON.stringify(wallsPayload));
-
       state.dirty = false;
       count++;
     }
@@ -342,6 +337,79 @@ function startFlushTimer(redis) {
       );
     }
   }, FLUSH_INTERVAL_MS);
+}
+
+// ─── Wall scan helpers ────────────────────────────────────────────
+
+function getBestBid(bidsMap) {
+  let best = -Infinity;
+  for (const p of bidsMap.keys()) {
+    const price = parseFloat(p);
+    if (price > best) best = price;
+  }
+  return best === -Infinity ? null : best;
+}
+
+function getBestAsk(asksMap) {
+  let best = Infinity;
+  for (const p of asksMap.keys()) {
+    const price = parseFloat(p);
+    if (price < best) best = price;
+  }
+  return best === Infinity ? null : best;
+}
+
+// ─── Wall scan timer (walls:SYM, decoupled, slower) ──────────────────────────
+//
+// Runs every WALL_SCAN_INTERVAL_MS (default 10s). Detects walls across ALL
+// synced books using the full in-memory Maps — not the TOP_LEVELS=200 snapshot
+// — so large distances (MAX_WALL_DISTANCE_PCT up to 10%) are covered without
+// extra REST calls or larger snapshot payloads.
+//
+// Redis write rate: 1 pipeline per tick, 1 key per tracked symbol.
+// Compared to the previous approach (walls written every 200ms flush):
+//   100 symbols × 10s interval = 100 writes/10s = 10 writes/s
+//   100 symbols × 200ms flush  = 100 writes/0.2s = 500 writes/s  (50× more)
+//
+function startWallScanTimer(redis) {
+  setInterval(() => {
+    const now      = Date.now();
+    const pipeline = redis.pipeline();
+    let count      = 0;
+
+    for (const state of bookStates.values()) {
+      if (!state.synced) continue;
+
+      const bestBid = getBestBid(state.bids);
+      const bestAsk = getBestAsk(state.asks);
+      if (bestBid === null || bestAsk === null) continue;
+
+      const midPrice      = parseFloat(((bestBid + bestAsk) / 2).toFixed(8));
+      const volume24h     = volumeCache.get(state.symbol);
+      const wallThreshold = getWallThreshold(volume24h);
+      const walls         = detectWallsFromBook(state.bids, state.asks, midPrice, wallThreshold);
+
+      applyWallLifetime(state.symbol, walls, now);
+
+      pipeline.set(`walls:${state.symbol}`, JSON.stringify({
+        symbol:        state.symbol,
+        marketType:    'spot',
+        updatedAt:     now,
+        bestBid,
+        bestAsk,
+        midPrice,
+        wallThreshold,
+        walls,
+      }));
+      count++;
+    }
+
+    if (count > 0) {
+      pipeline.exec().catch(err =>
+        console.error('[orderbook] wall scan Redis flush error:', err.message),
+      );
+    }
+  }, WALL_SCAN_INTERVAL_MS);
 }
 
 // ─── Binance order book sync algorithm ───────────────────────────
@@ -379,7 +447,6 @@ async function syncBook(state) {
   // ── Global IP-level backoff guard ─────────────────────────────────────────
   if (isGloballyBanned()) {
     const globalRemaining = globalBackoff.until - Date.now();
-    state.syncing = false;
     rateLimitStateStore.incSkipped('spot');
     console.warn(
       `[orderbook] ${sym}: global IP backoff active — skipping sync for ${Math.ceil(globalRemaining / 1000)}s`,
@@ -544,6 +611,13 @@ async function syncBook(state) {
 function connectOrderbook(symbol) {
   const state     = getOrCreateBook(symbol);
   if (state.deactivated) return; // symbol removed by watcher — stop reconnect cycle
+
+  // Guard: skip if a WS is already open or connecting to prevent duplicate REST /depth calls
+  if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+    console.warn(`[orderbook] ${symbol}: connectOrderbook skipped — WS already active (readyState=${state.ws.readyState})`);
+    return;
+  }
+
   state.synced    = false;
   state.buffer    = [];
 
@@ -751,6 +825,7 @@ async function start(redis) {
   startStatsLogger();
 
   startFlushTimer(redis);
+  startWallScanTimer(redis);
   startSymbolWatcher(redis);
 
   // Stagger initial connections to spread the burst of REST depth fetches.
@@ -759,7 +834,13 @@ async function start(redis) {
   const startupSymbols = symbols.slice(0, MAX_BOOK_SYMBOLS);
   console.log(`[orderbook] connecting ${startupSymbols.length}/${symbols.length} symbols (cap=${MAX_BOOK_SYMBOLS}, stagger=${STARTUP_STAGGER_MS}ms each)...`);
   startupSymbols.forEach((sym, i) => {
-    setTimeout(() => connectOrderbook(sym), i * STARTUP_STAGGER_MS);
+    // Register in pendingSymbols so startSymbolWatcher doesn't re-queue symbols
+    // that are already scheduled but haven't opened their WS yet.
+    pendingSymbols.add(sym);
+    setTimeout(() => {
+      pendingSymbols.delete(sym);
+      connectOrderbook(sym);
+    }, i * STARTUP_STAGGER_MS);
   });
 }
 

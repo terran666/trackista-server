@@ -475,6 +475,28 @@ async function start() {
   console.log('[collector] Starting Trackista collector (stage 4)...');
   console.log(`[collector] Redis: ${REDIS_HOST}:${REDIS_PORT}`);
 
+  // Check if a global IP ban is still active before hitting Binance REST on startup.
+  // Ban state is persisted by orderbookCollector via binanceRateLimitStateStore.
+  try {
+    const rawBanState = await redis.get('debug:binance-rate-limit-state');
+    if (rawBanState) {
+      const banState = JSON.parse(rawBanState);
+      const now = Date.now();
+      const spotUntil    = banState.spot?.backoffUntilTs    || 0;
+      const futuresUntil = banState.futures?.backoffUntilTs || 0;
+      const bannedUntil  = Math.max(spotUntil, futuresUntil);
+      if (bannedUntil > now) {
+        const waitMs = bannedUntil - now;
+        console.warn(
+          `[collector] IP ban active — delaying startup by ${Math.ceil(waitMs / 1000)}s` +
+          ` (until ${new Date(bannedUntil).toISOString()})`,
+        );
+        setTimeout(start, waitMs + 2000);
+        return;
+      }
+    }
+  } catch (_) { /* Redis not ready yet — proceed anyway */ }
+
   let validSymbols;
   try {
     validSymbols = await fetchValidSymbols();
@@ -514,6 +536,22 @@ async function start() {
   setInterval(async () => {
     console.log('[collector] Periodic symbol list refresh...');
     try {
+      // Skip refresh if IP ban is active — avoid extending the ban
+      const rawBanState = await redis.get('debug:binance-rate-limit-state').catch(() => null);
+      if (rawBanState) {
+        const banState = JSON.parse(rawBanState);
+        const now = Date.now();
+        const bannedUntil = Math.max(
+          banState.spot?.backoffUntilTs    || 0,
+          banState.futures?.backoffUntilTs || 0,
+        );
+        if (bannedUntil > now) {
+          console.warn(
+            `[collector] Symbol refresh skipped — IP ban active for ${Math.ceil((bannedUntil - now) / 1000)}s`,
+          );
+          return;
+        }
+      }
       const refreshed = await fetchValidSymbols();
       await redis.set('symbols:active:usdt', JSON.stringify(refreshed));
       // Initialize state for any newly added symbols
@@ -537,5 +575,13 @@ orderbookCollector.start(redis);
 // Maintains a local futures order book using Binance Futures endpoints.
 // Symbols: FUTURES_ORDERBOOK_SYMBOLS (falls back to ORDERBOOK_SYMBOLS).
 // Writes to Redis keys: futures:orderbook:${symbol}  futures:walls:${symbol}
+//
+// IMPORTANT: delayed start to avoid 418 IP ban.
+// Spot and futures share one Binance IP rate limit bucket.
+// Spot starts first (stagger 2000ms × N symbols), futures waits until
+// spot's startup REST burst is fully complete before adding its own load.
+// FUTURES_STARTUP_DELAY_MS default = 90s (covers spot connecting 100 symbols × 2s = ~200s? no, tracked starts at 20 → first 20×2s=40s, then watcher adds more).
+const FUTURES_STARTUP_DELAY_MS = parseInt(process.env.FUTURES_STARTUP_DELAY_MS || '60000', 10);
 const futuresOrderbookCollector = require('./futuresOrderbookCollector');
-futuresOrderbookCollector.start(redis);
+console.log(`[collector] futures orderbook collector will start in ${FUTURES_STARTUP_DELAY_MS / 1000}s to avoid rate-limit burst with spot collector`);
+setTimeout(() => futuresOrderbookCollector.start(redis), FUTURES_STARTUP_DELAY_MS);

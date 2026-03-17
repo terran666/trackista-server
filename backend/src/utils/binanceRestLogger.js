@@ -11,6 +11,54 @@
 
 const REPORT_INTERVAL_MS = 60_000;
 
+// ─── In-process IP-level backoff ─────────────────────────────────────────────
+//
+// Mirrors the collector's global backoff logic so that backend klines calls
+// (levelsEngineRoute, autoLevelsRoute) don't keep hammering Binance while
+// the IP is banned, which would extend the ban duration.
+//
+// Synced from Redis key "debug:binance-rate-limit-state" on startup via
+// syncBackoffFromRedis(redis) called from server.js after Redis is ready.
+//
+const backoff = { until: 0 };
+
+function isGloballyBanned() {
+  return Date.now() < backoff.until;
+}
+
+function setBackoff(durationMs) {
+  const newUntil = Date.now() + durationMs;
+  if (newUntil > backoff.until) {
+    backoff.until = newUntil;
+    console.error(
+      `[binance-rest/backend] IP BACKOFF set — klines calls paused for ${Math.ceil(durationMs / 1000)}s` +
+      ` (until ${new Date(newUntil).toISOString()})`,
+    );
+  }
+}
+
+// Call once after Redis is ready so backoff survives server restarts.
+async function syncBackoffFromRedis(redis) {
+  try {
+    const raw = await redis.get('debug:binance-rate-limit-state');
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    const now   = Date.now();
+    // Check both spot and futures ban timestamps — same IP, either applies
+    for (const market of ['spot', 'futures']) {
+      const until = saved[market]?.backoffUntilTs;
+      if (until && until > now && until > backoff.until) {
+        backoff.until = until;
+        console.log(
+          `[binance-rest/backend] restored ${market} IP ban from Redis — ${Math.ceil((until - now) / 1000)}s remaining`,
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[binance-rest/backend] syncBackoffFromRedis failed:', err.message);
+  }
+}
+
 const rollingLog = [];
 
 function evictOld() {
@@ -63,11 +111,32 @@ function extractEndpoint(url) {
  * @returns {Promise<Response>}
  */
 async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
+  // ── Global IP-level backoff guard ────────────────────────────────────────
+  // Respect the same ban that the collector tracks — prevents the backend from
+  // extending an active IP ban by continuing to make Binance REST calls.
+  if (isGloballyBanned()) {
+    const remainingMs = backoff.until - Date.now();
+    const err = new Error(
+      `Binance IP ban active — skipping ${service} call for ${Math.ceil(remainingMs / 1000)}s`,
+    );
+    err.status = 418;
+    err.retryAfterMs = remainingMs;
+    throw err;
+  }
+
   const startTs = Date.now();
   let status = 0;
   try {
     const res = await fetch(url, opts);
     status = res.status;
+
+    // Track 429/418 in-process so subsequent calls bail immediately
+    if (res.status === 429 || res.status === 418) {
+      const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
+      const durationMs    = retryAfterSec > 0 ? retryAfterSec * 1000 : 60_000;
+      setBackoff(durationMs);
+    }
+
     return res;
   } catch (err) {
     status = -1;
@@ -86,4 +155,13 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
   }
 }
 
-module.exports = { binanceFetch, buildSummary };
+function getBackoffState() {
+  const now = Date.now();
+  return {
+    active:      now < backoff.until,
+    until:       backoff.until || null,
+    remainingMs: Math.max(0, backoff.until - now),
+  };
+}
+
+module.exports = { binanceFetch, buildSummary, syncBackoffFromRedis, getBackoffState };

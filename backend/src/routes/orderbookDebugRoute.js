@@ -40,6 +40,7 @@
 // MATCH_TOLERANCE_PCT of each other (default 0.5% — allows for normal
 // order-fill updates between fetch and snapshot timestamps).
 //
+const { binanceFetch } = require('../utils/binanceRestLogger');
 const BINANCE_SPOT_REST    = 'https://api.binance.com';
 const BINANCE_FUTURES_REST = 'https://fapi.binance.com';
 const BINANCE_DEPTH_LIMIT  = 1000;
@@ -130,10 +131,18 @@ function createOrderbookDebugHandler(redis) {
       const path = marketType === 'futures'
         ? `/fapi/v1/depth?symbol=${symbol}&limit=${BINANCE_DEPTH_LIMIT}`
         : `/api/v3/depth?symbol=${symbol}&limit=${BINANCE_DEPTH_LIMIT}`;
-      const resp = await fetch(`${base}${path}`);
+      const resp = await binanceFetch(`${base}${path}`, undefined, 'orderbookDebugRoute', symbol, 'debug-compare');
       if (!resp.ok) throw new Error(`Binance HTTP ${resp.status}`);
       binance = await resp.json();
     } catch (err) {
+      if (err.status === 418 || err.message.includes('IP ban')) {
+        const retryAfterSec = Math.ceil((err.retryAfterMs || 60000) / 1000);
+        return res.status(503).json({
+          success: false,
+          error:   `Binance IP ban active — retry in ${retryAfterSec}s`,
+          retryAfterSec,
+        });
+      }
       return res.status(502).json({
         success: false,
         error:   `Failed to fetch Binance ${marketType} snapshot: ${err.message}`,

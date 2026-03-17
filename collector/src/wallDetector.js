@@ -45,7 +45,7 @@ function getWallThreshold(volume24h) {
 
 function cfg() {
   return {
-    maxDistancePct: parseFloat(process.env.MAX_WALL_DISTANCE_PCT || '0.5'),
+    maxDistancePct: parseFloat(process.env.MAX_WALL_DISTANCE_PCT || '10'),
   };
 }
 
@@ -85,13 +85,10 @@ function cfg() {
 //   ask: ((price - midPrice) / midPrice) * 100
 //   bid: ((midPrice - price) / midPrice) * 100
 //
-// strength  = wallUsdValue / median(top-N usdValues, same side)
-//   N = STRENGTH_TOP_N levels, capped to available levels.
-//   If median is 0 or unavailable → null.
+// strength  = wallUsdValue / wallThreshold
+//   A wall exactly at threshold -> 1.0; a 3x-threshold wall -> 3.0.
 //
 // Returns walls sorted by usdValue descending.
-
-const STRENGTH_TOP_N = 20; // levels used for strength baseline per side
 
 /**
  * Compute the median of an array of numbers.
@@ -121,23 +118,18 @@ function detectWalls(snapshot, minWallSizeUSD) {
   const mid = snapshot.midPrice;
   const walls = [];
 
-  // Pre-compute per-side median from TOP_N levels for strength calculation.
-  // Uses ALL top-N levels (not just walls) as denominator so strength is
-  // relative to the normal depth context.
-  const askMedian = median(
-    snapshot.asks.slice(0, STRENGTH_TOP_N).map(l => l.usdValue),
-  );
-  const bidMedian = median(
-    snapshot.bids.slice(0, STRENGTH_TOP_N).map(l => l.usdValue),
-  );
+  // Strength = usdValue / threshold, i.e. "how many times larger than the
+  // minimum detection threshold is this wall?"
+  // A wall exactly at threshold -> strength 1.0; a 3x threshold wall -> 3.0.
+  // This is stable, volume-tier-aware and immediately readable.
+  // (Previous approach used median of the 20 nearest price levels, which are
+  // tiny near the spread and produced absurdly inflated values like 85,000.)
 
   for (const level of snapshot.asks) {
     if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((level.price - mid) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
-    const strength = (askMedian && askMedian > 0)
-      ? parseFloat((level.usdValue / askMedian).toFixed(2))
-      : null;
+    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
     walls.push({
       side:               'ask',
       price:              level.price,
@@ -156,9 +148,7 @@ function detectWalls(snapshot, minWallSizeUSD) {
     if (level.usdValue < threshold) continue;
     const distancePct = parseFloat((((mid - level.price) / mid) * 100).toFixed(4));
     if (distancePct > maxDistancePct) continue;
-    const strength = (bidMedian && bidMedian > 0)
-      ? parseFloat((level.usdValue / bidMedian).toFixed(2))
-      : null;
+    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
     walls.push({
       side:               'bid',
       price:              level.price,
@@ -199,4 +189,89 @@ function buildWallsPayload(snapshot, minWallSizeUSD) {
   };
 }
 
-module.exports = { detectWalls, buildWallsPayload, getWallThreshold };
+// ─── detectWallsFromBook ─────────────────────────────────────────
+//
+// Variant of detectWalls that operates directly on the raw in-memory
+// Maps (Map<priceStr, sizeNum>) maintained by orderbookCollector.
+// This bypasses the TOP_LEVELS=200 snapshot limit so walls at large
+// distances (e.g. 10%) are found even in deep books.
+//
+// bids: Map<priceStr, sizeNum>   — all bid levels in the local book
+// asks: Map<priceStr, sizeNum>   — all ask levels in the local book
+// midPrice: number               — (bestBid + bestAsk) / 2
+// minWallSizeUSD: number         — from getWallThreshold()
+//
+// Returns walls sorted by usdValue descending.
+//
+function detectWallsFromBook(bids, asks, midPrice, minWallSizeUSD) {
+  if (!midPrice || midPrice <= 0) return [];
+
+  const threshold = (minWallSizeUSD != null && isFinite(minWallSizeUSD))
+    ? minWallSizeUSD
+    : getWallThreshold(null);
+
+  const { maxDistancePct } = cfg();
+  const now = Date.now();
+
+  // Build sorted arrays for distance filtering and strength baseline.
+  const bidLevels = [...bids.entries()]
+    .map(([p, s]) => ({
+      price:    parseFloat(p),
+      size:     s,
+      usdValue: parseFloat((parseFloat(p) * s).toFixed(2)),
+    }))
+    .sort((a, b) => b.price - a.price); // highest first
+
+  const askLevels = [...asks.entries()]
+    .map(([p, s]) => ({
+      price:    parseFloat(p),
+      size:     s,
+      usdValue: parseFloat((parseFloat(p) * s).toFixed(2)),
+    }))
+    .sort((a, b) => a.price - b.price); // lowest first
+
+  const walls = [];
+
+  for (const level of askLevels) {
+    if (level.usdValue < threshold) continue;
+    const distancePct = parseFloat((((level.price - midPrice) / midPrice) * 100).toFixed(4));
+    if (distancePct > maxDistancePct) break; // sorted ascending — safe early exit
+    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
+    walls.push({
+      side:              'ask',
+      price:             level.price,
+      rawPrice:          level.price,
+      size:              level.size,
+      usdValue:          level.usdValue,
+      distancePct,
+      strength,
+      source:            'orderbook',
+      sourceUpdatedAt:   now,
+      exactLevelMatched: true,
+    });
+  }
+
+  for (const level of bidLevels) {
+    if (level.usdValue < threshold) continue;
+    const distancePct = parseFloat((((midPrice - level.price) / midPrice) * 100).toFixed(4));
+    if (distancePct > maxDistancePct) break; // sorted descending — safe early exit
+    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
+    walls.push({
+      side:              'bid',
+      price:             level.price,
+      rawPrice:          level.price,
+      size:              level.size,
+      usdValue:          level.usdValue,
+      distancePct,
+      strength,
+      source:            'orderbook',
+      sourceUpdatedAt:   now,
+      exactLevelMatched: true,
+    });
+  }
+
+  walls.sort((a, b) => b.usdValue - a.usdValue);
+  return walls;
+}
+
+module.exports = { detectWalls, buildWallsPayload, getWallThreshold, detectWallsFromBook };

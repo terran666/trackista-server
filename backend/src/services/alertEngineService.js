@@ -288,7 +288,12 @@ function createAlertEngineService(redis, deliveryService = null) {
 
   function start() {
     console.log('[alerts] Alert engine started (1s interval)');
-    setInterval(tick, ENGINE_INTERVAL_MS);
+    let running = false;
+    setInterval(async () => {
+      if (running) return; // skip if previous tick still in progress
+      running = true;
+      try { await tick(); } finally { running = false; }
+    }, ENGINE_INTERVAL_MS);
   }
 
   return { start };

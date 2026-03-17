@@ -82,8 +82,32 @@ function createOrderbookHandler(redis) {
         });
       }
 
+      let orderbook;
+      try {
+        orderbook = JSON.parse(raw);
+      } catch (_) {
+        console.error(`[orderbook] corrupt JSON in Redis key ${redisKey} symbol=${symbol}`);
+        return res.status(502).json({
+          success: false,
+          error:   'Cached orderbook data is corrupt',
+          symbol,
+          marketType,
+        });
+      }
+
+      if (!orderbook || typeof orderbook !== 'object' ||
+          !Array.isArray(orderbook.bids) || !Array.isArray(orderbook.asks)) {
+        console.error(`[orderbook] malformed orderbook structure symbol=${symbol} marketType=${marketType}`);
+        return res.status(502).json({
+          success: false,
+          error:   'Cached orderbook data is malformed',
+          symbol,
+          marketType,
+        });
+      }
+
       console.log(`[orderbook] GET /api/orderbook symbol=${symbol} marketType=${marketType}`);
-      return res.json({ success: true, symbol, marketType, orderbook: JSON.parse(raw) });
+      return res.json({ success: true, symbol, marketType, orderbook });
     } catch (err) {
       console.error(`[orderbook] GET /api/orderbook error symbol=${symbol}:`, err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

@@ -13,6 +13,13 @@
 //   [binance-rest] ts=... service=orderbookCollector endpoint=/api/v3/depth symbol=BTCUSDT reason=initialSync status=200
 //
 // Every 60 s a requests/min summary is printed per service + endpoint.
+//
+// IP-ban guard: checks rateLimitStateStore (hydrated by orderbookCollectors via
+// initAndRestore) before every outbound call.  URL-based market detection routes
+// fapi.binance.com calls to the futures ban state and all others to spot.
+// Falls back safely (no block) if the store has not yet been initialised.
+
+const rateLimitStateStore = require('./shared/binanceRateLimitStateStore');
 
 const REPORT_INTERVAL_MS = 60_000;
 
@@ -70,6 +77,23 @@ function extractEndpoint(url) {
  * @returns {Promise<Response>}
  */
 async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
+  // ── Centralised IP ban guard ───────────────────────────────────────────────
+  // Determines market from URL (fapi.binance.com → futures, everything else → spot)
+  // and rejects the call immediately if a ban is still active.
+  // rateLimitStateStore is populated by orderbookCollector / futuresOrderbookCollector
+  // after their initAndRestore() calls; before that, backoffUntilTs is null so
+  // this guard is a no-op (safe fallback at collector startup).
+  const market = url.includes('fapi.binance.com') ? 'futures' : 'spot';
+  const ms = rateLimitStateStore.getMarketState(market);
+  if (ms.backoffUntilTs !== null && Date.now() < ms.backoffUntilTs) {
+    const remaining = Math.ceil((ms.backoffUntilTs - Date.now()) / 1000);
+    const err = new Error(
+      `[binanceFetch] ${market} IP ban active — skipping ${service} call (${remaining}s remaining)`,
+    );
+    err.status = 418;
+    throw err;
+  }
+
   const startTs = Date.now();
   let status = 0;
   try {

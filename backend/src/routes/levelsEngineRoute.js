@@ -145,12 +145,18 @@ async function levelsHandler(req,res){
       if (bars.length) setCachedBars(cacheKey, bars);
     }
 
-  }catch(err){
-
-    console.error('[levels] fetch failed',err.message);
-
+  } catch(err) {
+    console.error('[levels] fetch failed', err.message);
+    // IP ban: tell the frontend to retry later rather than return empty data
+    if (err.status === 418 || err.message.includes('IP ban')) {
+      const retryAfterSec = Math.ceil((err.retryAfterMs || 60000) / 1000);
+      return res.status(503).json({
+        success: false,
+        error:   `Binance IP ban active — retry in ${retryAfterSec}s`,
+        retryAfterSec,
+      });
+    }
     return res.json([]);
-
   }
 
   const minRequired = 15;

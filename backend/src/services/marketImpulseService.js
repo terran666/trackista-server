@@ -269,7 +269,12 @@ function createMarketImpulseService(redis, deliveryService = null) {
 
   function start() {
     console.log('[impulse] Market impulse service started — 5s price move + 2x volume spike rule');
-    setInterval(tick, ENGINE_INTERVAL_MS);
+    let running = false;
+    setInterval(async () => {
+      if (running) return; // skip if previous tick still in progress
+      running = true;
+      try { await tick(); } finally { running = false; }
+    }, ENGINE_INTERVAL_MS);
   }
 
   return { start };

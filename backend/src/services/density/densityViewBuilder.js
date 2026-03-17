@@ -83,8 +83,21 @@ async function buildDensityView(redis, symbol, scaleRaw) {
 
   if (rawOrderbook === null) return null;
 
-  const ob    = JSON.parse(rawOrderbook);
-  const walls = rawWalls ? JSON.parse(rawWalls).walls || [] : [];
+  let ob;
+  try {
+    ob = JSON.parse(rawOrderbook);
+  } catch (_) {
+    return null; // corrupt JSON in Redis — treat as missing
+  }
+  if (!ob || !Array.isArray(ob.bids) || !Array.isArray(ob.asks)) return null;
+
+  let walls = [];
+  if (rawWalls) {
+    try {
+      const wallsDoc = JSON.parse(rawWalls);
+      walls = Array.isArray(wallsDoc?.walls) ? wallsDoc.walls : [];
+    } catch (_) { /* corrupt walls JSON — skip, walls optional */ }
+  }
 
   const { key: scaleKey, rangePct } = resolveScale(scaleRaw);
 

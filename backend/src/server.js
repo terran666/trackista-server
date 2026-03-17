@@ -28,7 +28,14 @@ const { createDensitySummaryHandler }   = require('./routes/densitySummaryRoute'
 const { createWallWatchlistHandler }        = require('./routes/wallWatchlistRoute');
 const { createDensityTrackedSymbolsHandler } = require('./routes/densityTrackedSymbolsRoute');
 const { createBinanceRateLimitStateHandler }  = require('./routes/binanceRateLimitStateRoute');
+const { createFuturesObStateHandler }          = require('./routes/futuresObStateRoute');
+const { createBinanceProxyRouter }             = require('./routes/binanceProxyRoute');
+const { attachBinanceWsProxy, getWsProxyStats } = require('./routes/binanceWsProxy');
 const dynamicTrackedSymbolsManager           = require('./services/density/dynamicTrackedSymbolsManager');
+const { runMigrations }   = require('./services/alertMigrations');
+const { ensureBucket }    = require('./services/alertStorageService');
+const { createAuthRouter }  = require('./routes/authRoutes');
+const { createPostsRouter } = require('./routes/postsRoutes');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -47,7 +54,15 @@ console.log(`[backend] MySQL: ${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DB}`);
 // ─── Redis client ────────────────────────────────────────────────
 const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
 
-redis.on('connect', () => console.log('[backend] Connected to Redis'));
+redis.on('connect', () => {
+  console.log('[backend] Connected to Redis');
+  // Restore Binance IP backoff state from Redis so that klines routes don't
+  // hammer Binance while a collector-triggered IP ban is still active.
+  const { syncBackoffFromRedis } = require('./utils/binanceRestLogger');
+  syncBackoffFromRedis(redis).catch(err =>
+    console.error('[backend] syncBackoffFromRedis failed:', err.message),
+  );
+});
 redis.on('error',   (err) => console.error('[backend] Redis error:', err.message));
 
 // ─── MySQL pool ───────────────────────────────────────────────────
@@ -63,7 +78,13 @@ const db = mysql.createPool({
 });
 
 db.getConnection()
-  .then(conn => { console.log('[backend] Connected to MySQL'); conn.release(); })
+  .then(conn => {
+    console.log('[backend] Connected to MySQL');
+    conn.release();
+    // Run alert-module migrations and ensure MinIO bucket exists
+    runMigrations(db).catch(err => console.error('[migrations] Failed:', err.message));
+    ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
+  })
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
 
 // ─── Levels service ───────────────────────────────────────────────
@@ -357,6 +378,10 @@ app.get('/api/market/top-active', async (req, res) => {
   }
 });
 
+// ─── Binance REST proxy (browser → backend → Binance, no direct browser→Binance) ──
+console.log('[backend] registering /api/binance proxy route');
+app.use('/api/binance', createBinanceProxyRouter());
+
 // ─── Orderbook endpoint ──────────────────────────────────────────
 console.log('[backend] registering /api/orderbook route');
 app.get('/api/orderbook', createOrderbookHandler(redis));
@@ -388,6 +413,10 @@ app.get('/api/density-tracked-symbols', createDensityTrackedSymbolsHandler(redis
 // ─── Binance rate-limit state debug endpoint ──────────────────────
 console.log('[backend] registering /api/binance-rate-limit-state route');
 app.get('/api/binance-rate-limit-state', createBinanceRateLimitStateHandler(redis));
+
+// ─── Futures OB debug state endpoint ─────────────────────────────
+console.log('[backend] registering /api/futures-ob/state route');
+app.get('/api/futures-ob/state', createFuturesObStateHandler(redis));
 
 // ─── Level endpoints ─────────────────────────────────────────────
 
@@ -647,6 +676,15 @@ app.post('/api/delivery/test', async (req, res) => {
 });
 
 // ─── Alert endpoints ───────────────────────────────────────────────
+// NOTE: /api/posts is the social feed (screenshots/annotations).
+//       /api/alerts/* below are the existing market-impulse alert endpoints.
+console.log('[backend] registering /api/auth routes');
+app.use('/api/auth', createAuthRouter(db, redis));
+
+console.log('[backend] registering /api/posts routes');
+app.use('/api/posts', createPostsRouter(db, redis));
+
+// ─── Alert endpoints ───────────────────────────────────────────────
 
 // GET /api/alerts/recent?limit=50
 app.get('/api/alerts/recent', async (req, res) => {
@@ -698,7 +736,25 @@ app.get('/api/alerts/:symbol', async (req, res) => {
   }
 });
 
+// ─── JSON 404 fallback ────────────────────────────────────────────
+// ─── WS proxy debug endpoint ─────────────────────────────────────────────────
+console.log('[backend] registering /api/ws-proxy/debug route');
+app.get('/api/ws-proxy/debug', (_req, res) => {
+  return res.json({ success: true, now: new Date().toISOString(), ...getWsProxyStats() });
+});
+
+// Must be registered AFTER all routes so it only fires when nothing matched.
+// Returns JSON instead of Express's default HTML — prevents frontend from
+// silently swallowing errors or misidentifying the response as success.
+app.use((req, res) => {
+  console.warn(`[backend] 404 ${req.method} ${req.path}`);
+  res.status(404).json({ success: false, error: `Cannot ${req.method} ${req.path}` });
+});
+
 // ─── Start server ────────────────────────────────────────────────
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`[backend] API listening on port ${PORT}`);
 });
+
+// Attach Binance WS proxy: /ws/stream/* → wss://stream.binance.com and /ws/fstream/* → wss://fstream.binance.com
+attachBinanceWsProxy(httpServer);

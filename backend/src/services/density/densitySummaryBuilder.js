@@ -102,7 +102,7 @@ function safeParse(raw) {
  * @param {number|undefined} limit
  * @returns {Promise<string[]>}
  */
-async function resolveSymbols(redis, symbolsParam, limit) {
+async function resolveSymbols(redis, symbolsParam, limit, marketType) {
   let symbols;
 
   if (symbolsParam) {
@@ -113,9 +113,15 @@ async function resolveSymbols(redis, symbolsParam, limit) {
         .map(s => s.toUpperCase().trim())
         .filter(Boolean),
     )];
+  } else if (marketType === 'futures') {
+    // Use the futures-specific tracked list (written by dynamicTrackedSymbolsManager),
+    // not the full spot universe — futures symbols are a filtered subset.
+    const raw = await redis.get('density:symbols:tracked:futures');
+    const data = safeParse(raw);
+    symbols = Array.isArray(data?.symbols) && data.symbols.length > 0 ? data.symbols : [];
   } else {
     const raw = await redis.get('symbols:active:usdt');
-    symbols = raw ? safeParse(raw) : [];
+    symbols = safeParse(raw);
     if (!Array.isArray(symbols)) symbols = [];
   }
 
@@ -139,7 +145,8 @@ async function resolveSymbols(redis, symbolsParam, limit) {
  * @returns {object}
  */
 function buildItem(symbol, ob, wallsDoc, metrics, signal) {
-  const walls = wallsDoc?.walls ?? [];
+  const rawWalls = wallsDoc?.walls;
+  const walls = Array.isArray(rawWalls) ? rawWalls : [];
 
   // ── Price fields ────────────────────────────────────────────────
   const bestBid = ob?.bestBid  ?? null;
@@ -253,7 +260,7 @@ function buildItem(symbol, ob, wallsDoc, metrics, signal) {
  */
 async function buildDensitySummary(redis, { symbolsParam, limit, marketType = 'spot' } = {}) {
   const mt      = marketType === 'futures' ? 'futures' : 'spot';
-  const symbols = await resolveSymbols(redis, symbolsParam, limit);
+  const symbols = await resolveSymbols(redis, symbolsParam, limit, mt);
 
   if (symbols.length === 0) {
     return { symbols: [], items: [], marketType: mt };
@@ -275,15 +282,21 @@ async function buildDensitySummary(redis, { symbolsParam, limit, marketType = 's
   for (let i = 0; i < symbols.length; i++) {
     const symbol = symbols[i];
     const base   = i * 4;
+    try {
+      const row = results[base];
+      if (!row) continue; // defensive: pipeline result missing
 
-    const ob       = safeParse(results[base][1]);
-    const wallsDoc = safeParse(results[base + 1][1]);
-    const metrics  = safeParse(results[base + 2][1]);
-    const signal   = safeParse(results[base + 3][1]);
+      const ob       = safeParse(results[base][1]);
+      const wallsDoc = safeParse(results[base + 1][1]);
+      const metrics  = safeParse(results[base + 2][1]);
+      const signal   = safeParse(results[base + 3][1]);
 
-    const item = buildItem(symbol, ob, wallsDoc, metrics, signal);
-    item.marketType = mt;
-    items.push(item);
+      const item = buildItem(symbol, ob, wallsDoc, metrics, signal);
+      item.marketType = mt;
+      items.push(item);
+    } catch (err) {
+      console.warn(`[density-summary] skipping ${symbol} — processing error: ${err.message}`);
+    }
   }
 
   // Sort by activityScore DESC, nulls at the end

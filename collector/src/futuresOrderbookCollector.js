@@ -8,22 +8,52 @@ const rateLimitStateStore = require('./shared/binanceRateLimitStateStore');
 // ─── Configuration ────────────────────────────────────────────────
 const BINANCE_REST_BASE  = 'https://fapi.binance.com';
 const BINANCE_WS_BASE    = 'wss://fstream.binance.com';
-const TOP_LEVELS         = 200;         // top N bids / asks stored per side
-const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth
-const FLUSH_INTERVAL_MS  = 200;         // write snapshots to Redis every 200 ms
-const RECONNECT_DELAY_MS = 5000;        // WS reconnect delay after close
-const VOLUME_REFRESH_MS  = 60 * 60 * 1000;
-const STARTUP_STAGGER_MS = 400;         // ms between each symbol’s initial connectOrderbook()
+const TOP_LEVELS         = parseInt(process.env.FUTURES_OB_TOP_LEVELS || '500', 10); // top N bids / asks stored per side
 
-// ─── Rate limit safeguards ────────────────────────────────────────
-const RESYNC_COOLDOWN_MS     = parseInt(process.env.ORDERBOOK_RESYNC_COOLDOWN_MS     || '15000', 10);
-const MAX_SYNC_RETRIES       = 3;
-const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS  || '10000', 10);
-const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS || '300000', 10);
+// Futures-specific hardening env vars
+// FUTURES_OB_MAX_SYMBOLS          — hard cap on tracked futures symbols (default 10)
+// FUTURES_OB_SNAPSHOT_LIMIT       — REST /depth limit (default 500, matches TOP_LEVELS)
+// FUTURES_OB_TOP_LEVELS           — top N bids/asks stored in Redis per side (default 500)
+// FUTURES_OB_RESYNC_COOLDOWN_MS   — min ms between snapshots per symbol (default 60 000)
+// FUTURES_OB_CONNECT_STAGGER_MS   — ms between each new WS connection at startup (default 5 000)
+// FUTURES_OB_QUARANTINE_MS        — how long a quarantined symbol is blocked (default 300 000 = 5 min)
+// FUTURES_OB_MAX_FAILED_RESYNCS   — consecutive resync failures before quarantine (default 3)
+// FUTURES_OB_MAX_GAPS_PER_MINUTE  — sequence gaps/min before quarantine (default 5)
+// FUTURES_OB_MAX_CONCURRENT_RESYNCS — max parallel resync snapshot jobs (default 2)
+const MAX_BOOK_SYMBOLS              = parseInt(process.env.FUTURES_OB_MAX_SYMBOLS              || '10',     10);
+
+// Binance Futures /fapi/v1/depth only accepts these exact limit values.
+// Any other value → HTTP 400. Snap configured value to nearest valid one.
+const VALID_FUTURES_DEPTH_LIMITS = [5, 10, 20, 50, 100, 500, 1000];
+function snapFuturesDepthLimit(requested) {
+  if (VALID_FUTURES_DEPTH_LIMITS.includes(requested)) return requested;
+  const snapped = VALID_FUTURES_DEPTH_LIMITS.reduce((prev, curr) =>
+    Math.abs(curr - requested) < Math.abs(prev - requested) ? curr : prev,
+  );
+  console.warn(
+    `[futures-ob] FUTURES_OB_SNAPSHOT_LIMIT=${requested} is not a valid Binance Futures depth limit` +
+    ` — snapped to ${snapped}. Valid values: ${VALID_FUTURES_DEPTH_LIMITS.join(', ')}`,
+  );
+  return snapped;
+}
+const SNAPSHOT_LIMIT = snapFuturesDepthLimit(
+  parseInt(process.env.FUTURES_OB_SNAPSHOT_LIMIT || '500', 10),
+);
+const RESYNC_COOLDOWN_MS            = parseInt(process.env.FUTURES_OB_RESYNC_COOLDOWN_MS       || '60000',  10);
+const STARTUP_STAGGER_MS            = parseInt(process.env.FUTURES_OB_CONNECT_STAGGER_MS       || '5000',   10);
+const QUARANTINE_MS                 = parseInt(process.env.FUTURES_OB_QUARANTINE_MS            || '300000', 10);
+const MAX_FAILED_RESYNCS            = parseInt(process.env.FUTURES_OB_MAX_FAILED_RESYNCS       || '3',      10);
+const MAX_GAPS_PER_MINUTE           = parseInt(process.env.FUTURES_OB_MAX_GAPS_PER_MINUTE      || '5',      10);
+const MAX_CONCURRENT_RESYNCS        = parseInt(process.env.FUTURES_OB_MAX_CONCURRENT_RESYNCS   || '2',      10);
+
+const FLUSH_INTERVAL_MS  = parseInt(process.env.ORDERBOOK_FLUSH_INTERVAL_MS || '1000', 10);
+const RECONNECT_DELAY_MS = 5000;
+const VOLUME_REFRESH_MS  = 60 * 60 * 1000;
+
+// Per-attempt REST backoff (used inside the resync queue worker)
+const RESYNC_BACKOFF_BASE_MS = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MS     || '10000',  10);
+const RESYNC_BACKOFF_MAX_MS  = parseInt(process.env.ORDERBOOK_RATE_LIMIT_BACKOFF_MAX_MS  || '300000', 10);
 const STATS_LOG_INTERVAL_MS  = 60_000;
-// Hard cap on simultaneously tracked symbols — prevents unbounded accumulation
-// after symbol rotation in the density watched list.
-const MAX_BOOK_SYMBOLS = parseInt(process.env.FUTURES_MAX_SYMBOLS || '30', 10);
 
 // ─── Global IP-level backoff ────────────────────────────────────────────
 //
@@ -54,15 +84,73 @@ function setGlobalBackoff(durationMs) {
 // are always separate in Redis.
 const obKey    = sym => `futures:orderbook:${sym}`;
 const wallsKey = sym => `futures:walls:${sym}`;
+// ─── Futures exchangeInfo cache ─────────────────────────────────────────────
+//
+// Loaded once at startup (and on refresh). Used to validate that symbols
+// being tracked actually exist as USDT-M perpetual futures — avoids wasting
+// REST weight on spot-only symbols that will always 400.
+//
+const validFuturesSymbols = new Set();    // symbols present in fapi exchangeInfo
+let   rejectedAtStartupSymbols = [];      // symbols from tracked list not in exchangeInfo
 
+async function loadExchangeInfo() {
+  const url = `${BINANCE_REST_BASE}/fapi/v1/exchangeInfo`;
+  console.log(`[futures-ob] loading exchangeInfo from ${url}`);
+  try {
+    const res = await binanceFetch(url, undefined, 'futuresOrderbookCollector', '*', 'exchangeInfo');
+    if (!res.ok) {
+      console.error(`[futures-ob] exchangeInfo HTTP ${res.status} — proceeding without symbol filter`);
+      return;
+    }
+    const info = await res.json();
+    let totalSymbols = 0;
+    let activeUsdtM  = 0;
+    validFuturesSymbols.clear();
+    for (const sym of (info.symbols || [])) {
+      totalSymbols++;
+      if (
+        sym.contractType === 'PERPETUAL' &&
+        sym.quoteAsset   === 'USDT'      &&
+        sym.status       === 'TRADING'
+      ) {
+        validFuturesSymbols.add(sym.symbol);
+        activeUsdtM++;
+      }
+    }
+    console.log(
+      `[futures-ob] exchangeInfo loaded: total=${totalSymbols}` +
+      ` activeUsdtMPerpetual=${activeUsdtM}`,
+    );
+  } catch (err) {
+    console.error(`[futures-ob] exchangeInfo load failed: ${err.message} — proceeding without symbol filter`);
+  }
+}
+
+// ─── Debug metrics ────────────────────────────────────────────────────
+//
+// In-memory counters. Accessible via getDebugState() which is called by
+// the /api/futures-ob/state backend route.
+//
+const dbgMetrics = {
+  skippedByCooldown:         0,
+  skippedByQuarantine:       0,
+  skippedByGlobalBackoff:    0,
+  totalSequenceGaps:         0,
+  totalResyncs:              0,
+  totalFailedResyncs:        0,
+  totalQuarantinedSymbols:   0,
+  snapshotRequestsAttempted: 0,
+  snapshotRequestsSucceeded: 0,
+  snapshotRequestsFailed:    0,
+};
 // ─── 24h volume cache ─────────────────────────────────────────────
 //
 // Map<symbol, quoteVolume24h (USDT)>
 // Populated on startup and refreshed hourly via Binance Futures ticker.
-//
+// Map<symbol, { volume, tradeCount24h }>
 const volumeCache = new Map();
 
-async function refreshVolumeCache(symbols) {
+async function refreshVolumeCache(symbols, redis) {
   if (isGloballyBanned()) {
     const remainingS = Math.ceil((globalBackoff.until - Date.now()) / 1000);
     console.log(`[futures-ob] volume refresh skipped — global IP backoff active (${remainingS}s remaining)`);
@@ -76,21 +164,37 @@ async function refreshVolumeCache(symbols) {
 
     const symbolSet = new Set(symbols);
     let updated = 0;
+    const pipeline = redis ? redis.pipeline() : null;
+    
     for (const t of tickers) {
       if (!symbolSet.has(t.symbol)) continue;
       const vol = parseFloat(t.quoteVolume);
-      if (isFinite(vol)) {
-        volumeCache.set(t.symbol, vol);
+      const tradeCount = parseInt(t.count, 10);
+      if (isFinite(vol) && isFinite(tradeCount)) {
+        volumeCache.set(t.symbol, { volume: vol, tradeCount24h: tradeCount });
+        // Write to Redis for dynamicTrackedSymbolsManager to filter by trade count
+        if (pipeline) {
+          pipeline.set(
+            `futures:ticker24h:${t.symbol}`,
+            JSON.stringify({ volume: vol, tradeCount24h: tradeCount, updatedAt: Date.now() }),
+            'EX',
+            3700, // expire in ~1h
+          );
+        }
         updated++;
       }
     }
+    
+    if (pipeline) await pipeline.exec();
     console.log(`[futures-ob] volume cache refreshed: ${updated}/${symbols.length} symbols`);
 
     for (const sym of symbols) {
-      const vol = volumeCache.get(sym);
-      const thr = getWallThreshold(vol);
+      const data = volumeCache.get(sym);
+      if (!data) continue;
+      const thr = getWallThreshold(data.volume);
       console.log(
-        `[futures-ob] ${sym}: futures volume24h=${vol != null ? Math.round(vol).toLocaleString() : 'n/a'} USD` +
+        `[futures-ob] ${sym}: volume24h=${Math.round(data.volume).toLocaleString()} USD` +
+        ` trades24h=${data.tradeCount24h.toLocaleString()}` +
         ` → wallThreshold=${thr.toLocaleString()} USD`,
       );
     }
@@ -99,17 +203,17 @@ async function refreshVolumeCache(symbols) {
   }
 }
 
-function startVolumeRefresh(symbols) {
+function startVolumeRefresh(symbols, redis) {
   // Delay initial fetch if a global IP ban is still active — avoids hitting
   // Binance immediately after a restart during an active ban period.
   const backoffRemaining = Math.max(0, globalBackoff.until - Date.now());
   if (backoffRemaining > 0) {
     console.log(`[futures-ob] volume refresh startup delayed by ${Math.ceil(backoffRemaining / 1000)}s (global IP backoff active)`);
-    setTimeout(() => refreshVolumeCache([...bookStates.keys()]), backoffRemaining + 2000);
+    setTimeout(() => refreshVolumeCache([...bookStates.keys()], redis), backoffRemaining + 2000);
   } else {
-    refreshVolumeCache(symbols);
+    refreshVolumeCache(symbols, redis);
   }
-  setInterval(() => refreshVolumeCache([...bookStates.keys()]), VOLUME_REFRESH_MS);
+  setInterval(() => refreshVolumeCache([...bookStates.keys()], redis), VOLUME_REFRESH_MS);
 }
 
 // ─── Wall lifetime state ──────────────────────────────────────────
@@ -195,28 +299,42 @@ async function getWatchlistSymbols(redis) {
 }
 
 // ─── Per-symbol book state ────────────────────────────────────────
+//
+// Extended BookState fields vs spot collector:
+//   consecutiveResyncFailures  — reset to 0 on success
+//   gapTimestamps              — sliding window of gap events (last 60s)
+//   quarantineUntil            — epoch ms; 0 = not quarantined
+//   lastSnapshotAt             — epoch ms of most recent successful snapshot
+//   inResyncQueue              — true while queued in resyncQueue (dedup guard)
+//
 const bookStates = new Map();
 
 function getOrCreateBook(symbol) {
   if (!bookStates.has(symbol)) {
     bookStates.set(symbol, {
       symbol,
-      bids:                     new Map(),
-      asks:                     new Map(),
-      lastUpdateId:             0,
-      synced:                   false,
-      syncing:                  false,
-      buffer:                   [],
-      dirty:                    false,
-      updatedAt:                0,
-      lastResyncAt:             0,
-      resyncCount:              0,
-      resyncSkippedCooldown:    0,
-      snapshotFetchCount:       0,
-      rateLimitCount:           0,
-      rateLimitBackoffUntilMs:  0,
-      deactivated:              false, // set true by symbol watcher to stop reconnect cycle
-      ws:                       null,  // live WebSocket ref for forced close
+      bids:                       new Map(),
+      asks:                       new Map(),
+      lastUpdateId:               0,
+      synced:                     false,
+      buffer:                     [],
+      dirty:                      false,
+      updatedAt:                  0,
+      lastResyncAt:               0,
+      resyncCount:                0,
+      resyncSkippedCooldown:      0,
+      snapshotFetchCount:         0,
+      rateLimitCount:             0,
+      rateLimitBackoffUntilMs:    0,
+      deactivated:                false,    // set true by symbol watcher to stop reconnect cycle
+      ws:                         null,     // live WebSocket ref for forced close
+      // ── circuit breaker fields ────────────────────────────────
+      consecutiveResyncFailures:  0,
+      gapTimestamps:              [],       // epoch ms of recent gap events
+      quarantineUntil:            0,        // if > Date.now() symbol is quarantined
+      lastSnapshotAt:             0,        // epoch ms of last *successful* snapshot
+      inResyncQueue:              false,    // dedup guard for global resync queue
+      lastDepthError:             null,     // { status, code, msg, ts } from most recent failed depth call
     });
   }
   return bookStates.get(symbol);
@@ -307,7 +425,8 @@ function startFlushTimer(redis) {
       const snapshot = buildSnapshot(state);
       pipeline.set(obKey(state.symbol), JSON.stringify(snapshot));
 
-      const volume24h     = volumeCache.get(state.symbol);
+      const volumeData    = volumeCache.get(state.symbol);
+      const volume24h     = volumeData?.volume ?? null;
       const wallThreshold = getWallThreshold(volume24h);
       const wallsPayload  = buildWallsPayload(snapshot, wallThreshold);
 
@@ -317,9 +436,6 @@ function startFlushTimer(redis) {
         w.source = 'futures:orderbook';
       }
 
-      applyWallLifetime(state.symbol, wallsPayload.walls, snapshot.updatedAt);
-
-      // Annotate walls with lifetime data (firstSeenTs / lastSeenTs / lifetimeMs)
       applyWallLifetime(state.symbol, wallsPayload.walls, snapshot.updatedAt);
 
       pipeline.set(wallsKey(state.symbol), JSON.stringify(wallsPayload));
@@ -336,27 +452,203 @@ function startFlushTimer(redis) {
   }, FLUSH_INTERVAL_MS);
 }
 
-// ─── Binance Futures depth sync ───────────────────────────────────
+// ─── Quarantine helpers ───────────────────────────────────────────
+
+function isQuarantined(state) {
+  return Date.now() < state.quarantineUntil;
+}
+
+function quarantineSymbol(state, reason) {
+  state.quarantineUntil            = Date.now() + QUARANTINE_MS;
+  state.consecutiveResyncFailures  = 0;
+  dbgMetrics.totalQuarantinedSymbols++;
+  console.warn(
+    `[futures-ob] ${state.symbol}: quarantined for ${QUARANTINE_MS}ms due to ${reason}` +
+    ` (until ${new Date(state.quarantineUntil).toISOString()})`,
+  );
+}
+
+// Prune gapTimestamps older than 60s and return current count.
+function recordGap(state) {
+  const now     = Date.now();
+  const cutoff  = now - 60_000;
+  state.gapTimestamps = state.gapTimestamps.filter(ts => ts > cutoff);
+  state.gapTimestamps.push(now);
+  return state.gapTimestamps.length;
+}
+
+// ─── Global resync queue ──────────────────────────────────────────
 //
-// Algorithm identical to spot, but using Futures REST + WS endpoints.
-// Binance Futures depth stream is @depth@100ms (same cadence as spot).
-// Transaction time field is `T` (not `E` which is event time).
+// Architecture:
+//   gap detected → mark state.synced = false → enqueueResync(symbol)
+//   resyncQueue (ordered Set of symbol names)
+//   resync worker: picks up to MAX_CONCURRENT_RESYNCS jobs at a time
+//   each job: up to MAX_FAILED_RESYNCS attempts (10s / 20s / 40s backoff)
+//   all attempts fail → quarantine symbol for QUARANTINE_MS
+//   global IP ban active → pause the entire queue
+//
+// This prevents cascade storms: instead of N symbols immediately firing
+// N simultaneous REST /depth calls, at most 2 run at any given moment.
+//
+
+const resyncQueue  = [];            // ordered array of symbol names
+const activeResyncs = new Set();   // symbols whose resync job is currently running
+
+function enqueueResync(symbol) {
+  const state = bookStates.get(symbol);
+  if (!state) return;
+
+  if (isQuarantined(state)) {
+    dbgMetrics.skippedByQuarantine++;
+    console.log(`[futures-ob] ${symbol}: resync skipped (quarantine active until ${new Date(state.quarantineUntil).toISOString()})`);
+    return;
+  }
+  if (state.inResyncQueue || activeResyncs.has(symbol)) {
+    console.log(`[futures-ob] ${symbol}: resync skipped (already queued)`);
+    return;
+  }
+
+  state.inResyncQueue = true;
+  resyncQueue.push(symbol);
+  console.log(`[futures-ob] ${symbol}: queued for resync (queue length=${resyncQueue.length})`);
+  scheduleQueueDrain();
+}
+
+let drainScheduled = false;
+
+function scheduleQueueDrain() {
+  if (drainScheduled) return;
+  drainScheduled = true;
+  // Small tick delay to batch multiple nearly-simultaneous enqueue calls
+  setImmediate(drainQueue);
+}
+
+function drainQueue() {
+  drainScheduled = false;
+
+  if (isGloballyBanned()) {
+    console.log('[futures-ob] global backoff active — resync queue paused');
+    return;
+  }
+
+  while (activeResyncs.size < MAX_CONCURRENT_RESYNCS && resyncQueue.length > 0) {
+    const symbol = resyncQueue.shift();
+    const state  = bookStates.get(symbol);
+    if (!state) continue;
+
+    state.inResyncQueue = false;
+    activeResyncs.add(symbol);
+    runResyncJob(symbol).finally(() => {
+      activeResyncs.delete(symbol);
+      // After each job completes, attempt to drain more if the queue is non-empty
+      if (resyncQueue.length > 0) scheduleQueueDrain();
+    });
+  }
+}
+
+// Called periodically when global backoff expires so the queue resumes.
+function resumeQueueAfterBackoff() {
+  const remaining = globalBackoff.until - Date.now();
+  if (remaining > 0) {
+    setTimeout(resumeQueueAfterBackoff, remaining + 500);
+    return;
+  }
+  if (resyncQueue.length > 0) {
+    console.log('[futures-ob] global backoff ended — resync queue resumed');
+    scheduleQueueDrain();
+  }
+}
+
+// ─── Resync job (queue worker) ────────────────────────────────────
+//
+// Executes up to MAX_FAILED_RESYNCS snapshot attempts for one symbol,
+// with exponential backoff between attempts (10s → 20s → 40s).
+// On all attempts failing the symbol is quarantined.
+//
+async function runResyncJob(symbol) {
+  const state = bookStates.get(symbol);
+  if (!state) return;
+
+  dbgMetrics.totalResyncs++;
+  console.log(`[futures-ob] ${symbol}: resync started`);
+
+  const ATTEMPT_DELAYS_MS = [
+    RESYNC_BACKOFF_BASE_MS,
+    RESYNC_BACKOFF_BASE_MS * 2,
+    RESYNC_BACKOFF_BASE_MS * 4,
+  ];
+
+  for (let attempt = 1; attempt <= MAX_FAILED_RESYNCS; attempt++) {
+    // Re-check quarantine on each attempt (may have been set externally)
+    if (isQuarantined(state)) {
+      dbgMetrics.skippedByQuarantine++;
+      console.log(`[futures-ob] ${symbol}: resync skipped (quarantine active)`);
+      return;
+    }
+
+    // Check global IP ban
+    if (isGloballyBanned()) {
+      dbgMetrics.skippedByGlobalBackoff++;
+      const remaining = globalBackoff.until - Date.now();
+      console.warn(`[futures-ob] ${symbol}: resync aborted — global IP backoff active (${Math.ceil(remaining / 1000)}s)`);
+      // Re-queue after backoff lifts so the symbol eventually resyncs
+      const requeDelay = remaining + 500 + Math.floor(Math.random() * 1000);
+      setTimeout(() => enqueueResync(symbol), requeDelay);
+      resumeQueueAfterBackoff();
+      return;
+    }
+
+    // Cooldown check
+    const msSinceLastSnap = Date.now() - (state.lastSnapshotAt || 0);
+    if (attempt === 1 && state.lastSnapshotAt > 0 && msSinceLastSnap < RESYNC_COOLDOWN_MS) {
+      dbgMetrics.skippedByCooldown++;
+      state.resyncSkippedCooldown++;
+      console.log(
+        `[futures-ob] ${symbol}: resync skipped — cooldown active` +
+        ` (${Math.round(msSinceLastSnap)}ms < ${RESYNC_COOLDOWN_MS}ms)`,
+      );
+      return;
+    }
+
+    const ok = await syncBook(state);
+    state.lastResyncAt = Date.now();
+
+    if (ok) {
+      state.consecutiveResyncFailures = 0;
+      console.log(`[futures-ob] ${symbol}: resync completed`);
+      return;
+    }
+
+    // Attempt failed
+    state.consecutiveResyncFailures++;
+    dbgMetrics.totalFailedResyncs++;
+
+    if (attempt < MAX_FAILED_RESYNCS) {
+      const delay = ATTEMPT_DELAYS_MS[attempt - 1];
+      console.warn(
+        `[futures-ob] ${symbol}: resync attempt ${attempt}/${MAX_FAILED_RESYNCS} failed` +
+        ` — retrying in ${delay}ms (consecutiveFailures=${state.consecutiveResyncFailures})`,
+      );
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  // All attempts exhausted → quarantine
+  quarantineSymbol(state, 'repeated resync failures');
+}
+
+// ─── Binance Futures depth sync (single attempt) ──────────────────
+//
+// Called exclusively by runResyncJob. Performs exactly ONE REST snapshot
+// attempt without an internal retry loop. Returns true on success.
+// Rate-limit state is updated on 429/418; caller handles retries.
 //
 async function syncBook(state) {
   const sym = state.symbol;
 
-  // ── Concurrency guard ─────────────────────────────────────────
-  if (state.syncing) {
-    console.warn(`[futures-ob] ${sym}: syncBook already in progress, skipping duplicate call`);
-    return false;
-  }
-  state.syncing = true;
-  state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
-
   // ── Rate limit backoff guard (per-symbol) ─────────────────────
   const backoffRemaining = state.rateLimitBackoffUntilMs - Date.now();
   if (backoffRemaining > 0) {
-    state.syncing = false;
     console.warn(
       `[futures-ob] ${sym}: in rate-limit backoff — skipping sync for ${Math.ceil(backoffRemaining / 1000)}s`,
     );
@@ -366,91 +658,131 @@ async function syncBook(state) {
   // ── Global IP-level backoff guard ─────────────────────────────
   if (isGloballyBanned()) {
     const globalRemaining = globalBackoff.until - Date.now();
-    state.syncing = false;    rateLimitStateStore.incSkipped('futures');    console.warn(
+    rateLimitStateStore.incSkipped('futures');
+    dbgMetrics.skippedByGlobalBackoff++;
+    console.warn(
       `[futures-ob] ${sym}: global IP backoff active — skipping sync for ${Math.ceil(globalRemaining / 1000)}s`,
     );
     return false;
   }
 
+  state.snapshotFetchCount = (state.snapshotFetchCount || 0) + 1;
+  dbgMetrics.snapshotRequestsAttempted++;
+  const depthUrl = `${BINANCE_REST_BASE}/fapi/v1/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`;
   console.log(
-    `[futures-ob] ${sym}: fetching REST depth snapshot` +
-    ` (limit=${SNAPSHOT_LIMIT} fetch#${state.snapshotFetchCount} totalResyncs=${state.resyncCount})`,
+    `[futures-ob] ${sym}: fetching REST depth snapshot →` +
+    ` ${depthUrl}` +
+    ` (fetch#${state.snapshotFetchCount} totalResyncs=${state.resyncCount})`,
   );
 
+  // ── Single REST attempt ────────────────────────────────────────
+  let res;
   try {
-
-  // ── REST snapshot with 429/418 backoff ────────────────────────
-  let snapshot;
-  let attempt = 0;
-  let backoffMs = RESYNC_BACKOFF_BASE_MS;
-
-  while (attempt < MAX_SYNC_RETRIES) {
-    attempt++;
-    try {
-      const syncReason = state.resyncCount === 0 ? 'initialSync' : `resync#${state.resyncCount}`;
-      const res = await binanceFetch(
-        `${BINANCE_REST_BASE}/fapi/v1/depth?symbol=${sym}&limit=${SNAPSHOT_LIMIT}`,
-        undefined,
-        'futuresOrderbookCollector',
-        sym,
-        syncReason,
-      );
-      if (res.status === 429 || res.status === 418) {
-        const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
-        const waitMs = retryAfterSec > 0 ? retryAfterSec * 1000 : backoffMs;
-        const boundedWait = Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
-        state.rateLimitCount = (state.rateLimitCount || 0) + 1;
-        state.rateLimitBackoffUntilMs = Date.now() + boundedWait;
-        // 418 = IP-level ban — block ALL depth calls globally, not just this symbol
-        if (res.status === 418) setGlobalBackoff(boundedWait);
-        // Mirror rate-limit event to Redis
-        {
-          const rlNow = Date.now();
-          const is418 = res.status === 418;
-          rateLimitStateStore.patchMarketState('futures', {
-            rateLimitCount:        state.rateLimitCount,
-            lastRateLimitedSymbol: sym,
-            lastRateLimitStatus:   res.status,
-            backoffUntilTs:        rlNow + boundedWait,
-            backoffDurationMs:     boundedWait,
-            lastBackoffSetTs:      rlNow,
-            lastBackoffReason:     is418 ? 'HTTP 418 IP ban' : 'HTTP 429 rate limit',
-            ...(is418 ? { last418Ts: rlNow } : { last429Ts: rlNow }),
-          });
-          rateLimitStateStore.persist();
-        }
-        console.error(
-          `[futures-ob] ${sym}: Binance rate limit HTTP ${res.status}` +
-          ` — waiting ${boundedWait}ms before retry ${attempt}/${MAX_SYNC_RETRIES}` +
-          ` rateLimitCount=${state.rateLimitCount}`,
-        );
-        await new Promise(r => setTimeout(r, waitMs));
-        backoffMs = Math.min(backoffMs * 2, RESYNC_BACKOFF_MAX_MS);
-        continue;
-      }
-      if (res.status === 400) {
-        console.warn(`[futures-ob] ${sym}: HTTP 400 from depth — symbol may not exist on futures, skipping`);
-        return false;
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      snapshot = await res.json();
-      break; // success
-    } catch (err) {
-      if (attempt >= MAX_SYNC_RETRIES) {
-        console.error(
-          `[futures-ob] ${sym}: REST snapshot failed after ${MAX_SYNC_RETRIES} attempts — ${err.message}`,
-        );
-        return false;
-      }
-      console.warn(
-        `[futures-ob] ${sym}: snapshot attempt ${attempt} error (${err.message}), retrying in ${backoffMs}ms...`,
-      );
-      await new Promise(r => setTimeout(r, backoffMs));
-      backoffMs = Math.min(backoffMs * 2, RESYNC_BACKOFF_MAX_MS);
-    }
+    const syncReason = state.resyncCount === 0 ? 'initialSync' : `resync#${state.resyncCount}`;
+    res = await binanceFetch(
+      depthUrl,
+      undefined,
+      'futuresOrderbookCollector',
+      sym,
+      syncReason,
+    );
+  } catch (err) {
+    dbgMetrics.snapshotRequestsFailed++;
+    state.lastDepthError = { status: null, code: null, msg: err.message, ts: Date.now() };
+    console.error(`[futures-ob] ${sym}: REST fetch error — ${err.message}`);
+    return false;
   }
 
-  if (!snapshot) return false;
+  if (res.status === 429 || res.status === 418) {
+    const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
+    const waitMs        = retryAfterSec > 0 ? retryAfterSec * 1000 : RESYNC_BACKOFF_BASE_MS;
+    const boundedWait   = Math.min(waitMs, RESYNC_BACKOFF_MAX_MS);
+    state.rateLimitCount = (state.rateLimitCount || 0) + 1;
+    state.rateLimitBackoffUntilMs = Date.now() + boundedWait;
+    if (res.status === 418) {
+      setGlobalBackoff(boundedWait);
+      resumeQueueAfterBackoff();
+    }
+    {
+      const rlNow = Date.now();
+      const is418 = res.status === 418;
+      rateLimitStateStore.patchMarketState('futures', {
+        rateLimitCount:        state.rateLimitCount,
+        lastRateLimitedSymbol: sym,
+        lastRateLimitStatus:   res.status,
+        backoffUntilTs:        rlNow + boundedWait,
+        backoffDurationMs:     boundedWait,
+        lastBackoffSetTs:      rlNow,
+        lastBackoffReason:     is418 ? 'HTTP 418 IP ban' : 'HTTP 429 rate limit',
+        ...(is418 ? { last418Ts: rlNow } : { last429Ts: rlNow }),
+      });
+      rateLimitStateStore.persist();
+    }
+    dbgMetrics.snapshotRequestsFailed++;
+    console.error(
+      `[futures-ob] ${sym}: Binance rate limit HTTP ${res.status}` +
+      ` — waitMs=${boundedWait} rateLimitCount=${state.rateLimitCount}`,
+    );
+    return false;
+  }
+
+  if (res.status === 400) {
+    let body = {};
+    try { body = await res.json(); } catch (_) {}
+    const bnCode = typeof body.code === 'number' ? body.code : null;
+    const bnMsg  = body.msg  || '';
+    state.lastDepthError = { status: 400, code: bnCode, msg: bnMsg, ts: Date.now() };
+    dbgMetrics.snapshotRequestsFailed++;
+
+    if (bnCode === -1121) {
+      // Binance error -1121: Invalid symbol — this symbol does not exist on futures.
+      // Deactivate immediately and stop reconnect cycle; no retries needed.
+      console.warn(
+        `[futures-ob] ${sym}: HTTP 400 code=${bnCode} msg="${bnMsg}"` +
+        ` — symbol does not exist on futures, deactivating`,
+      );
+      state.deactivated = true;
+      state.ws?.terminate();
+      return false;
+    }
+
+    // Other 400 — request/config error (wrong limit, missing param, etc.)
+    console.warn(
+      `[futures-ob] ${sym}: HTTP 400 code=${bnCode} msg="${bnMsg}"` +
+      ` — request/config error (check SNAPSHOT_LIMIT=${SNAPSHOT_LIMIT} and URL: ${depthUrl})`,
+    );
+    return false;
+  }
+
+  if (!res.ok) {
+    dbgMetrics.snapshotRequestsFailed++;
+    state.lastDepthError = { status: res.status, code: null, msg: `HTTP ${res.status}`, ts: Date.now() };
+    console.error(`[futures-ob] ${sym}: unexpected HTTP ${res.status} from depth`);
+    return false;
+  }
+
+  let snapshot;
+  try {
+    snapshot = await res.json();
+  } catch (err) {
+    dbgMetrics.snapshotRequestsFailed++;
+    state.lastDepthError = { status: res.status, code: null, msg: `JSON parse: ${err.message}`, ts: Date.now() };
+    console.error(`[futures-ob] ${sym}: failed to parse snapshot JSON — ${err.message}`);
+    return false;
+  }
+
+  // Guard: Binance may return HTTP 200 with error body for invalid symbols.
+  if (!Array.isArray(snapshot.bids) || !Array.isArray(snapshot.asks)) {
+    dbgMetrics.snapshotRequestsFailed++;
+    const bnCode = typeof snapshot.code === 'number' ? snapshot.code : null;
+    const bnMsg  = snapshot.msg || 'missing bids/asks';
+    state.lastDepthError = { status: 200, code: bnCode, msg: bnMsg, ts: Date.now() };
+    console.warn(
+      `[futures-ob] ${sym}: snapshot missing bids/asks — code=${bnCode} msg="${bnMsg}"` +
+      ` body=${JSON.stringify(snapshot).slice(0, 120)}`,
+    );
+    return false;
+  }
 
   const snapId = snapshot.lastUpdateId;
   console.log(
@@ -479,21 +811,25 @@ async function syncBook(state) {
     if (event.U > state.lastUpdateId + 1) {
       console.warn(
         `[futures-ob] ${sym}: sequence gap in buffer` +
-        ` (U=${event.U} > lastUpdateId+1=${state.lastUpdateId + 1}), resyncing...`,
+        ` (U=${event.U} > lastUpdateId+1=${state.lastUpdateId + 1}), re-queuing resync...`,
       );
       state.buffer = [];
-      return false; // syncBook will retry via connectOrderbook after ws.terminate()
+      dbgMetrics.snapshotRequestsFailed++;
+      return false;
     }
 
     applyEvent(state, event);
     applied++;
   }
 
-  state.buffer  = [];
-  state.synced  = true;
-  state.dirty   = true;
+  state.buffer         = [];
+  state.synced         = true;
+  state.dirty          = true;
+  state.lastSnapshotAt = Date.now();
+  state.resyncCount    = (state.resyncCount || 0) + 1;
+  dbgMetrics.snapshotRequestsSucceeded++;
 
-  // Mirror success to Redis rate-limit state if we were previously in backoff
+  // Clear market-state backoff flag if we succeeded
   if (rateLimitStateStore.getMarketState('futures').backoffUntilTs !== null) {
     const wasBackoffActive = rateLimitStateStore.getMarketState('futures').globalBackoffActive;
     rateLimitStateStore.patchMarketState('futures', { lastSuccessTs: Date.now() });
@@ -510,16 +846,36 @@ async function syncBook(state) {
     ` lastUpdateId=${state.lastUpdateId}`,
   );
   return true;
-
-  } finally {
-    state.syncing = false;
-  }
 }
 
 // ─── WS connection per symbol ─────────────────────────────────────
 function connectOrderbook(symbol) {
   const state  = getOrCreateBook(symbol);
   if (state.deactivated) return; // symbol removed by watcher — stop reconnect cycle
+
+  // Guard: skip if a WS is already open or connecting to prevent duplicate REST /depth calls
+  if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+    console.warn(`[futures-ob] ${symbol}: connectOrderbook skipped — WS already active (readyState=${state.ws.readyState})`);
+    return;
+  }
+
+  // Do not connect if currently quarantined — wait for quarantine to lift.
+  if (isQuarantined(state)) {
+    const waitMs = state.quarantineUntil - Date.now();
+    console.warn(`[futures-ob] ${symbol}: connection deferred — quarantine active (${Math.ceil(waitMs / 1000)}s remaining)`);
+    setTimeout(() => connectOrderbook(symbol), waitMs + 500);
+    return;
+  }
+
+  // Do not start new connections during global IP ban.
+  if (isGloballyBanned()) {
+    const waitMs = globalBackoff.until - Date.now();
+    const jitter = Math.floor(Math.random() * 2000);
+    console.warn(`[futures-ob] ${symbol}: connection deferred — global IP backoff active (${Math.ceil(waitMs / 1000)}s remaining)`);
+    setTimeout(() => connectOrderbook(symbol), waitMs + jitter);
+    return;
+  }
+
   state.synced = false;
   state.buffer = [];
 
@@ -531,13 +887,9 @@ function connectOrderbook(symbol) {
   state.ws = ws;
 
   ws.on('open', () => {
-    console.log(`[futures-ob] ${symbol}: WS open — buffering events, fetching REST snapshot...`);
-    syncBook(state).then(ok => {
-      if (!ok) {
-        console.warn(`[futures-ob] ${symbol}: initial sync failed, terminating WS to reconnect...`);
-        ws.terminate();
-      }
-    });
+    console.log(`[futures-ob] ${symbol}: WS open — buffering events, queuing initial resync...`);
+    // Initial sync goes through the queue to respect concurrency cap and cooldown.
+    enqueueResync(symbol);
   });
 
   ws.on('message', (raw) => {
@@ -559,38 +911,45 @@ function connectOrderbook(symbol) {
 
     if (msg.u <= state.lastUpdateId) return;
 
+    // Live sequence gap detected
     if (msg.U > state.lastUpdateId + 1) {
-      const now = Date.now();
+      const now       = Date.now();
+      dbgMetrics.totalSequenceGaps++;
+
+      // Track rapid-gap rate for quarantine trigger
+      const gapsInLastMinute = recordGap(state);
+      if (gapsInLastMinute >= MAX_GAPS_PER_MINUTE) {
+        quarantineSymbol(state, `${gapsInLastMinute} sequence gaps in the last 60s`);
+        state.synced = false;
+        state.buffer = [];
+        ws.terminate();
+        return;
+      }
+
       const msSinceLast = now - (state.lastResyncAt || 0);
 
-      // Cooldown: drop the gap event if too soon
-      if (msSinceLast < RESYNC_COOLDOWN_MS && state.lastResyncAt !== 0) {
-        state.resyncSkippedCooldown = (state.resyncSkippedCooldown || 0) + 1;
+      // Cooldown guard — drop gap if snapshot cooldown is active
+      if (state.lastSnapshotAt > 0 && (now - state.lastSnapshotAt) < RESYNC_COOLDOWN_MS) {
+        state.resyncSkippedCooldown++;
+        dbgMetrics.skippedByCooldown++;
         console.warn(
-          `[futures-ob] ${symbol}: live gap skipped — cooldown (${Math.round(msSinceLast)}ms < ${RESYNC_COOLDOWN_MS}ms)` +
+          `[futures-ob] ${symbol}: live gap skipped — cooldown active` +
+          ` (${Math.round(now - state.lastSnapshotAt)}ms < ${RESYNC_COOLDOWN_MS}ms)` +
           ` skippedTotal=${state.resyncSkippedCooldown}`,
         );
         return;
       }
 
-      state.resyncCount = (state.resyncCount || 0) + 1;
       state.synced = false;
       state.buffer = [msg];
-
-      const delay = Math.max(0, RESYNC_COOLDOWN_MS - msSinceLast);
-      state.lastResyncAt = now;
 
       console.warn(
         `[futures-ob] ${symbol}: live sequence gap` +
         ` (U=${msg.U} expected=${state.lastUpdateId + 1})` +
-        ` resync#${state.resyncCount} in ${delay}ms`,
+        ` gapsThisMinute=${gapsInLastMinute} msSinceLast=${Math.round(msSinceLast)}`,
       );
 
-      setTimeout(() => {
-        syncBook(state).then(ok => {
-          if (!ok) ws.terminate();
-        });
-      }, delay);
+      enqueueResync(symbol);
       return;
     }
 
@@ -603,10 +962,15 @@ function connectOrderbook(symbol) {
 
   ws.on('close', code => {
     if (state.deactivated) return; // removed by watcher — stop reconnect cycle
+    if (isQuarantined(state)) {
+      const waitMs = state.quarantineUntil - Date.now();
+      console.warn(`[futures-ob] ${symbol}: WS closed, reconnect deferred — quarantine (${Math.ceil(waitMs / 1000)}s)`);
+      setTimeout(() => connectOrderbook(symbol), waitMs + 500);
+      return;
+    }
     const perSymBackoff   = Math.max(0, (state.rateLimitBackoffUntilMs || 0) - Date.now());
     const globalRemaining = Math.max(0, globalBackoff.until - Date.now());
     const baseDelay       = Math.max(RECONNECT_DELAY_MS, perSymBackoff, globalRemaining);
-    // Spread reconnects across symbols after global backoff expires to avoid burst
     const jitter          = globalRemaining > 0 ? Math.floor(Math.random() * 3000) : 0;
     const reconnectDelay  = baseDelay + jitter;
     if (globalRemaining > 0 || perSymBackoff > 0) {
@@ -623,19 +987,98 @@ function connectOrderbook(symbol) {
 // ─── Periodic stats logger ────────────────────────────────────────
 function startStatsLogger() {
   setInterval(() => {
+    const now = Date.now();
     for (const [sym, state] of bookStates.entries()) {
-      const inBackoff = Date.now() < state.rateLimitBackoffUntilMs;
+      const inBackoff    = now < state.rateLimitBackoffUntilMs;
+      const quarantined  = isQuarantined(state);
+      const quarLeftMs   = quarantined ? Math.ceil((state.quarantineUntil - now) / 1000) : 0;
       console.log(
         `[futures-ob:stats] ${sym}:` +
         ` synced=${state.synced}` +
         ` snapshotFetches=${state.snapshotFetchCount}` +
         ` resyncs=${state.resyncCount}` +
         ` skippedCooldown=${state.resyncSkippedCooldown || 0}` +
+        ` consecutiveFailures=${state.consecutiveResyncFailures}` +
         ` rateLimits=${state.rateLimitCount || 0}` +
-        ` inBackoff=${inBackoff}`,
+        ` inBackoff=${inBackoff}` +
+        (quarantined ? ` QUARANTINED=${quarLeftMs}s` : ''),
       );
     }
+    console.log(
+      `[futures-ob:stats] queue: active=${activeResyncs.size}/${MAX_CONCURRENT_RESYNCS}` +
+      ` queued=${resyncQueue.length}` +
+      ` totalGaps=${dbgMetrics.totalSequenceGaps}` +
+      ` totalResyncs=${dbgMetrics.totalResyncs}` +
+      ` totalFailed=${dbgMetrics.totalFailedResyncs}` +
+      ` totalQuarantined=${dbgMetrics.totalQuarantinedSymbols}` +
+      ` snapshotOk=${dbgMetrics.snapshotRequestsSucceeded}` +
+      ` snapshotFail=${dbgMetrics.snapshotRequestsFailed}`,
+    );
   }, STATS_LOG_INTERVAL_MS);
+}
+
+// ─── Debug state export ───────────────────────────────────────────
+//
+// Called by the /api/futures-ob/state backend route.
+//
+function getDebugState() {
+  const now    = Date.now();
+  const active = [];
+  const quarantined = [];
+
+  for (const [sym, state] of bookStates.entries()) {
+    const entry = {
+      symbol:                    sym,
+      synced:                    state.synced,
+      inResyncQueue:             state.inResyncQueue || activeResyncs.has(sym),
+      inBackoff:                 now < state.rateLimitBackoffUntilMs,
+      snapshotFetches:           state.snapshotFetchCount,
+      resyncCount:               state.resyncCount,
+      consecutiveResyncFailures: state.consecutiveResyncFailures,
+      skippedCooldown:           state.resyncSkippedCooldown,
+      rateLimitCount:            state.rateLimitCount,
+      gapsLastMinute:            state.gapTimestamps.filter(ts => ts > now - 60_000).length,
+      lastSnapshotAt:            state.lastSnapshotAt || null,
+      lastResyncAt:              state.lastResyncAt   || null,
+      lastDepthError:            state.lastDepthError || null,
+    };
+    if (isQuarantined(state)) {
+      quarantined.push({ ...entry, quarantineUntil: state.quarantineUntil, quarantineRemainingMs: state.quarantineUntil - now });
+    } else {
+      active.push(entry);
+    }
+  }
+
+  return {
+    config: {
+      FUTURES_OB_MAX_SYMBOLS:             MAX_BOOK_SYMBOLS,
+      FUTURES_OB_SNAPSHOT_LIMIT:          SNAPSHOT_LIMIT,
+      FUTURES_OB_RESYNC_COOLDOWN_MS:      RESYNC_COOLDOWN_MS,
+      FUTURES_OB_CONNECT_STAGGER_MS:      STARTUP_STAGGER_MS,
+      FUTURES_OB_QUARANTINE_MS:           QUARANTINE_MS,
+      FUTURES_OB_MAX_FAILED_RESYNCS:      MAX_FAILED_RESYNCS,
+      FUTURES_OB_MAX_GAPS_PER_MINUTE:     MAX_GAPS_PER_MINUTE,
+      FUTURES_OB_MAX_CONCURRENT_RESYNCS:  MAX_CONCURRENT_RESYNCS,
+    },
+    globalBackoff: {
+      active:      isGloballyBanned(),
+      until:       globalBackoff.until || null,
+      remainingMs: isGloballyBanned() ? globalBackoff.until - now : 0,
+    },
+    queue: {
+      activeResyncs:  [...activeResyncs],
+      queuedResyncs:  [...resyncQueue],
+      activeCount:    activeResyncs.size,
+      queuedCount:    resyncQueue.length,
+    },
+    metrics: { ...dbgMetrics, activeSymbols: bookStates.size },
+    symbols: { active, quarantined },
+    exchangeInfo: {
+      validFuturesSymbolsCount:     validFuturesSymbols.size,
+      activeFuturesTrackedSymbols:  [...bookStates.keys()],
+      rejectedAtStartupSymbols,
+    },
+  };
 }
 
 // ─── Pending-connection guard ─────────────────────────────────────────────────
@@ -643,7 +1086,7 @@ const pendingSymbols = new Set();
 
 function startSymbolWatcher(redis) {
   const CHECK_MS    = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS || '15000', 10);
-  const ADD_STAGGER = 1500;
+  const ADD_STAGGER = STARTUP_STAGGER_MS; // use same stagger as startup for consistency
   setInterval(async () => {
     try {
       const raw = await redis.get('density:symbols:tracked:futures');
@@ -669,6 +1112,7 @@ function startSymbolWatcher(redis) {
 
       const newSymbols = data.symbols
         .filter(sym => !bookStates.has(sym) && !pendingSymbols.has(sym))
+        .filter(sym => validFuturesSymbols.size === 0 || validFuturesSymbols.has(sym))
         .slice(0, slotsAvailable);
       if (newSymbols.length === 0) return;
 
@@ -691,6 +1135,29 @@ function startSymbolWatcher(redis) {
   }, CHECK_MS);
 }
 
+// ─── Debug state Redis writer ─────────────────────────────────────
+//
+// Writes a snapshot of getDebugState() to Redis every 30s so the backend
+// /api/futures-ob/state endpoint can serve it without talking to the
+// collector process directly.
+//
+const DEBUG_STATE_REDIS_KEY    = 'debug:futures-ob-state';
+const DEBUG_STATE_INTERVAL_MS  = 30_000;
+
+function startDebugStateLogger(redis) {
+  const write = () => {
+    try {
+      const state = getDebugState();
+      redis.set(DEBUG_STATE_REDIS_KEY, JSON.stringify({ ...state, writtenAt: Date.now() }))
+        .catch(err => console.error('[futures-ob] debug-state Redis write error:', err.message));
+    } catch (err) {
+      console.error('[futures-ob] debug-state build error:', err.message);
+    }
+  };
+  write(); // immediate first write
+  setInterval(write, DEBUG_STATE_INTERVAL_MS);
+}
+
 async function start(redis) {
   await rateLimitStateStore.initAndRestore(redis, { futures: globalBackoff });
 
@@ -701,21 +1168,55 @@ async function start(redis) {
     );
   }
 
-  const symbols = await getWatchlistSymbols(redis);
+  // Load exchange info first — builds validFuturesSymbols so we
+  // never attempt spot-only symbols against the futures depth endpoint.
+  await loadExchangeInfo();
+
+  const rawSymbols = await getWatchlistSymbols(redis);
+  let symbols;
+  if (validFuturesSymbols.size > 0) {
+    symbols = rawSymbols.filter(s => validFuturesSymbols.has(s));
+    rejectedAtStartupSymbols = rawSymbols.filter(s => !validFuturesSymbols.has(s));
+    if (rejectedAtStartupSymbols.length > 0) {
+      console.warn(
+        `[futures-ob] ${rejectedAtStartupSymbols.length} symbol(s) not in futures exchangeInfo` +
+        ` (spot-only or delisted) — excluded: ${rejectedAtStartupSymbols.join(', ')}`,
+      );
+    }
+  } else {
+    console.warn('[futures-ob] validFuturesSymbols empty (exchangeInfo failed?) — using unfiltered list');
+    symbols = rawSymbols;
+    rejectedAtStartupSymbols = [];
+  }
+
   console.log(`[futures-ob] Starting futures orderbook collector for: ${symbols.join(', ')}`);
 
-  startVolumeRefresh(symbols);
+  startVolumeRefresh(symbols, redis);
   startStatsLogger();
   startFlushTimer(redis);
+  startDebugStateLogger(redis);
   startSymbolWatcher(redis);
 
-  // Stagger initial connections to spread REST depth burst.
-  // Cap at MAX_BOOK_SYMBOLS so we never start with more than the allowed limit.
+  // Stagger initial connections to avoid a burst of simultaneous REST /depth calls.
+  // Cap at MAX_BOOK_SYMBOLS (default 10). Each connection fires every STARTUP_STAGGER_MS
+  // (default 5s), giving Binance Futures REST room to breathe.
   const startupSymbols = symbols.slice(0, MAX_BOOK_SYMBOLS);
-  console.log(`[futures-ob] connecting ${startupSymbols.length}/${symbols.length} symbols (cap=${MAX_BOOK_SYMBOLS}, stagger=${STARTUP_STAGGER_MS}ms each)...`);
+  console.log(
+    `[futures-ob] starting with ${startupSymbols.length} symbols` +
+    ` (cap=${MAX_BOOK_SYMBOLS}, stagger=${STARTUP_STAGGER_MS}ms)`,
+  );
   startupSymbols.forEach((sym, i) => {
-    setTimeout(() => connectOrderbook(sym), i * STARTUP_STAGGER_MS);
+    // Mark pending so startSymbolWatcher doesn't double-queue these.
+    pendingSymbols.add(sym);
+    setTimeout(() => {
+      pendingSymbols.delete(sym);
+      console.log(`[futures-ob] connecting ${sym} (${i + 1}/${startupSymbols.length})`);
+      connectOrderbook(sym);
+    }, i * STARTUP_STAGGER_MS);
   });
+
+  // If a global backoff was restored from Redis, kick off the resume watcher.
+  if (isGloballyBanned()) resumeQueueAfterBackoff();
 }
 
-module.exports = { start };
+module.exports = { start, getDebugState };

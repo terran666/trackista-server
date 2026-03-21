@@ -120,9 +120,11 @@ async function resolveSymbols(redis, symbolsParam, limit, marketType) {
     const data = safeParse(raw);
     symbols = Array.isArray(data?.symbols) && data.symbols.length > 0 ? data.symbols : [];
   } else {
-    const raw = await redis.get('symbols:active:usdt');
-    symbols = safeParse(raw);
-    if (!Array.isArray(symbols)) symbols = [];
+    // Use the spot-specific tracked list (written by dynamicTrackedSymbolsManager).
+    // Falls back to empty when spot density is disabled.
+    const raw = await redis.get('density:symbols:tracked:spot');
+    const data = safeParse(raw);
+    symbols = Array.isArray(data?.symbols) ? data.symbols : [];
   }
 
   if (limit && limit > 0) {

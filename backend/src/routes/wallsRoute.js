@@ -3,8 +3,12 @@
 // ─── GET /api/walls ───────────────────────────────────────────────
 //
 // Query params:
-//   symbol     (required)  e.g. BTCUSDT
-//   marketType (optional)  "spot" (default) | "futures"
+//   symbol          (required)  e.g. BTCUSDT
+//   marketType      (optional)  "spot" (default) | "futures" | "all"
+//   state           (optional)  "confirmed" | "persistent" | "all" (default: all)
+//   minQualityScore (optional)  number 0–100 (default: 0)
+//   hideSpoof       (optional)  "true" | "false" (default: false)
+//   sourceUniverse  (optional)  "testpage" | any — future filter, currently informational
 //
 // Redis keys:
 //   spot:    walls:${symbol}
@@ -53,8 +57,11 @@
 //
 function createWallsHandler(redis) {
   return async function wallsHandler(req, res) {
-    const symbol     = (req.query.symbol     || '').toUpperCase().trim();
-    const marketType = (req.query.marketType || 'spot').toLowerCase();
+    const symbol          = (req.query.symbol     || '').toUpperCase().trim();
+    const marketType      = (req.query.marketType || 'spot').toLowerCase();
+    const stateFilter     = (req.query.state      || 'all').toLowerCase();
+    const minQuality      = parseInt(req.query.minQualityScore || '0', 10);
+    const hideSpoof       = req.query.hideSpoof === 'true';
 
     if (!symbol) {
       return res.status(400).json({
@@ -99,7 +106,24 @@ function createWallsHandler(redis) {
         });
       }
 
-      return res.json({ success: true, symbol, marketType, tracked: true, walls: JSON.parse(raw) });
+      const parsed = JSON.parse(raw);
+
+      // Apply optional filters to walls array
+      if (parsed.walls && Array.isArray(parsed.walls)) {
+        let walls = parsed.walls;
+        if (stateFilter !== 'all') {
+          walls = walls.filter(w => w.status === stateFilter);
+        }
+        if (minQuality > 0) {
+          walls = walls.filter(w => (w.qualityScore ?? 0) >= minQuality);
+        }
+        if (hideSpoof) {
+          walls = walls.filter(w => !(w.isSuspiciousSpoof ?? false));
+        }
+        parsed.walls = walls;
+      }
+
+      return res.json({ success: true, symbol, marketType, tracked: true, walls: parsed });
     } catch (err) {
       console.error(`[walls] GET /api/walls error symbol=${symbol} marketType=${marketType}:`, err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

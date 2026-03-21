@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TESTTEST — Move Intelligence Debugger</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#0f1117; color:#e2e8f0; font-family:'Inter',system-ui,sans-serif; }
+  .card { background:#1a1f2e; border:1px solid #2d3748; border-radius:8px; }
+  .label { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#718096; }
+  .val   { font-size:13px; font-weight:600; color:#e2e8f0; }
+  .pos   { color:#68d391; }
+  .neg   { color:#fc8181; }
+  .neu   { color:#90cdf4; }
+  .badge { display:inline-flex; align-items:center; padding:1px 7px; border-radius:12px; font-size:11px; font-weight:600; }
+  .badge-s  { background:#1a472a; color:#68d391; }
+  .badge-a  { background:#1c3a5e; color:#90cdf4; }
+  .badge-b  { background:#3d2c0a; color:#f6ad55; }
+  .badge-c  { background:#322020; color:#fc8181; }
+  .badge-d  { background:#1a1a1a; color:#718096; }
+  .tab-btn.active { border-bottom:2px solid #63b3ed; color:#63b3ed; }
+  .tab-btn { border-bottom:2px solid transparent; color:#718096; cursor:pointer; padding:6px 12px; font-size:13px; }
+  pre { white-space:pre-wrap; word-break:break-all; font-size:11px; line-height:1.5; color:#a0aec0; }
+  .spin { animation:spin 1s linear infinite; }
+  @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .grid-3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .mini-kv { display:flex; justify-content:space-between; align-items:center; padding:3px 0; border-bottom:1px solid #2d3748; }
+  .mini-kv:last-child { border-bottom:none; }
+  .flash { animation:flash .4s ease; }
+  @keyframes flash { 0%{background:#2d4a6e} 100%{background:transparent} }
+  .level-bar { height:6px; border-radius:3px; background:#2d3748; overflow:hidden; margin-top:3px; }
+  .level-bar-fill { height:100%; border-radius:3px; transition:width .4s; }
+  .scroll-box { overflow-y:auto; max-height:320px; }
+</style>
+</head>
+<body class="min-h-screen p-4">
+
+<!-- Header -->
+<div class="flex items-center justify-between mb-4">
+  <div class="flex items-center gap-3">
+    <div class="text-xl font-bold text-white">⚡ TESTTEST</div>
+    <div class="text-xs text-gray-500">Move Intelligence Debugger</div>
+  </div>
+  <div class="flex items-center gap-3">
+    <select id="symSelect" class="bg-gray-800 border border-gray-600 text-white text-sm rounded px-3 py-1.5">
+      <option value="BTCUSDT">BTCUSDT</option>
+      <option value="ETHUSDT">ETHUSDT</option>
+      <option value="SOLUSDT">SOLUSDT</option>
+      <option value="BNBUSDT">BNBUSDT</option>
+    </select>
+    <input id="symInput" type="text" placeholder="Or type symbol…"
+      class="bg-gray-800 border border-gray-600 text-white text-sm rounded px-3 py-1.5 w-28"
+      onkeydown="if(event.key==='Enter')setSym(this.value.trim().toUpperCase())">
+    <button onclick="setSym(document.getElementById('symInput').value.trim().toUpperCase()||document.getElementById('symSelect').value)"
+      class="bg-blue-700 hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded">Load</button>
+    <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+      <input type="checkbox" id="autoRefresh" checked class="accent-blue-500">Auto
+    </label>
+    <span id="ticker" class="text-xs text-gray-600 w-20 text-right"></span>
+    <span id="spinner" class="text-blue-400 text-lg hidden">⟳</span>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="flex gap-0 mb-4 border-b border-gray-700">
+  <button class="tab-btn active" data-tab="live">Live Context</button>
+  <button class="tab-btn" data-tab="ranking">Ranking</button>
+  <button class="tab-btn" data-tab="derivatives">Derivatives</button>
+  <button class="tab-btn" data-tab="walls">Walls</button>
+  <button class="tab-btn" data-tab="history">History</button>
+  <button class="tab-btn" data-tab="redis">Redis</button>
+  <button class="tab-btn" data-tab="leaders">Leaders</button>
+  <button class="tab-btn" data-tab="system">System</button>
+</div>
+
+<!-- ─── TAB: Live Context ──────────────────────────────────────────── -->
+<div id="tab-live" class="tab-pane">
+  <div class="grid-3 mb-3">
+    <!-- Price Card -->
+    <div class="card p-3">
+      <div class="label mb-2">Price</div>
+      <div class="text-2xl font-bold val" id="lv-price">—</div>
+      <div class="grid grid-cols-3 gap-1 mt-2">
+        <div><div class="label">1m</div><div class="val text-xs" id="lv-p1m">—</div></div>
+        <div><div class="label">5m</div><div class="val text-xs" id="lv-p5m">—</div></div>
+        <div><div class="label">15m</div><div class="val text-xs" id="lv-p15m">—</div></div>
+        <div><div class="label">3m</div><div class="val text-xs" id="lv-p3m">—</div></div>
+        <div><div class="label">30m</div><div class="val text-xs" id="lv-p30m">—</div></div>
+        <div><div class="label">1h</div><div class="val text-xs" id="lv-p1h">—</div></div>
+      </div>
+    </div>
+    <!-- Move Live -->
+    <div class="card p-3">
+      <div class="flex justify-between items-center mb-2">
+        <div class="label">Active Move</div>
+        <span id="lv-move-status" class="badge text-xs">—</span>
+      </div>
+      <div id="lv-move-pct" class="text-2xl font-bold">—</div>
+      <div class="mini-kv mt-1"><span class="label">Direction</span><span class="val text-xs" id="lv-move-dir">—</span></div>
+      <div class="mini-kv"><span class="label">Timeframe</span><span class="val text-xs" id="lv-move-tf">—</span></div>
+      <div class="mini-kv"><span class="label">Duration</span><span class="val text-xs" id="lv-move-dur">—</span></div>
+      <div class="mini-kv"><span class="label">EventID</span><span class="val text-xs truncate max-w-[120px]" id="lv-move-id">—</span></div>
+    </div>
+    <!-- Pre-Signal -->
+    <div class="card p-3">
+      <div class="flex justify-between items-center mb-2">
+        <div class="label">Pre-Signal</div>
+        <span id="lv-ps-label" class="badge text-xs">—</span>
+      </div>
+      <div class="flex items-end gap-1">
+        <div id="lv-ps-score" class="text-2xl font-bold">—</div>
+        <div class="text-xs text-gray-500 mb-1">/ 100</div>
+      </div>
+      <div class="level-bar mb-2"><div class="level-bar-fill bg-blue-500" id="lv-ps-bar" style="width:0%"></div></div>
+      <div class="mini-kv"><span class="label">Direction</span><span class="val text-xs" id="lv-ps-dir">—</span></div>
+      <div class="mini-kv"><span class="label">Confidence</span><span class="val text-xs" id="lv-ps-conf">—</span></div>
+      <div class="mini-kv"><span class="label">Signal Type</span><span class="val text-xs" id="lv-ps-type">—</span></div>
+      <div class="mini-kv"><span class="label">Noise Penalty</span><span class="val text-xs" id="lv-ps-noise">—</span></div>
+      <div class="mini-kv"><span class="label">Distance</span><span class="val text-xs" id="lv-ps-dist">—</span></div>
+    </div>
+  </div>
+  <!-- Tape row -->
+  <div class="card p-3 mb-3">
+    <div class="label mb-2">Tape / Signal</div>
+    <div class="grid grid-cols-4 gap-3">
+      <div><div class="label">Vol 60s</div><div class="val" id="lv-vol60">—</div></div>
+      <div><div class="label">Trades 60s</div><div class="val" id="lv-tc60">—</div></div>
+      <div><div class="label">Delta 60s</div><div class="val" id="lv-delta">—</div></div>
+      <div><div class="label">Activity</div><div class="val" id="lv-activity">—</div></div>
+      <div><div class="label">Vol Spike 15s</div><div class="val" id="lv-vsr15">—</div></div>
+      <div><div class="label">Trade Accel</div><div class="val" id="lv-taccel">—</div></div>
+      <div><div class="label">Impulse</div><div class="val" id="lv-impulse">—</div></div>
+      <div><div class="label">inPlay</div><div class="val" id="lv-inplay">—</div></div>
+    </div>
+  </div>
+  <!-- Explain -->
+  <div class="grid-2">
+    <div class="card p-3">
+      <div class="label mb-2">Explain — Happened</div>
+      <div id="lv-exp-happened" class="text-xs text-gray-400">—</div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Explain — Building</div>
+      <div id="lv-exp-building" class="text-xs text-gray-400">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── TAB: Ranking ───────────────────────────────────────────────── -->
+<div id="tab-ranking" class="tab-pane hidden">
+  <div class="grid-2 mb-3">
+    <div class="card p-3">
+      <div class="label mb-2">Happened Rank</div>
+      <div class="flex items-end gap-2 mb-2">
+        <div class="text-3xl font-bold val" id="rk-h-score">—</div>
+        <span id="rk-h-label" class="badge">—</span>
+      </div>
+      <div id="rk-h-breakdown" class="space-y-1"></div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Building Rank</div>
+      <div class="flex items-end gap-2 mb-2">
+        <div class="text-3xl font-bold val" id="rk-b-score">—</div>
+        <span id="rk-b-label" class="badge">—</span>
+      </div>
+      <div id="rk-b-breakdown" class="space-y-1"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── TAB: Derivatives ───────────────────────────────────────────── -->
+<div id="tab-derivatives" class="tab-pane hidden">
+  <div class="grid-3 mb-3">
+    <div class="card p-3">
+      <div class="label mb-2">Funding</div>
+      <div class="val text-lg" id="dr-funding-rate">—</div>
+      <div class="mini-kv"><span class="label">Bias</span><span class="val text-xs" id="dr-funding-bias">—</span></div>
+      <div class="mini-kv"><span class="label">Delta</span><span class="val text-xs" id="dr-funding-delta">—</span></div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Open Interest</div>
+      <div class="val text-lg" id="dr-oi">—</div>
+      <div class="mini-kv"><span class="label">Bias</span><span class="val text-xs" id="dr-oi-bias">—</span></div>
+      <div class="mini-kv"><span class="label">Delta 5m</span><span class="val text-xs" id="dr-oi-delta">—</span></div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Liquidations</div>
+      <div class="mini-kv"><span class="label">Long 5m</span><span class="val text-xs" id="dr-liq-long">—</span></div>
+      <div class="mini-kv"><span class="label">Short 5m</span><span class="val text-xs" id="dr-liq-short">—</span></div>
+      <div class="mini-kv"><span class="label">Bias</span><span class="val text-xs" id="dr-liq-bias">—</span></div>
+      <div class="mini-kv"><span class="label">Squeeze Risk</span><span class="val text-xs" id="dr-squeeze">—</span></div>
+    </div>
+  </div>
+  <div class="card p-3">
+    <div class="label mb-2">Derivatives Composite</div>
+    <div class="flex gap-6">
+      <div><div class="label">Global Bias</div><div class="val text-lg" id="dr-global-bias">—</div></div>
+      <div><div class="label">Confidence</div><div class="val text-lg" id="dr-confidence">—</div></div>
+      <div><div class="label">Dir Alignment</div><div class="val text-lg" id="dr-alignment">—</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── TAB: Walls ─────────────────────────────────────────────────── -->
+<div id="tab-walls" class="tab-pane hidden">
+  <div class="grid-2 mb-3">
+    <div class="card p-3">
+      <div class="label mb-2">Bid Walls</div>
+      <div class="mini-kv"><span class="label">Nearest Distance</span><span class="val" id="wl-bid-dist">—</span></div>
+      <div class="mini-kv"><span class="label">Nearest USD</span><span class="val" id="wl-bid-usd">—</span></div>
+      <div class="mini-kv"><span class="label">Pressure</span><span class="val" id="wl-bid-pressure">—</span></div>
+      <div class="mini-kv"><span class="label">Bounce Chance</span><span class="val" id="wl-bounce">—</span></div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Ask Walls</div>
+      <div class="mini-kv"><span class="label">Nearest Distance</span><span class="val" id="wl-ask-dist">—</span></div>
+      <div class="mini-kv"><span class="label">Nearest USD</span><span class="val" id="wl-ask-usd">—</span></div>
+      <div class="mini-kv"><span class="label">Pressure</span><span class="val" id="wl-ask-pressure">—</span></div>
+      <div class="mini-kv"><span class="label">Break Risk</span><span class="val" id="wl-break">—</span></div>
+    </div>
+  </div>
+  <div class="card p-3">
+    <div class="label mb-2">Wall Bias</div>
+    <div class="val text-xl" id="wl-bias">—</div>
+  </div>
+</div>
+
+<!-- ─── TAB: History ───────────────────────────────────────────────── -->
+<div id="tab-history" class="tab-pane hidden">
+  <div class="card p-3 mb-3">
+    <div class="flex justify-between items-center mb-2">
+      <div class="label">Move Events</div>
+      <button onclick="loadHistory()" class="text-xs text-blue-400 hover:text-blue-300">Refresh</button>
+    </div>
+    <div id="hist-events" class="scroll-box">
+      <div class="text-gray-600 text-sm">Click Refresh to load</div>
+    </div>
+  </div>
+  <div class="card p-3">
+    <div class="label mb-2">Pre-Signal Outcomes</div>
+    <div id="hist-outcomes" class="scroll-box text-xs text-gray-500">—</div>
+  </div>
+</div>
+
+<!-- ─── TAB: Redis ─────────────────────────────────────────────────── -->
+<div id="tab-redis" class="tab-pane hidden">
+  <div class="card p-3">
+    <div class="flex justify-between items-center mb-2">
+      <div class="label">Raw Redis Keys</div>
+      <button onclick="loadRedis()" class="text-xs text-blue-400 hover:text-blue-300">Refresh</button>
+    </div>
+    <div id="redis-content" class="space-y-2"></div>
+  </div>
+</div>
+
+<!-- ─── TAB: Leaders ───────────────────────────────────────────────── -->
+<div id="tab-leaders" class="tab-pane hidden">
+  <div class="card p-3 mb-3">
+    <div class="flex justify-between items-center mb-2">
+      <div class="label">Ranked: Building (Pre-Signals)</div>
+      <button onclick="loadLeaders()" class="text-xs text-blue-400">Refresh</button>
+    </div>
+    <div id="lead-building" class="scroll-box"></div>
+  </div>
+  <div class="card p-3">
+    <div class="label mb-2">Ranked: Happened (Move Events)</div>
+    <div id="lead-happened" class="scroll-box"></div>
+  </div>
+</div>
+
+<!-- ─── TAB: System ────────────────────────────────────────────────── -->
+<div id="tab-system" class="tab-pane hidden">
+  <div class="grid-2 mb-3">
+    <div class="card p-3">
+      <div class="label mb-2">Service Health</div>
+      <div id="sys-services" class="space-y-2 text-xs"></div>
+    </div>
+    <div class="card p-3">
+      <div class="label mb-2">Outcome Stats</div>
+      <div id="sys-outcomes" class="space-y-1"></div>
+    </div>
+  </div>
+  <div class="card p-3">
+    <div class="label mb-2">Tracked Symbols</div>
+    <div id="sys-symbols" class="text-xs text-gray-400 flex flex-wrap gap-1"></div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+let currentSym = 'BTCUSDT';
+let refreshTimer = null;
+let isPaused = false;
+const REFRESH_MS = 3000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tabs
+// ─────────────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function setSym(s) {
+  if (!s) return;
+  currentSym = s.toUpperCase();
+  document.getElementById('symSelect').value = currentSym;
+  refresh();
+}
+document.getElementById('symSelect').addEventListener('change', e => {
+  currentSym = e.target.value;
+  refresh();
+});
+
+function fmt(v, decimals = 2) {
+  if (v == null) return '—';
+  if (typeof v === 'number') return v.toFixed(decimals);
+  return v;
+}
+function fmtPct(v) {
+  if (v == null) return '—';
+  const n = parseFloat(v);
+  const cls = n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+  return `<span class="${cls}">${n > 0 ? '+' : ''}${n.toFixed(3)}%</span>`;
+}
+function fmtUsd(v) {
+  if (v == null) return '—';
+  const n = parseFloat(v);
+  if (n >= 1e9)  return (n/1e9).toFixed(2) + 'B';
+  if (n >= 1e6)  return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1000) return (n/1000).toFixed(0) + 'K';
+  return n.toFixed(0);
+}
+function fmtDur(ms) {
+  if (!ms) return '—';
+  const s = Math.floor(ms/1000);
+  const m = Math.floor(s/60), sec = s%60;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+function rankBadgeClass(label) {
+  const map = { S:'badge-s', A:'badge-a', B:'badge-b', C:'badge-c', D:'badge-d' };
+  return 'badge ' + (map[label] || 'badge-d');
+}
+function readinessColor(score) {
+  if (score >= 80) return '#68d391';
+  if (score >= 60) return '#f6ad55';
+  if (score >= 40) return '#90cdf4';
+  return '#718096';
+}
+function setText(id, html, flash) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = html ?? '—';
+  if (flash) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main fetch + render
+// ─────────────────────────────────────────────────────────────────────────────
+async function refresh() {
+  if (document.getElementById('autoRefresh').checked === false) return;
+  const spinner = document.getElementById('spinner');
+  const ticker  = document.getElementById('ticker');
+  spinner.classList.remove('hidden');
+  try {
+    const data = await fetch(`/api/testtest/symbol/${currentSym}`).then(r => r.json());
+    renderLive(data);
+    renderRanking(data);
+    renderDerivatives(data);
+    renderWalls(data);
+    ticker.textContent = new Date().toLocaleTimeString();
+  } catch (err) {
+    ticker.textContent = 'error';
+  }
+  spinner.classList.add('hidden');
+}
+
+// ─── Live Context ─────────────────────────────────────────────────
+function renderLive(data) {
+  const { layers, ranking, explain } = data;
+  const { price: priceVal, metrics, signal, moveLive, presignal } = layers || {};
+  const p = typeof priceVal === 'object' ? priceVal : null;
+
+  setText('lv-price', priceVal?.currentPrice != null
+    ? `$${parseFloat(priceVal.currentPrice).toLocaleString('en-US', {minimumFractionDigits:2})}`
+    : priceVal ? `$${parseFloat(priceVal).toLocaleString('en-US', {minimumFractionDigits:2})}` : '—');
+
+  setText('lv-p1m',  fmtPct(p?.priceChange1m  ?? signal?.priceChange1m));
+  setText('lv-p3m',  fmtPct(p?.priceChange3m  ?? signal?.priceChange3m));
+  setText('lv-p5m',  fmtPct(p?.priceChange5m  ?? signal?.priceChange5m));
+  setText('lv-p15m', fmtPct(p?.priceChange15m ?? signal?.priceChange15m));
+  setText('lv-p30m', fmtPct(p?.priceChange30m ?? signal?.priceChange30m));
+  setText('lv-p1h',  fmtPct(p?.priceChange1h  ?? signal?.priceChange1h));
+
+  // Move
+  if (moveLive) {
+    setText('lv-move-pct', fmtPct(moveLive.movePct));
+    setText('lv-move-dir', `<span class="${moveLive.direction==='up'?'pos':'neg'}">${moveLive.direction||'—'}</span>`);
+    setText('lv-move-tf',  moveLive.timeframe || '—');
+    setText('lv-move-dur', fmtDur(moveLive.durationMs));
+    setText('lv-move-id',  moveLive.eventId || moveLive.id || '—');
+    const statusEl = document.getElementById('lv-move-status');
+    if (statusEl) {
+      statusEl.textContent = moveLive.status || 'active';
+      statusEl.style.background = moveLive.status === 'active' ? '#1a472a' : '#3d2c0a';
+      statusEl.style.color      = moveLive.status === 'active' ? '#68d391' : '#f6ad55';
+    }
+  } else {
+    ['lv-move-pct','lv-move-dir','lv-move-tf','lv-move-dur','lv-move-id'].forEach(id => setText(id, '—'));
+    setText('lv-move-status', 'none');
+  }
+
+  // Pre-signal
+  if (presignal) {
+    const score = presignal.adjustedReadinessScore ?? presignal.readinessScore ?? 0;
+    setText('lv-ps-score', score);
+    setText('lv-ps-label', presignal.readinessLabel || '—');
+    const bar = document.getElementById('lv-ps-bar');
+    if (bar) { bar.style.width = score + '%'; bar.style.background = readinessColor(score); }
+    setText('lv-ps-dir',   `<span class="${presignal.directionBias==='up'?'pos':'neg'}">${presignal.directionBias||'—'}</span>`);
+    setText('lv-ps-conf',  fmt(presignal.confidenceScore));
+    setText('lv-ps-type',  presignal.signalType || '—');
+    setText('lv-ps-noise', presignal.noisePenalty != null ? `-${presignal.noisePenalty}` : '0');
+    setText('lv-ps-dist',  presignal.distanceToConditionPct != null ? fmt(presignal.distanceToConditionPct, 3) + '%' : '—');
+    // Label badge color
+    const labelEl = document.getElementById('lv-ps-label');
+    if (labelEl) {
+      const lc = { 'very-strong':'badge-s', strong:'badge-a', building:'badge-b', weak:'badge-d' };
+      labelEl.className = 'badge text-xs ' + (lc[presignal.readinessLabel] || 'badge-d');
+    }
+  } else {
+    ['lv-ps-score','lv-ps-dir','lv-ps-conf','lv-ps-type','lv-ps-noise','lv-ps-dist'].forEach(id => setText(id, '—'));
+    document.getElementById('lv-ps-bar').style.width = '0%';
+  }
+
+  // Tape
+  setText('lv-vol60',    fmtUsd(metrics?.volumeUsdt60s));
+  setText('lv-tc60',     metrics?.tradeCount60s || '—');
+  setText('lv-delta',    metrics?.deltaUsdt60s != null ? fmtPct(metrics.deltaUsdt60s / (metrics.volumeUsdt60s||1) * 100) : '—');
+  setText('lv-activity', fmt(metrics?.activityScore));
+  setText('lv-vsr15',    fmt(signal?.volumeSpikeRatio15s));
+  setText('lv-taccel',   fmt(signal?.tradeAcceleration));
+  setText('lv-impulse',  signal?.impulseScore || '—');
+  setText('lv-inplay',   signal?.inPlayScore  || '—');
+
+  // Explain
+  if (explain?.happened) {
+    const e = explain.happened;
+    const pos = e.whyIncluded.map(x => `<div class="pos">▲ ${x}</div>`).join('');
+    const neg = e.whyPenalized.map(x => `<div class="neg">▼ ${x}</div>`).join('');
+    const final = `<div class="neu mt-1 font-bold">${e.finalDecisionText}</div>`;
+    setText('lv-exp-happened', pos + neg + final);
+  } else { setText('lv-exp-happened', '<span class="text-gray-600">No active move event</span>'); }
+
+  if (explain?.building) {
+    const e = explain.building;
+    const pos = e.whyIncluded.map(x => `<div class="pos">▲ ${x}</div>`).join('');
+    const neg = e.whyPenalized.map(x => `<div class="neg">▼ ${x}</div>`).join('');
+    const final = `<div class="neu mt-1 font-bold">${e.finalDecisionText}</div>`;
+    setText('lv-exp-building', pos + neg + final);
+  } else { setText('lv-exp-building', '<span class="text-gray-600">No active pre-signal</span>'); }
+}
+
+// ─── Ranking ──────────────────────────────────────────────────────
+function renderRanking(data) {
+  const { ranking } = data;
+
+  function renderBreakdown(containerId, breakdown) {
+    const el = document.getElementById(containerId);
+    if (!el || !breakdown) { if(el) el.innerHTML = '—'; return; }
+    el.innerHTML = Object.entries(breakdown).map(([k, v]) => `
+      <div class="mini-kv">
+        <span class="label text-xs">${k}</span>
+        <span class="val text-xs">${v} pts</span>
+      </div>`).join('');
+  }
+
+  if (ranking?.happened) {
+    const r = ranking.happened;
+    const el = document.getElementById('rk-h-label');
+    if (el) { el.textContent = r.happenedRankLabel || '—'; el.className = rankBadgeClass(r.happenedRankLabel); }
+    setText('rk-h-score', r.happenedRankScore ?? '—');
+    renderBreakdown('rk-h-breakdown', r.happenedRankBreakdown);
+  }
+  if (ranking?.building) {
+    const r = ranking.building;
+    const el = document.getElementById('rk-b-label');
+    if (el) { el.textContent = r.buildingRankLabel || '—'; el.className = rankBadgeClass(r.buildingRankLabel); }
+    setText('rk-b-score', r.buildingRankScore ?? '—');
+    renderBreakdown('rk-b-breakdown', r.buildingRankBreakdown);
+  }
+}
+
+// ─── Derivatives ──────────────────────────────────────────────────
+function renderDerivatives(data) {
+  const drv = data?.layers?.derivatives;
+  if (!drv) return;
+  setText('dr-funding-rate',  drv.fundingRate != null ? (drv.fundingRate * 100).toFixed(4) + '%' : '—');
+  setText('dr-funding-bias',  drv.fundingBias || '—');
+  setText('dr-funding-delta', drv.fundingDelta != null ? (drv.fundingDelta * 100).toFixed(4) + '%' : '—');
+  setText('dr-oi',            fmtUsd(drv.oiValue));
+  setText('dr-oi-bias',       drv.oiBias || '—');
+  setText('dr-oi-delta',      drv.oiDeltaPct5m != null ? fmt(drv.oiDeltaPct5m, 2) + '%' : '—');
+  setText('dr-liq-long',      fmtUsd(drv.liquidationLongUsd5m));
+  setText('dr-liq-short',     fmtUsd(drv.liquidationShortUsd5m));
+  setText('dr-liq-bias',      drv.liquidationBias || '—');
+  setText('dr-squeeze',       drv.squeezeRisk ?? '—');
+  setText('dr-global-bias',   drv.derivativesBias || '—');
+  setText('dr-confidence',    drv.derivativesConfidence ?? '—');
+  setText('dr-alignment',     drv.directionAlignment ?? '—');
+}
+
+// ─── Walls ────────────────────────────────────────────────────────
+function renderWalls(data) {
+  const walls = data?.layers?.walls;
+  if (!walls) return;
+  setText('wl-bid-dist',     walls.nearestBidWallDistancePct != null ? fmt(walls.nearestBidWallDistancePct, 3) + '%' : '—');
+  setText('wl-bid-usd',      fmtUsd(walls.nearestBidWallUsd));
+  setText('wl-bid-pressure', fmt(walls.wallPressureBid));
+  setText('wl-bounce',       walls.wallBounceChance ?? '—');
+  setText('wl-ask-dist',     walls.nearestAskWallDistancePct != null ? fmt(walls.nearestAskWallDistancePct, 3) + '%' : '—');
+  setText('wl-ask-usd',      fmtUsd(walls.nearestAskWallUsd));
+  setText('wl-ask-pressure', fmt(walls.wallPressureAsk));
+  setText('wl-break',        walls.wallBreakRisk ?? '—');
+  setText('wl-bias',         walls.wallBias || '—');
+}
+
+// ─── History ──────────────────────────────────────────────────────
+async function loadHistory() {
+  const data = await fetch(`/api/testtest/symbol/${currentSym}/history`).then(r => r.json());
+  const evEl = document.getElementById('hist-events');
+  if (data.events && data.events.length) {
+    evEl.innerHTML = `<table class="w-full text-xs">
+      <thead><tr class="text-gray-500 border-b border-gray-700">
+        <th class="text-left py-1">EventID</th><th>Dir</th><th>TF</th>
+        <th>Move%</th><th>Status</th><th>Started</th>
+      </tr></thead>
+      <tbody>${data.events.map(e => `<tr class="border-b border-gray-800 hover:bg-gray-800">
+        <td class="py-1 truncate max-w-[100px]">${e.event_id||'—'}</td>
+        <td class="text-center ${e.direction==='up'?'pos':'neg'}">${e.direction||'—'}</td>
+        <td class="text-center">${e.timeframe||'—'}</td>
+        <td class="text-center ${parseFloat(e.move_pct||0)>0?'pos':'neg'}">${fmt(e.move_pct,2)}%</td>
+        <td class="text-center">${e.status||'—'}</td>
+        <td class="text-center text-gray-500">${e.start_ts?new Date(e.start_ts).toLocaleTimeString():'—'}</td>
+      </tr>`).join('')}</tbody></table>`;
+  } else { evEl.innerHTML = '<div class="text-gray-600 text-xs p-2">No events found</div>'; }
+
+  const outEl = document.getElementById('hist-outcomes');
+  if (data.outcomes && data.outcomes.length) {
+    outEl.innerHTML = data.outcomes.slice(0,20).map(o =>
+      `<div class="mini-kv"><span>${new Date(o.signal_ts).toLocaleTimeString()} ${o.direction_bias} ${o.readiness_label||''}</span>
+       <span class="${o.converted?'pos':'neg'}">${o.converted?'✓ converted ('+Math.round(o.conversion_lag_ms/1000)+'s)':'✗ missed'}</span></div>`).join('');
+  } else { outEl.textContent = 'No outcome records'; }
+}
+
+// ─── Redis ────────────────────────────────────────────────────────
+async function loadRedis() {
+  const data = await fetch(`/api/testtest/symbol/${currentSym}/redis`).then(r => r.json());
+  const el = document.getElementById('redis-content');
+  el.innerHTML = Object.entries(data.keys || {}).map(([key, val]) => `
+    <div class="mb-2">
+      <div class="label text-blue-400">${key}</div>
+      <pre class="card p-2 mt-1 text-xs">${JSON.stringify(val, null, 2)}</pre>
+    </div>`).join('');
+}
+
+// ─── Leaders ─────────────────────────────────────────────────────
+async function loadLeaders() {
+  const data = await fetch('/api/testtest/leaders').then(r => r.json());
+  const leaders = data.leaders || {};
+
+  const building = leaders['screener:rank:building'] || leaders['presignal:leaders'] || [];
+  const happened = leaders['screener:rank:happened'] || leaders['events:recent'] || [];
+
+  document.getElementById('lead-building').innerHTML = building.slice(0,20).map(x => `
+    <div class="mini-kv">
+      <span class="val text-xs ${x.directionBias==='up'?'pos':'neg'}">${x.symbol}</span>
+      <span class="flex gap-2 items-center">
+        <span class="text-xs ${x.directionBias==='up'?'pos':'neg'}">${x.directionBias||''}</span>
+        <span class="badge ${rankBadgeClass(x.buildingRankLabel)}">${x.buildingRankLabel||x.buildingRankScore||''}</span>
+        <span class="text-xs text-gray-400">${x.readinessLabel||''} ${x.adjustedReadinessScore??x.readinessScore??''}</span>
+      </span>
+    </div>`).join('') || '<div class="text-gray-600 text-xs">No building signals</div>';
+
+  document.getElementById('lead-happened').innerHTML = happened.slice(0,20).map(x => `
+    <div class="mini-kv">
+      <span class="val text-xs ${x.direction==='up'?'pos':'neg'}">${x.symbol}</span>
+      <span class="flex gap-2 items-center">
+        <span class="text-xs ${x.direction==='up'?'pos':'neg'}">${fmtPct(x.movePct)}</span>
+        <span class="badge ${rankBadgeClass(x.happenedRankLabel)}">${x.happenedRankLabel||''}</span>
+        <span class="text-xs text-gray-400">${x.timeframe||''}</span>
+      </span>
+    </div>`).join('') || '<div class="text-gray-600 text-xs">No move events</div>';
+}
+
+// ─── System ───────────────────────────────────────────────────────
+async function loadSystem() {
+  const data = await fetch('/api/testtest/system').then(r => r.json());
+  const { services, outcomeStats, trackedSymbols, trackedFuturesSymbols, presignalLeadersCount } = data;
+
+  const svcEl = document.getElementById('sys-services');
+  svcEl.innerHTML = `
+    <div class="mini-kv"><span class="label">Move Detection</span><span class="pos">Active events: ${services?.moveDetection?.activeEvents??'—'}</span></div>
+    <div class="mini-kv"><span class="label">Derivatives polls</span><span class="neu">${services?.derivatives?.pollCount??'—'}</span></div>
+    <div class="mini-kv"><span class="label">Ranked happened</span><span class="neu">${services?.ranking?.happenedCount??'—'}</span></div>
+    <div class="mini-kv"><span class="label">Ranked building</span><span class="neu">${services?.ranking?.buildingCount??'—'}</span></div>
+    <div class="mini-kv"><span class="label">Pre-signal leaders</span><span class="neu">${presignalLeadersCount??'—'}</span></div>`;
+
+  const outEl = document.getElementById('sys-outcomes');
+  if (outcomeStats) {
+    outEl.innerHTML = `
+      <div class="mini-kv"><span class="label">Total signals tracked</span><span class="val">${outcomeStats.total}</span></div>
+      <div class="mini-kv"><span class="label">Converted</span><span class="pos">${outcomeStats.converted}</span></div>
+      <div class="mini-kv"><span class="label">Conversion rate</span><span class="neu">${outcomeStats.conversionRate!=null?outcomeStats.conversionRate+'%':'—'}</span></div>
+      <div class="mini-kv"><span class="label">Last 24h rate</span><span class="neu">${outcomeStats.last24hRate!=null?outcomeStats.last24hRate+'%':'—'}</span></div>
+      <div class="mini-kv"><span class="label">Currently watching</span><span class="neu">${outcomeStats.watchingCount}</span></div>`;
+  }
+
+  const symEl = document.getElementById('sys-symbols');
+  const allSyms = [...new Set([...(trackedSymbols||[]), ...(trackedFuturesSymbols||[])])];
+  symEl.innerHTML = allSyms.map(s =>
+    `<span onclick="setSym('${s}')" class="cursor-pointer px-2 py-0.5 rounded text-xs
+      ${s===currentSym?'bg-blue-800 text-white':'bg-gray-800 text-gray-300 hover:bg-gray-700'}">${s}</span>`
+  ).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-refresh loop
+// ─────────────────────────────────────────────────────────────────────────────
+function startLoop() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => {
+    if (document.getElementById('autoRefresh').checked) {
+      const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+      if (activeTab === 'live' || activeTab === 'ranking' || activeTab === 'derivatives' || activeTab === 'walls') {
+        refresh();
+      } else if (activeTab === 'system') {
+        loadSystem();
+      } else if (activeTab === 'leaders') {
+        loadLeaders();
+      }
+    }
+  }, REFRESH_MS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  refresh();
+  loadSystem();
+  startLoop();
+});
+
+// Tab-switch triggers immediate load for non-auto tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    if (tab === 'system')  loadSystem();
+    if (tab === 'leaders') loadLeaders();
+    if (tab in {live:1, ranking:1, derivatives:1, walls:1}) refresh();
+  });
+});
+</script>
+</body>
+</html>

@@ -7,10 +7,10 @@ const { binanceFetch } = require('./binanceRestLogger');
 // ─── Configuration ───────────────────────────────────────────────
 const REDIS_HOST            = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT            = parseInt(process.env.REDIS_PORT || '6379', 10);
-const BINANCE_REST_BASE     = 'https://api.binance.com';
-const BINANCE_WS_BASE       = 'wss://stream.binance.com:9443';
+const BINANCE_REST_BASE     = 'https://fapi.binance.com';          // Binance Futures REST
+const BINANCE_WS_BASE       = 'wss://fstream.binance.com';         // Binance Futures WS
 const STREAMS_PER_BATCH     = 100;        // max streams per combined WebSocket connection
-const MIN_QUOTE_VOLUME      = 10000;      // minimum 24h USDT volume
+const MIN_QUOTE_VOLUME      = parseInt(process.env.TRACK_MIN_VOLUME_24H_USD || '1000000', 10);
 const SYMBOL_REFRESH_MS     = 60 * 60 * 1000; // re-fetch symbol list every hour
 const FLUSH_INTERVAL_MS     = 1000;       // write metrics to Redis once per second
 const SUMMARY_LOG_INTERVAL  = 30;        // print aggregation summary every N seconds
@@ -52,41 +52,44 @@ function isStablecoin(asset) {
 
 // ─── Symbol fetching & filtering ─────────────────────────────────
 async function fetchValidSymbols() {
-  console.log('[collector] Fetching exchangeInfo from Binance...');
-  const exchangeInfo = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/exchangeInfo`, 'collector', '*', 'exchangeInfo');
+  console.log('[collector] Fetching futures exchangeInfo from Binance...');
+  const exchangeInfo = await fetchJSON(`${BINANCE_REST_BASE}/fapi/v1/exchangeInfo`, 'collector', '*', 'exchangeInfo');
 
-  // Build map: symbol → baseAsset for all TRADING/USDT pairs
-  const tradingUsdtMap = new Map(); // symbol → baseAsset
+  // Build map: symbol → baseAsset for all TRADING USDT futures perpetuals
+  const tradingMap = new Map(); // symbol → baseAsset
   for (const s of exchangeInfo.symbols) {
     if (s.status === 'TRADING' && s.quoteAsset === 'USDT') {
-      tradingUsdtMap.set(s.symbol, s.baseAsset);
+      tradingMap.set(s.symbol, s.baseAsset);
     }
   }
-  console.log(`[collector] exchangeInfo: ${exchangeInfo.symbols.length} total symbols, ${tradingUsdtMap.size} active USDT pairs`);
+  console.log(`[collector] futures exchangeInfo: ${exchangeInfo.symbols.length} total, ${tradingMap.size} active USDT futures`);
 
-  console.log('[collector] Fetching ticker/24hr from Binance...');
-  const tickers = await fetchJSON(`${BINANCE_REST_BASE}/api/v3/ticker/24hr`, 'collector', '*', 'ticker24hr');
+  console.log('[collector] Fetching futures ticker/24hr from Binance...');
+  const tickers = await fetchJSON(`${BINANCE_REST_BASE}/fapi/v1/ticker/24hr`, 'collector', '*', 'ticker24hr');
 
+  const now = Date.now();
+  const STALE_MS = 4 * 60 * 60 * 1000; // 4h — SETTLING contracts have stale closeTime
   const validSymbols = [];
   let excludedStatus     = 0;
   let excludedVolume     = 0;
   let excludedStablecoin = 0;
+  let excludedStale      = 0;
 
   for (const ticker of tickers) {
-    const baseAsset = tradingUsdtMap.get(ticker.symbol);
+    const baseAsset = tradingMap.get(ticker.symbol);
     if (baseAsset === undefined) { excludedStatus++; continue; }
     if (isStablecoin(baseAsset)) { excludedStablecoin++; continue; }
+    if (ticker.closeTime && Number(ticker.closeTime) < now - STALE_MS) { excludedStale++; continue; }
     const quoteVolume = parseFloat(ticker.quoteVolume);
     if (isNaN(quoteVolume) || quoteVolume < MIN_QUOTE_VOLUME) { excludedVolume++; continue; }
     validSymbols.push(ticker.symbol);
   }
 
-  console.log('[collector] Symbol filter results:');
-  console.log(`[collector]   Valid symbols:                 ${validSymbols.length}`);
-  console.log(`[collector]   Excluded (non-TRADING/USDT):  ${excludedStatus}`);
-  console.log(`[collector]   Excluded (stablecoin base):   ${excludedStablecoin}`);
-  console.log(`[collector]   Excluded (volume < ${MIN_QUOTE_VOLUME} USDT): ${excludedVolume}`);
-
+  console.log(
+    `[collector] Futures symbol filter: valid=${validSymbols.length}` +
+    ` excluded(status=${excludedStatus} stablecoin=${excludedStablecoin}` +
+    ` stale=${excludedStale} volume<${MIN_QUOTE_VOLUME}=${excludedVolume})`,
+  );
   return validSymbols;
 }
 
@@ -113,6 +116,8 @@ function makeBucket(tsSec) {
     tradeCount:     0,
     openPrice:      null,
     closePrice:     null,
+    highPrice:      null,
+    lowPrice:       null,
   };
 }
 
@@ -171,6 +176,8 @@ function onTrade(msg) {
   }
   if (b.openPrice === null) b.openPrice = price;
   b.closePrice = price;
+  if (b.highPrice === null || price > b.highPrice) b.highPrice = price;
+  if (b.lowPrice  === null || price < b.lowPrice)  b.lowPrice  = price;
 }
 
 // ─── Window aggregation helpers ───────────────────────────────────
@@ -181,6 +188,8 @@ function sumBuckets(buckets) {
   let tradeCount     = 0;
   let openPrice      = null;
   let closePrice     = null;
+  let highPrice      = null;
+  let lowPrice       = null;
 
   for (const b of buckets) {
     volumeUsdt     += b.volumeUsdt;
@@ -189,9 +198,11 @@ function sumBuckets(buckets) {
     tradeCount     += b.tradeCount;
     if (openPrice  === null && b.openPrice  !== null) openPrice  = b.openPrice;
     if (b.closePrice !== null) closePrice = b.closePrice;
+    if (b.highPrice !== null && (highPrice === null || b.highPrice > highPrice)) highPrice = b.highPrice;
+    if (b.lowPrice  !== null && (lowPrice  === null || b.lowPrice  < lowPrice))  lowPrice  = b.lowPrice;
   }
 
-  return { volumeUsdt, buyVolumeUsdt, sellVolumeUsdt, tradeCount, openPrice, closePrice };
+  return { volumeUsdt, buyVolumeUsdt, sellVolumeUsdt, tradeCount, openPrice, closePrice, highPrice, lowPrice };
 }
 
 function computeActivityScore(vol60, count60, priceChangePct60) {
@@ -336,6 +347,9 @@ function buildSnapshot(state, nowMs) {
     symbol:            state.symbol,
     lastPrice:         state.lastPrice,
     lastTradeTime:     state.lastTradeTime,
+    open60s:           w60.openPrice,
+    high60s:           w60.highPrice,
+    low60s:            w60.lowPrice,
     volumeUsdt1s:      w1.volumeUsdt,
     volumeUsdt5s:      w5.volumeUsdt,
     volumeUsdt15s:     w15.volumeUsdt,
@@ -427,7 +441,7 @@ function startFlushTimer() {
 const batchSockets = [];
 
 function connectBatch(batchIndex, symbols) {
-  const streams = symbols.map(s => `${s.toLowerCase()}@trade`).join('/');
+  const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
 
   console.log(`[collector] Batch ${batchIndex + 1}: connecting (${symbols.length} streams)`);
@@ -440,7 +454,7 @@ function connectBatch(batchIndex, symbols) {
 
   ws.on('message', (raw) => {
     try {
-      // Combined stream envelope: { stream: "btcusdt@trade", data: { ... } }
+      // Combined stream envelope: { stream: "btcusdt@aggTrade", data: { ... } }
       const envelope = JSON.parse(raw);
       const msg      = envelope.data;
       if (!msg || !msg.s) return;
@@ -468,6 +482,69 @@ function connectBatch(batchIndex, symbols) {
   });
 
   batchSockets[batchIndex] = ws;
+}
+
+function connectFuturesAggTradeBatch(symbols) {
+  const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
+  const url     = `${FUTURES_STREAM_BASE}/stream?streams=${streams}`;
+
+  console.log(`[collector] Futures aggTrade: connecting ${symbols.length} streams (${symbols.join(',')})`);
+
+  const ws = new WebSocket(url);
+
+  ws.on('open', () => {
+    console.log(`[collector] Futures aggTrade: connected (${symbols.length} symbols)`);
+  });
+
+  ws.on('message', (raw) => {
+    try {
+      // Futures combined stream: { stream: "...", data: { ... } }
+      const envelope = JSON.parse(raw);
+      const msg      = envelope.data;
+      if (!msg || !msg.s) return;
+      // futures aggTrade format matches spot trade format — feed into same handler
+      onTrade(msg);
+      const symbol = msg.s.toUpperCase();
+      redis.set(`trade:${symbol}:last`, JSON.stringify(msg)).catch(() => {});
+    } catch (err) {
+      console.error('[collector] Futures aggTrade parse error:', err.message);
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[collector] Futures aggTrade WS error:`, err.message);
+  });
+
+  ws.on('close', (code) => {
+    console.warn(`[collector] Futures aggTrade WS closed (code=${code}). Reconnecting in 5s...`);
+    setTimeout(() => connectFuturesAggTradeBatch(symbols), 5000);
+  });
+}
+
+async function startFuturesAggTradeCollector(spotSymbolSet) {
+  // Retry up to 6 times (30s) — universe builder might not have run yet
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const raw    = await redis.get('tracked:futures:symbols');
+      if (!raw) { await new Promise(r => setTimeout(r, 5000)); continue; }
+      const parsed = JSON.parse(raw);
+      const allFutures = Array.isArray(parsed) ? parsed : (parsed?.symbols ?? []);
+      const nonSpot    = allFutures.filter(s => !spotSymbolSet.has(s) && !futuresAggTradeSet.has(s));
+      if (nonSpot.length > 0) {
+        for (const s of nonSpot) { futuresAggTradeSet.add(s); getOrCreateState(s); }
+        const batches = chunkArray(nonSpot, 20);
+        for (const batch of batches) connectFuturesAggTradeBatch(batch);
+        console.log(`[collector] Futures aggTrade: subscribed to ${nonSpot.length} non-spot symbols: ${nonSpot.join(', ')}`);
+      } else {
+        console.log('[collector] Futures aggTrade: all tracked futures symbols have spot coverage');
+      }
+      return;
+    } catch (err) {
+      console.error('[collector] startFuturesAggTradeCollector error:', err.message);
+    }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  console.warn('[collector] Futures aggTrade: tracked:futures:symbols not available — skipping');
 }
 
 // ─── Main startup ────────────────────────────────────────────────
@@ -565,11 +642,9 @@ async function start() {
 
 start();
 
-// ─── Spot orderbook collector ─────────────────────────────────────
-// Maintains a local spot order book for each symbol in ORDERBOOK_SYMBOLS.
-// Writes to Redis keys: orderbook:${symbol}  walls:${symbol}
-const orderbookCollector = require('./orderbookCollector');
-orderbookCollector.start(redis);
+// ─── Spot orderbook collector — DISABLED (collecting futures only) ────────────
+// const orderbookCollector = require('./orderbookCollector');
+// orderbookCollector.start(redis);
 
 // ─── Futures orderbook collector ──────────────────────────────────
 // Maintains a local futures order book using Binance Futures endpoints.

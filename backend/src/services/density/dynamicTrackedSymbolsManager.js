@@ -32,13 +32,26 @@ const VOL_REF = 5_000_000; // volumeUsdt60s — $5M/min is "very high"
 const IMP_REF = 150;       // impulseScore reference ceiling
 const INP_REF = 120;       // inPlayScore reference ceiling
 
-// ─── Config ───────────────────────────────────────────────────────
+// ─── Spot config ─────────────────────────────────────────────────
+// DENSITY_SPOT_ENABLED=false — set to 'true' to re-enable spot density tracking
+const DENSITY_SPOT_ENABLED = process.env.DENSITY_SPOT_ENABLED === 'true';
 const LIMIT    = parseInt(process.env.DENSITY_TRACKED_SYMBOLS_LIMIT || '100',   10);
 const REFRESH  = parseInt(process.env.DENSITY_TRACKED_REFRESH_MS    || '15000', 10);
 const MIN_HOLD = parseInt(process.env.DENSITY_TRACKED_MIN_HOLD_MS   || '180000', 10);
-// Futures liquidity filter: minimum 24h trade count to be considered liquid.
-// Only applies to futures market. Symbols below this threshold are excluded.
-const MIN_TRADE_COUNT_24H = parseInt(process.env.DENSITY_FUTURES_MIN_TRADE_COUNT_24H || '700000', 10);
+
+// ─── Futures v2 config ────────────────────────────────────────────
+const FUTURES_MIN_HOLD   = parseInt(process.env.FUTURES_TRACKED_MIN_HOLD_MS          || '600000', 10);  // 10 min
+const FUTURES_REFRESH_MS = parseInt(process.env.TRACKED_UNIVERSE_REFRESH_MS          || process.env.FUTURES_TRACKED_SYMBOLS_REFRESH_MS || '60000', 10);
+const FUTURES_SAFE_MODE  = 'density:futures:safe-mode';
+
+// Universe keys written by collector/symbolsUniverseBuilder.js
+const UNIVERSE_KEYS = {
+  filtered:  'tracked:universe:filtered',
+  meta:      'tracked:universe:meta',
+  futures:   'tracked:futures:symbols',
+  spot:      'tracked:spot:symbols',
+};
+
 // ─── Redis keys ───────────────────────────────────────────────────
 const TRACKED_KEY = {
   spot:    'density:symbols:tracked:spot',
@@ -131,112 +144,43 @@ async function runRefresh(redis) {
   const topN     = scored.slice(0, LIMIT).map(s => s.symbol);
   const topSet   = new Set(topN);
 
-  // 4. Apply same selection to both spot and futures (same signal data for now)
-  for (const mt of ['spot', 'futures']) {
-    const held = trackedSince[mt];
+  // 4. Apply selection to spot only (when spot is enabled).
+  //    Futures is handled by the separate runFuturesRefresh() function.
+  if (!DENSITY_SPOT_ENABLED) {
+    // Write empty list so density-summary returns nothing for spot
+    await redis.set(TRACKED_KEY.spot, JSON.stringify({ updatedAt: now, limit: 0, symbols: [], scored: [] }));
+    console.log('[density-track] spot disabled (DENSITY_SPOT_ENABLED !== true) — wrote empty tracked list');
+  } else {
+    const held = trackedSince.spot;
 
-    // Hysteresis: force-keep symbols that haven't hit MIN_HOLD yet.
-    // Force-kept symbols take slots from topN to keep total at LIMIT.
     const forceKeep = [];
     for (const [sym, since] of held.entries()) {
-      if (!topSet.has(sym) && (now - since) < MIN_HOLD) {
-        forceKeep.push(sym);
-      }
+      if (!topSet.has(sym) && (now - since) < MIN_HOLD) forceKeep.push(sym);
     }
 
-    // Cap total to LIMIT: forceKept symbols displace lowest-ranked topN entries
     const slotsForTopN = Math.max(0, LIMIT - forceKeep.length);
     const finalList = [...topN.slice(0, slotsForTopN), ...forceKeep];
     const finalSet  = new Set(finalList);
 
-    // Detect changes for logging
     const prevSymbols = new Set(held.keys());
     const added       = finalList.filter(s => !prevSymbols.has(s));
     const removed     = [...prevSymbols].filter(s => !finalSet.has(s));
 
-    // Update in-memory hold tracker
     for (const s of added)   held.set(s, now);
     for (const s of removed) held.delete(s);
 
     if (added.length > 0 || removed.length > 0) {
-      const addStr = added.length   ? `+[${added.join(',')}] `    : '';
-      const remStr = removed.length ? `-[${removed.join(',')}]`   : '';
-      console.log(`[density-track] ${mt} updated: ${addStr}${remStr} → total=${finalList.length}`);
+      const addStr = added.length   ? `+[${added.join(',')}] ` : '';
+      const remStr = removed.length ? `-[${removed.join(',')}]` : '';
+      console.log(`[density-track] spot updated: ${addStr}${remStr} → total=${finalList.length}`);
     }
 
-    // 5. For futures: apply liquidity filters.
-    // - Exclude spot-only symbols (no futures:orderbook:* key)
-    // - Exclude low-liquidity symbols (tradeCount24h < MIN_TRADE_COUNT_24H)
-    let writeList = finalList;
-    if (mt === 'futures' && finalList.length > 0) {
-      const filterPipeline = redis.pipeline();
-      for (const sym of finalList) {
-        filterPipeline.exists(`futures:orderbook:${sym}`);
-        filterPipeline.get(`futures:ticker24h:${sym}`);
-      }
-      const filterResults = await filterPipeline.exec();
-      const hasAnyData = filterResults.some(([, v], idx) => idx % 2 === 0 && v === 1);
-      
-      if (hasAnyData) {
-        const filtered = [];
-        let spotOnlyCount = 0;
-        let lowLiquidityCount = 0;
-        
-        for (let i = 0; i < finalList.length; i++) {
-          const sym = finalList[i];
-          const existsResult = filterResults[i * 2]?.[1] ?? 0;
-          const tickerRaw = filterResults[i * 2 + 1]?.[1];
-          
-          // Skip spot-only symbols
-          if (existsResult === 0) {
-            spotOnlyCount++;
-            continue;
-          }
-          
-          // Check trade count liquidity threshold
-          if (tickerRaw) {
-            try {
-              const ticker = JSON.parse(tickerRaw);
-              if (ticker.tradeCount24h < MIN_TRADE_COUNT_24H) {
-                lowLiquidityCount++;
-                console.log(
-                  `[density-track] futures: ${sym} excluded (low liquidity) — ` +
-                  `trades24h=${ticker.tradeCount24h.toLocaleString()} < ${MIN_TRADE_COUNT_24H.toLocaleString()}`,
-                );
-                continue;
-              }
-            } catch (_) {
-              // ticker parse error — keep symbol (futures collector may not have refreshed yet)
-            }
-          }
-          // else: no ticker data yet — keep symbol to allow futures collector to start tracking
-          
-          filtered.push(sym);
-        }
-        
-        if (filtered.length > 0) {
-          writeList = filtered;
-          const totalFiltered = finalList.length - writeList.length;
-          if (totalFiltered > 0) {
-            console.log(
-              `[density-track] futures: filtered ${totalFiltered} symbol(s)` +
-              ` (spot-only=${spotOnlyCount}, low-liquidity=${lowLiquidityCount})` +
-              ` → ${writeList.length} valid futures symbols`,
-            );
-          }
-        }
-      }
-    }
-
-    // 6. Write to Redis
-    const payload = {
+    await redis.set(TRACKED_KEY.spot, JSON.stringify({
       updatedAt: now,
       limit:     LIMIT,
-      symbols:   writeList,
-      // Include top 50 scored items for the debug endpoint
+      symbols:   finalList,
       scored:    scored.slice(0, Math.min(50, scored.length)),
-    };
-    await redis.set(TRACKED_KEY[mt], JSON.stringify(payload));
+    }));
   }
 
   console.log(
@@ -246,24 +190,138 @@ async function runRefresh(redis) {
   );
 }
 
+// ─── Futures v2 refresh ───────────────────────────────────────────
+//
+// Completely independent from the spot scoring logic.
+// Reads the pre-built tracked:universe:filtered list written by
+// symbolsUniverseBuilder (collector side) and syncs it into the
+// density:symbols:tracked:futures key used by the backend.
+// Also propagates tracked:spot:symbols → density:symbols:tracked:spot.
+//
+// Hysteresis: once a symbol enters the hold window, it stays for
+// FUTURES_MIN_HOLD_MS even if it temporarily falls out of the universe.
+
+async function runFuturesRefresh(redis) {
+  const now = Date.now();
+
+  // Skip rotation while collector is in safe mode
+  const safeModeRaw = await redis.get(FUTURES_SAFE_MODE);
+  if (safeModeRaw === '1') {
+    console.log('[density-track] futures: safe mode active — skipping rotation');
+    return;
+  }
+
+  // Read the universe built by the collector (symbolsUniverseBuilder.js)
+  const [filteredRaw, metaRaw, spotUniverseRaw] = await Promise.all([
+    redis.get(UNIVERSE_KEYS.filtered),
+    redis.get(UNIVERSE_KEYS.meta),
+    redis.get(UNIVERSE_KEYS.spot),
+  ]);
+
+  if (!filteredRaw) {
+    // Universe not yet built — collector may still be starting up.
+    // Keep current tracked list as-is until universe is available.
+    console.warn('[density-track] futures: tracked:universe:filtered not yet available — retaining current list');
+    return;
+  }
+
+  const universe = safeParse(filteredRaw);
+  if (!Array.isArray(universe?.symbols)) return;
+
+  const universeSymbols = universe.symbols;
+  const universeSet     = new Set(universeSymbols);
+  const held            = trackedSince.futures;
+
+  // Apply hysteresis: keep symbols still within their min-hold window
+  const hysteresisKeep = [];
+  for (const [sym, since] of held.entries()) {
+    if (!universeSet.has(sym) && (now - since) < FUTURES_MIN_HOLD) {
+      hysteresisKeep.push(sym);
+    }
+  }
+
+  // Build final list: universe symbols + hysteresis keeps (deduped)
+  const finalSet  = new Set([...universeSymbols, ...hysteresisKeep]);
+  const finalList = [...finalSet];
+
+  const prevSet = new Set(held.keys());
+  const added   = finalList.filter(s => !prevSet.has(s));
+  const removed = [...prevSet].filter(s => !finalSet.has(s));
+
+  for (const s of added)   held.set(s, now);
+  for (const s of removed) held.delete(s);
+
+  if (added.length > 0 || removed.length > 0) {
+    const addStr = added.length   ? `+[${added.join(',')}] ` : '';
+    const remStr = removed.length ? `-[${removed.join(',')}]` : '';
+    console.log(`[density-track] futures v2: ${addStr}${remStr} → total=${finalList.length}`);
+  }
+
+  // Build scored array from meta
+  const metaObj = safeParse(metaRaw) || {};
+  const scored  = Object.entries(metaObj).map(([sym, m]) => ({
+    symbol:        sym,
+    quoteVol24h:   m.quoteVol24h,
+    tradeCount24h: m.tradeCount24h,
+    activityScore: m.activityScore,
+    isForce:       m.isForce,
+  })).slice(0, 50);
+
+  await redis.set(TRACKED_KEY.futures, JSON.stringify({
+    updatedAt: now,
+    limit:     finalList.length,
+    symbols:   finalList,
+    source:    'universe-builder',
+    scored,
+  }));
+
+  // Sync spot tracking list if available
+  const spotUniverse = safeParse(spotUniverseRaw);
+  if (Array.isArray(spotUniverse?.symbols) && spotUniverse.symbols.length > 0) {
+    await redis.set(TRACKED_KEY.spot, JSON.stringify({
+      updatedAt: now,
+      limit:     spotUniverse.symbols.length,
+      symbols:   spotUniverse.symbols,
+      source:    'universe-builder:spot',
+      scored:    [],
+    }));
+    console.log(`[density-track] spot synced from universe — count=${spotUniverse.symbols.length}`);
+  }
+
+  console.log(
+    `[density-track] futures v2 refresh complete — universe=${universeSymbols.length}` +
+    ` hysteresisKeep=${hysteresisKeep.length} final=${finalList.length}`,
+  );
+}
+
 // ─── Public API ───────────────────────────────────────────────────
 
 function start(redis) {
   console.log(
     `[density-track] Starting dynamic tracked symbols manager` +
-    ` (limit=${LIMIT} refresh=${REFRESH}ms minHold=${MIN_HOLD}ms)`,
+    ` (spot: limit=${LIMIT} refresh=${REFRESH}ms minHold=${MIN_HOLD}ms |` +
+    ` futures v2: refresh=${FUTURES_REFRESH_MS}ms minHold=${FUTURES_MIN_HOLD}ms)`,
   );
 
-  // Run immediately on startup, then on the configured interval
+  // Spot refresh
   runRefresh(redis).catch(err =>
-    console.error('[density-track] initial refresh error:', err.message),
+    console.error('[density-track] initial spot refresh error:', err.message),
   );
-
   setInterval(() => {
     runRefresh(redis).catch(err =>
-      console.error('[density-track] refresh error:', err.message),
+      console.error('[density-track] spot refresh error:', err.message),
     );
   }, REFRESH);
+
+  // Futures v2 refresh — reads from universe builder
+  runFuturesRefresh(redis).catch(err =>
+    console.error('[density-track] initial futures refresh error:', err.message),
+  );
+  setInterval(() => {
+    runFuturesRefresh(redis).catch(err =>
+      console.error('[density-track] futures refresh error:', err.message),
+    );
+  }, FUTURES_REFRESH_MS);
 }
 
-module.exports = { start, TRACKED_KEY };
+module.exports = { start, TRACKED_KEY, UNIVERSE_KEYS };

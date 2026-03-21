@@ -1,19 +1,19 @@
 'use strict';
 
-// ─── Wall Watchlist Builder ───────────────────────────────────────
+// ─── Wall Watchlist Builder v2 ────────────────────────────────────
 //
-// For each symbol in the resolved list:
-//   - Load walls + orderbook + signal from Redis via pipeline
-//   - Skip symbols with no walls data (untracked)
-//   - Pick the single best wall per symbol by ranking:
-//       1. smaller distancePct  (closer to mid = more interesting)
-//       2. larger lifetimeMs    (persistent = more reliable)
-//       3. larger strength      (stronger = more relevant)
-//       4. larger usdValue      (bigger = more relevant)
-//   - Assemble one watchlist row per symbol
-//   - Sort rows by same ranking (best setup first)
+// Returns ONE ROW PER WALL (not one per symbol).
+// All confirmed walls from all tracked symbols are collected, sorted and
+// returned as a flat ranked list:
+//   1. strength desc   (biggest multiple of threshold = most significant)
+//   2. distancePct asc (closer to price = more actionable)
+//   3. lifetimeMs desc (persistent = more reliable)
+//   4. usdValue desc   (bigger = more relevant)
+//
+// This means a symbol with 5 walls contributes 5 rows; the frontend can
+// group by symbol or show the flat list.
 
-const MAX_LIMIT = 500;
+const MAX_LIMIT = 1000;
 const BIAS_RANGE_PCT = 0.005;
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -46,56 +46,68 @@ function computeBias(walls, midPrice) {
 }
 
 /**
- * Rank comparator: lower = better candidate for "best wall".
- * Returns negative if a is better, positive if b is better.
+ * Rank comparator for individual walls.
+ * Primary: strength desc (most significant first)
+ * Secondary: distancePct asc (closer = more actionable)
+ * Tertiary: lifetimeMs desc (persistent = more reliable)
+ * Quaternary: usdValue desc (bigger = more relevant)
  */
 function compareWalls(a, b) {
+  const strA = a.strength ?? 0;
+  const strB = b.strength ?? 0;
+  if (strA !== strB) return strB - strA;
+
   const distA = Math.abs(a.distancePct ?? Infinity);
   const distB = Math.abs(b.distancePct ?? Infinity);
   if (distA !== distB) return distA - distB;
 
   const lifeA = a.lifetimeMs ?? 0;
   const lifeB = b.lifetimeMs ?? 0;
-  if (lifeA !== lifeB) return lifeB - lifeA;  // larger = better
+  if (lifeA !== lifeB) return lifeB - lifeA;
 
-  const strA = a.strength ?? 0;
-  const strB = b.strength ?? 0;
-  if (strA !== strB) return strB - strA;  // larger = better
-
-  const usdA = a.usdValue ?? 0;
-  const usdB = b.usdValue ?? 0;
-  return usdB - usdA;  // larger = better
+  return (b.usdValue ?? 0) - (a.usdValue ?? 0);
 }
 
 // ─── Symbol resolution ────────────────────────────────────────────
 
-async function resolveSymbols(redis, symbolsParam, limit) {
-  let symbols;
-
+/**
+ * Resolve the list of symbols to scan.
+ * For futures: reads density:symbols:tracked:futures (the managed list).
+ * For spot:    reads density:symbols:tracked:spot, falls back to symbols:active:usdt.
+ * If symbolsParam is provided, it always overrides the Redis lookup.
+ */
+async function resolveSymbols(redis, symbolsParam, marketType) {
   if (symbolsParam) {
-    symbols = [...new Set(
+    return [...new Set(
       symbolsParam
         .split(',')
         .map(s => s.toUpperCase().trim())
         .filter(Boolean),
     )];
-  } else {
-    const raw = await redis.get('symbols:active:usdt');
-    symbols = raw ? safeParse(raw) : [];
-    if (!Array.isArray(symbols)) symbols = [];
   }
 
-  if (limit && limit > 0) {
-    symbols = symbols.slice(0, Math.min(limit, MAX_LIMIT));
+  if (marketType === 'futures') {
+    const raw  = await redis.get('density:symbols:tracked:futures');
+    const data = safeParse(raw);
+    const syms = Array.isArray(data?.symbols) ? data.symbols : [];
+    return syms;
   }
 
-  return symbols;
+  // spot: prefer managed list, fall back to full active list
+  const raw  = await redis.get('density:symbols:tracked:spot');
+  const data = safeParse(raw);
+  if (Array.isArray(data?.symbols) && data.symbols.length > 0) {
+    return data.symbols;
+  }
+  const fallback = await redis.get('symbols:active:usdt');
+  const syms = safeParse(fallback);
+  return Array.isArray(syms) ? syms : [];
 }
 
 // ─── Main builder ─────────────────────────────────────────────────
 
 /**
- * Build a wall watchlist: one best-wall row per tracked symbol.
+ * Build a wall watchlist: one row per wall across all tracked symbols.
  *
  * Redis keys used:
  *  spot:    orderbook:${sym}         walls:${sym}         signal:${sym}
@@ -107,7 +119,7 @@ async function resolveSymbols(redis, symbolsParam, limit) {
  *   limit?:        number,
  *   marketType?:   'spot' | 'futures',
  * }} opts
- * @returns {Promise<{ items: object[], marketType: string }>}
+ * @returns {Promise<{ items: object[], marketType: string, updatedAt: number }>}
  */
 async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'spot' } = {}) {
   const mt      = marketType === 'futures' ? 'futures' : 'spot';
@@ -136,59 +148,40 @@ async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'sp
     const wallsDoc = safeParse(results[base + 1][1]);
     const signal   = safeParse(results[base + 2][1]);
 
-    // Skip untracked symbols (no walls data at all)
-    if (!wallsDoc || !Array.isArray(wallsDoc.walls) || wallsDoc.walls.length === 0) {
-      continue;
-    }
+    // Skip symbols with no walls data
+    if (!wallsDoc || !Array.isArray(wallsDoc.walls) || wallsDoc.walls.length === 0) continue;
 
     const walls    = wallsDoc.walls;
     const midPrice = ob?.midPrice ?? wallsDoc.midPrice ?? null;
     const updatedAt = ob?.updatedAt ?? wallsDoc.updatedAt ?? null;
-
-    // Pick best wall
-    const bestWall = [...walls].sort(compareWalls)[0];
-
     const bias     = signal?.bias ?? computeBias(walls, midPrice);
 
-    items.push({
-      symbol,
-      tracked:      true,
-      side:         bestWall.side,
-      wallUsd:      bestWall.usdValue       ?? null,
-      price:        bestWall.price          ?? null,
-      distancePct:  bestWall.distancePct    != null ? Math.abs(bestWall.distancePct) : null,
-      lifetimeMs:   bestWall.lifetimeMs     ?? null,
-      strength:     bestWall.strength       ?? null,
-      etaSec:       null,  // reserved for future velocity-based ETA
-      bias,
-      midPrice,
-      updatedAt,
-      marketType:   mt,
-    });
+    // Emit one row per wall (all confirmed walls, not just the best one)
+    for (const w of walls) {
+      items.push({
+        symbol,
+        side:        w.side,
+        wallUsd:     w.usdValue     ?? null,
+        price:       w.price        ?? null,
+        distancePct: w.distancePct  != null ? Math.abs(w.distancePct) : null,
+        lifetimeMs:  w.lifetimeMs   ?? null,
+        strength:    w.strength     ?? null,
+        deepWall:    w.deepWall     ?? false,
+        bias,
+        midPrice,
+        updatedAt,
+        marketType:  mt,
+      });
+    }
   }
 
-  // Sort rows: same ranking as wall selection (best setup first)
-  items.sort((a, b) => {
-    const distA = a.distancePct ?? Infinity;
-    const distB = b.distancePct ?? Infinity;
-    if (distA !== distB) return distA - distB;
+  // Sort: strongest → nearest → oldest → biggest
+  items.sort(compareWalls);
 
-    const lifeA = a.lifetimeMs ?? 0;
-    const lifeB = b.lifetimeMs ?? 0;
-    if (lifeA !== lifeB) return lifeB - lifeA;
-
-    const strA = a.strength ?? 0;
-    const strB = b.strength ?? 0;
-    if (strA !== strB) return strB - strA;
-
-    return (b.wallUsd ?? 0) - (a.wallUsd ?? 0);
-  });
-
-  // Apply limit after building rows so we limit on items with real walls
+  // Apply limit
   const cappedLimit = limit && limit > 0 ? Math.min(limit, MAX_LIMIT) : MAX_LIMIT;
-  const trimmed = items.slice(0, cappedLimit);
-
-  return { items: trimmed, marketType: mt, updatedAt: Date.now() };
+  return { items: items.slice(0, cappedLimit), marketType: mt, updatedAt: Date.now() };
 }
 
 module.exports = { buildWallWatchlist };
+

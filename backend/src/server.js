@@ -29,13 +29,31 @@ const { createWallWatchlistHandler }        = require('./routes/wallWatchlistRou
 const { createDensityTrackedSymbolsHandler } = require('./routes/densityTrackedSymbolsRoute');
 const { createBinanceRateLimitStateHandler }  = require('./routes/binanceRateLimitStateRoute');
 const { createFuturesObStateHandler }          = require('./routes/futuresObStateRoute');
+const { createFuturesWallsDebugHandler }        = require('./routes/futuresWallsDebugRoute');
+const { createTrackedUniverseHandler, createTrackedUniverseSummaryHandler } = require('./routes/trackedUniverseRoute');
 const { createBinanceProxyRouter }             = require('./routes/binanceProxyRoute');
 const { attachBinanceWsProxy, getWsProxyStats } = require('./routes/binanceWsProxy');
 const dynamicTrackedSymbolsManager           = require('./services/density/dynamicTrackedSymbolsManager');
-const { runMigrations }   = require('./services/alertMigrations');
-const { ensureBucket }    = require('./services/alertStorageService');
-const { createAuthRouter }  = require('./routes/authRoutes');
-const { createPostsRouter } = require('./routes/postsRoutes');
+const { runMigrations }             = require('./services/alertMigrations');
+const { runMoveMigrations }         = require('./services/moveMigrations');
+const { ensureBucket }              = require('./services/alertStorageService');
+const { createAuthRouter }          = require('./routes/authRoutes');
+const { createPostsRouter }         = require('./routes/postsRoutes');
+const { createMoveDetectionService }    = require('./services/moveDetectionService');
+const { createPreEventService }         = require('./services/preEventService');
+const { createDerivativesContextService } = require('./services/derivativesContextService');
+const { createRankingService }          = require('./services/rankingService');
+const { createOutcomeTrackingService }  = require('./services/outcomeTrackingService');
+const { createRuntimeQaService }        = require('./services/runtimeQaService');
+const { createRuntimeQaRouter }         = require('./routes/runtimeQaRoute');
+const { runBarAggregatorMigrations }    = require('./services/barAggregatorMigrations');
+const { createBarAggregatorService }    = require('./services/barAggregatorService');
+const { createBarsRouter }              = require('./routes/barsRoute');
+const { runMoveMigrations2 }            = require('./services/movePhase2Migrations');
+const { createMovesRouter }             = require('./routes/movesRoute');
+const { createPreSignalsRouter }        = require('./routes/preSignalsRoute');
+const { createScreenerMovesRouter }     = require('./routes/screenerMovesRoute');
+const { createTestTestRouter }          = require('./routes/testtestRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -83,6 +101,9 @@ db.getConnection()
     conn.release();
     // Run alert-module migrations and ensure MinIO bucket exists
     runMigrations(db).catch(err => console.error('[migrations] Failed:', err.message));
+    runMoveMigrations(db).catch(err => console.error('[moveMigrations] Failed:', err.message));
+    runMoveMigrations2(db).catch(err => console.error('[moveMigrations2] Failed:', err.message));
+    runBarAggregatorMigrations(db).catch(err => console.error('[barAggregatorMigrations] Failed:', err.message));
     ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
   })
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
@@ -104,6 +125,29 @@ const impulse       = createMarketImpulseService(redis, alertDelivery);
 impulse.start();
 
 dynamicTrackedSymbolsManager.start(redis);
+
+// ─── Move Intelligence module ─────────────────────────────────────
+const moveDetectionSvc = createMoveDetectionService(redis, db);
+moveDetectionSvc.start();
+
+const preEventSvc = createPreEventService(redis, moveDetectionSvc);
+preEventSvc.start();
+
+// ─── Phase 2: Derivatives, Ranking, Outcome Tracking ─────────────
+const derivativesSvc = createDerivativesContextService(redis);
+derivativesSvc.start();
+
+const rankingSvc = createRankingService(redis, moveDetectionSvc);
+rankingSvc.start();
+
+const outcomeSvc = createOutcomeTrackingService(redis, db);
+outcomeSvc.start();
+
+const runtimeQaSvc = createRuntimeQaService(redis);
+runtimeQaSvc.start();
+
+const barAggregatorSvc = createBarAggregatorService(redis, db);
+barAggregatorSvc.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -410,6 +454,10 @@ app.get('/api/wall-watchlist', createWallWatchlistHandler(redis));
 console.log('[backend] registering /api/density-tracked-symbols route');
 app.get('/api/density-tracked-symbols', createDensityTrackedSymbolsHandler(redis));
 
+console.log('[backend] registering /api/tracked-universe routes');
+app.get('/api/tracked-universe/summary', createTrackedUniverseSummaryHandler(redis));
+app.get('/api/tracked-universe', createTrackedUniverseHandler(redis));
+
 // ─── Binance rate-limit state debug endpoint ──────────────────────
 console.log('[backend] registering /api/binance-rate-limit-state route');
 app.get('/api/binance-rate-limit-state', createBinanceRateLimitStateHandler(redis));
@@ -417,14 +465,14 @@ app.get('/api/binance-rate-limit-state', createBinanceRateLimitStateHandler(redi
 // ─── Futures OB debug state endpoint ─────────────────────────────
 console.log('[backend] registering /api/futures-ob/state route');
 app.get('/api/futures-ob/state', createFuturesObStateHandler(redis));
-
+// GET /api/futures-walls-debug?symbol=BTCUSDT
+console.log('[backend] registering /api/futures-walls-debug route');
+app.get('/api/futures-walls-debug', createFuturesWallsDebugHandler(redis));
 // ─── Level endpoints ─────────────────────────────────────────────
 
-// GET /api/levels — DEPRECATED, use /api/autolevels
-console.log('[backend] registering /api/levels route (deprecated 410)');
-app.get('/api/levels', (_req, res) => {
-  res.status(410).json({ success: false, error: 'Deprecated. Use /api/autolevels' });
-});
+// GET /api/levels — levels engine (global/local, supports futures/spot)
+console.log('[backend] registering /api/levels route');
+app.get('/api/levels', levelsHandler);
 
 // GET /api/autolevels — AutoLevels engine (pivot grid clustering)
 console.log('[backend] registering /api/autolevels route');
@@ -738,6 +786,26 @@ app.get('/api/alerts/:symbol', async (req, res) => {
 
 // ─── JSON 404 fallback ────────────────────────────────────────────
 // ─── WS proxy debug endpoint ─────────────────────────────────────────────────
+// ─── Move Intelligence routes ───────────────────────────────────
+console.log('[backend] registering /api/moves, /api/events, /api/pre-signals, /api/screener routes');
+app.use('/api/moves',         createMovesRouter(redis, db));
+app.use('/api/events',        createMovesRouter(redis, db));
+app.use('/api/pre-signals',   createPreSignalsRouter(redis, db));
+app.use('/api/screener',      createScreenerMovesRouter(redis, db));
+
+// ─── Phase 2: TESTTEST diagnostic routes ─────────────────────────
+const path = require('path');
+app.use('/api/testtest', createTestTestRouter(redis, db, { moveDetectionSvc, derivativesSvc, rankingSvc }));
+app.get('/testtest', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 'testtest.html')));
+
+// ─── Phase 3: Runtime QA routes ─────────────────────────────────
+console.log('[backend] registering /api/runtime-qa routes');
+app.use('/api/runtime-qa', createRuntimeQaRouter(redis, runtimeQaSvc));
+
+// ─── Block 1: 1-minute bars routes ───────────────────────────────
+console.log('[backend] registering /api/bars routes');
+app.use('/api/bars', createBarsRouter(redis, db));
+
 console.log('[backend] registering /api/ws-proxy/debug route');
 app.get('/api/ws-proxy/debug', (_req, res) => {
   return res.json({ success: true, now: new Date().toISOString(), ...getWsProxyStats() });

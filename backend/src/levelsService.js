@@ -14,15 +14,24 @@ const REDIS_TTL = 300; // cache levels for 5 minutes (refreshed on any write)
 // ─── Row → API object ─────────────────────────────────────────────
 function rowToLevel(row) {
   return {
-    id:        row.id,
-    symbol:    row.symbol,
-    price:     parseFloat(row.price),
-    type:      row.type,
-    source:    row.source,
-    strength:  row.strength !== null ? row.strength : null,
-    timeframe: row.timeframe || null,
-    isActive:  Boolean(row.is_active),
-    meta:      row.meta_json ? (typeof row.meta_json === 'string' ? JSON.parse(row.meta_json) : row.meta_json) : null,
+    id:           row.id,
+    symbol:       row.symbol,
+    price:        parseFloat(row.price),
+    type:         row.type,
+    source:       row.source,
+    strength:     row.strength !== null ? row.strength : null,
+    timeframe:    row.timeframe || null,
+    isActive:     Boolean(row.is_active),
+    market:       row.market        || 'futures',
+    geometryType: row.geometry_type || 'horizontal',
+    side:         row.side          || null,
+    // Watch fields (present only when watch columns exist on the table)
+    watchEnabled:   row.watch_enabled   !== undefined ? Boolean(row.watch_enabled)   : undefined,
+    watchMode:      row.watch_mode      !== undefined ? (row.watch_mode || 'off')     : undefined,
+    alertEnabled:   row.alert_enabled   !== undefined ? Boolean(row.alert_enabled)   : undefined,
+    lastTriggeredAt: row.last_triggered_at !== undefined ? (row.last_triggered_at ?? null) : undefined,
+    triggerCount:   row.trigger_count   !== undefined ? (row.trigger_count ?? 0)     : undefined,
+    meta:      row.meta_json ? (typeof row.meta_json === 'string' ? (() => { try { return JSON.parse(row.meta_json); } catch (_) { return null; } })() : row.meta_json) : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
   };

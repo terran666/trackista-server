@@ -19,6 +19,11 @@ const SEND_FLAGS = {
   level_bounce_candidate:     () => envBool('TELEGRAM_SEND_LEVEL_BOUNCE_CANDIDATE',         true),
   level_approaching:          () => envBool('TELEGRAM_SEND_LEVEL_APPROACHING',              false),
   level_touched:              () => envBool('TELEGRAM_SEND_LEVEL_TOUCHED',                  false),
+  // Watch engine events — per-level telegram_enabled governs delivery; global flag defaults off
+  level_crossed:              () => envBool('TELEGRAM_SEND_LEVEL_CROSSED',                  false),
+  early_warning:              () => envBool('TELEGRAM_SEND_EARLY_WARNING',                  false),
+  nearby_wall_appeared:       () => envBool('TELEGRAM_SEND_NEARBY_WALL_APPEARED',           false),
+  nearby_wall_strengthened:   () => envBool('TELEGRAM_SEND_NEARBY_WALL_STRENGTHENED',       false),
 };
 
 // ─── Delivery cooldowns (seconds) ────────────────────────────────
@@ -30,6 +35,10 @@ function getCooldownSec(type) {
     case 'level_bounce_candidate':   return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_BOUNCE_CANDIDATE',       180);
     case 'level_approaching':        return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_APPROACHING',            120);
     case 'level_touched':            return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_TOUCHED',                120);
+    case 'level_crossed':            return 120;
+    case 'early_warning':            return 120;
+    case 'nearby_wall_appeared':     return 180;
+    case 'nearby_wall_strengthened': return 180;
     default:                         return 120;
   }
 }
@@ -131,6 +140,44 @@ function formatAlertMessage(alert) {
       let msg = `🎯 <b>LEVEL TOUCHED</b>\n\nSymbol: <b>${alert.symbol}</b>`;
       if (levelType) msg += `\nSide: <b>${levelType}</b>`;
       if (level)     msg += `\nLevel: <b>${level}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    // ── Watch engine events ──────────────────────────────────────
+
+    case 'level_crossed': {
+      const level  = fmtNum(alert.levelPrice, 4);
+      const price  = fmtNum(alert.currentPrice, 4);
+      const market = (alert.market || '').toUpperCase();
+      let msg = `⚡ <b>LEVEL CROSSED</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (market) msg += ` [${market}]`;
+      if (level)  msg += `\nLevel: <b>${level}</b>`;
+      if (price)  msg += `\nPrice: <b>${price}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'early_warning': {
+      const level  = fmtNum(alert.levelPrice, 4);
+      const dist   = fmtNum(Math.abs(alert.distancePct || 0), 2);
+      const ew     = alert.earlyWarning || {};
+      let msg = `⏰ <b>EARLY WARNING</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (level) msg += `\nLevel: <b>${level}</b>`;
+      if (dist)  msg += `\nDistance: <b>${dist}%</b>`;
+      if (ew.estimatedTimeToLevelSec != null) msg += `\nETA: <b>~${ew.estimatedTimeToLevelSec}s</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'nearby_wall_appeared':
+    case 'nearby_wall_strengthened': {
+      const level  = fmtNum(alert.levelPrice, 4);
+      const wc     = alert.wallContext || {};
+      const label  = alert.type === 'nearby_wall_appeared' ? 'WALL APPEARED' : 'WALL STRENGTHENED';
+      let msg = `🧱 <b>${label}</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (level) msg += `\nLevel: <b>${level}</b>`;
+      if (wc.wallStrength != null) msg += `\nWall: <b>${fmtNum(wc.wallStrength, 0)}</b>`;
       msg += `\nTime: <b>${time}</b>`;
       return msg;
     }

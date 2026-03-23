@@ -59,6 +59,11 @@ const { createCorrelationRouter }       = require('./routes/correlationRoute');
 const { createCorrelationService }      = require('./services/correlationService');
 const { createSymbolDataRouter }        = require('./routes/symbolDataRoute');
 const { createTestTestRouter }          = require('./routes/testtestRoute');
+const { runWatchLevelsMigrations }      = require('./services/watchLevelsMigrations');
+const { createLevelWatchEngine }        = require('./services/levelWatchEngine');
+const { createLevelWatchRouter }        = require('./routes/levelWatchRoute');
+const { createLevelEventsRouter }       = require('./routes/levelEventsRoute');
+const { createAlertSoundsRouter }       = require('./routes/alertSoundsRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -109,6 +114,7 @@ db.getConnection()
     runMoveMigrations(db).catch(err => console.error('[moveMigrations] Failed:', err.message));
     runMoveMigrations2(db).catch(err => console.error('[moveMigrations2] Failed:', err.message));
     runBarAggregatorMigrations(db).catch(err => console.error('[barAggregatorMigrations] Failed:', err.message));
+    runWatchLevelsMigrations(db).catch(err => console.error('[watchMigrations] Failed:', err.message));
     ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
   })
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
@@ -156,6 +162,10 @@ barAggregatorSvc.start();
 
 const correlationSvc = createCorrelationService(redis);
 correlationSvc.start();
+
+// ─── Level Watch Engine ─────────────────────────────────────────────
+const levelWatchEngine = createLevelWatchEngine(redis, db, alertDelivery);
+levelWatchEngine.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -810,6 +820,14 @@ app.use('/api/correlation',              createCorrelationRouter(redis));
 
 console.log('[backend] registering /api/symbol routes');
 app.use('/api/symbol',                   createSymbolDataRouter(redis));
+
+// ─── Level Watch Engine routes ─────────────────────────────────────────
+console.log('[backend] registering /api/levels/:id/watch routes');
+app.use('/api/levels', createLevelWatchRouter(db, redis, levelWatchEngine.loader));
+console.log('[backend] registering /api/level-events routes');
+app.use('/api/level-events', createLevelEventsRouter(db));
+console.log('[backend] registering /api/alert-sounds route');
+app.use('/api/alert-sounds', createAlertSoundsRouter());
 
 // ─── Phase 2: TESTTEST diagnostic routes ─────────────────────────
 const path = require('path');

@@ -17,13 +17,16 @@
  *   bars:1m:<SYM>  (last 60 bars)
  */
 
-const { aggregateBars }    = require('./symbolDataAggregation');
-const { computeActivity }  = require('./symbolActivityStateService');
-const { computeContext }   = require('./symbolContextService');
+const { aggregateBars }                  = require('./symbolDataAggregation');
+const { computeActivity }                = require('./symbolActivityStateService');
+const { computeContext }                 = require('./symbolContextService');
+const { buildRecentCandles, BARS_TO_READ } = require('./recentCandlesService');
 
 const CORR_TF              = '5m';
 const CORR_WINDOW          = 20;
-const MAX_BARS             = 60;
+// 60 bars for activity aggregation; BARS_TO_READ (50) for 5m candle aggregation.
+// Take the larger value so one pipeline read covers both needs.
+const MAX_BARS             = Math.max(60, BARS_TO_READ);
 const METRICS_STALE_MS     = 5  * 60 * 1000;
 const FUNDING_STALE_MS     = 10 * 60 * 1000;
 
@@ -222,6 +225,8 @@ async function buildSymbolData(redis, symbol, market = 'futures') {
     context: {
       lines: context.contextLines,
     },
+
+    recentCandles: buildRecentCandles(bars, nowMs),
   };
 }
 

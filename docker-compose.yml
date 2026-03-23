@@ -89,6 +89,8 @@ services:
       STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
       STORAGE_PUBLIC_URL: ${STORAGE_PUBLIC_URL:-http://localhost:9000}
       ALERT_MAX_IMAGE_BYTES: ${ALERT_MAX_IMAGE_BYTES:-10485760}
+      # ── Bar aggregator storage (1600 = ~26.7h, covers 24h correlation window + safety buffer)
+      BARS_MAX_REDIS_BARS: ${BARS_MAX_REDIS_BARS:-1600}
       # ── Rate limits (override defaults for dev/test; set in .env for production)
       RATE_LIMIT_POST_MAX: ${RATE_LIMIT_POST_MAX:-500}
       RATE_LIMIT_POST_WINDOW_SEC: ${RATE_LIMIT_POST_WINDOW_SEC:-3600}

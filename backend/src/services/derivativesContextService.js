@@ -29,6 +29,10 @@ function createDerivativesContextService(redis) {
   const fundingHistory = new Map();
   /** @type {Map<string, Array<{ts:number,long:number,short:number}>>} rolling liq events */
   const liquidationRolling = new Map();
+  /** @type {Map<string, number>} symbol → revision counter */
+  const fundingRevision = new Map();
+  /** @type {Map<string, number>} symbol → timestamp of last funding change */
+  const fundingChangedAtMap = new Map();
 
   let intervalHandle  = null;
   let isRunning        = false;
@@ -119,6 +123,64 @@ function createDerivativesContextService(redis) {
       const pipeline = redis.pipeline();
       symbolsProcessed = 0;
 
+      // ── Phase 1: Write funding:current for ALL symbols from premiumIndex ──
+      // premiumIndex returns all futures symbols — no loop limit needed here
+      for (const [sym, fData] of Object.entries(fundingMap)) {
+        if (!sym.endsWith('USDT')) continue; // USDⓈ-M only
+
+        const fundingRate = fData.fundingRate ?? null;
+        const prevFunding = fundingHistory.get(sym)?.fundingRate ?? null;
+        if (fundingRate != null) fundingHistory.set(sym, { fundingRate, ts: nowMs });
+
+        const isFirstSeen    = fundingRate != null && prevFunding == null;
+        const fundingChanged = fundingRate != null && prevFunding != null &&
+          Math.abs(fundingRate - prevFunding) > 1e-10;
+        let rev = fundingRevision.get(sym) || 0;
+        if (isFirstSeen || fundingChanged) {
+          rev++;
+          fundingRevision.set(sym, rev);
+          fundingChangedAtMap.set(sym, nowMs);
+        }
+
+        if (fundingRate != null) {
+          const direction = fundingRate > 0 ? 'positive' : fundingRate < 0 ? 'negative' : 'neutral';
+          pipeline.set(`funding:current:${sym}`, JSON.stringify({
+            symbol              : sym,
+            market              : 'futures',
+            fundingRateCurrent  : fundingRate,
+            fundingRatePrevious : prevFunding ?? null,
+            fundingChangedAt    : fundingChangedAtMap.get(sym) ?? nowMs,
+            nextFundingTime     : fData.nextFundingTime ?? null,
+            markPrice           : fData.markPrice   ?? null,
+            indexPrice          : fData.indexPrice  ?? null,
+            fundingDirection    : direction,
+            fundingAbs          : Math.abs(fundingRate),
+            updatedAt           : nowMs,
+            lastRestEventTime   : nowMs,
+            staleFlag           : false,
+            source              : 'rest',
+            revision            : rev,
+          }));
+          pipeline.set(`funding:${sym}`, JSON.stringify({ symbol: sym, fundingRate, ts: nowMs }));
+
+          if (fundingChanged) {
+            const prevDir = prevFunding > 0 ? 'positive' : prevFunding < 0 ? 'negative' : 'neutral';
+            pipeline.lpush('funding:changes', JSON.stringify({
+              symbol         : sym,
+              oldFundingRate : prevFunding,
+              newFundingRate : fundingRate,
+              oldDirection   : prevDir,
+              newDirection   : direction,
+              changedAt      : nowMs,
+              nextFundingTime: fData.nextFundingTime ?? null,
+              markPrice      : fData.markPrice ?? null,
+            }));
+            pipeline.ltrim('funding:changes', 0, 499);
+          }
+        }
+      }
+
+      // ── Phase 2: OI + derivatives context for tracked symbols (MAX_SYMBOLS) ──
       for (const sym of symbols) {
         // Fetch OI individually (no bulk endpoint for all symbols in one call)
         let oiValue = null;
@@ -138,11 +200,9 @@ function createDerivativesContextService(redis) {
           if (oiArr.length > OI_HISTORY_SLOTS) oiArr.shift();
         }
 
-        // Funding
-        const fData      = fundingMap[sym] || {};
-        const fundingRate = fData.fundingRate ?? null;
-        const prevFunding = fundingHistory.get(sym)?.fundingRate ?? null;
-        if (fundingRate != null) fundingHistory.set(sym, { fundingRate, ts: nowMs });
+        const fData       = fundingMap[sym] || {};
+        const fundingRate = fundingHistory.get(sym)?.fundingRate ?? null;
+        const prevFunding = null; // already committed to history in Phase 1
 
         // Liquidations from rolling accumulator
         const liq1m = getLiqSums(sym, 60_000);
@@ -171,7 +231,6 @@ function createDerivativesContextService(redis) {
         };
 
         pipeline.set(`derivatives:${sym}`, JSON.stringify(payload));
-        pipeline.set(`funding:${sym}`, JSON.stringify({ symbol: sym, fundingRate, ts: nowMs }));
         if (oiValue != null) {
           pipeline.set(`oi:${sym}`, JSON.stringify({ symbol: sym, oiValue, ts: nowMs }));
         }

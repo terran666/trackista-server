@@ -53,6 +53,11 @@ const { runMoveMigrations2 }            = require('./services/movePhase2Migratio
 const { createMovesRouter }             = require('./routes/movesRoute');
 const { createPreSignalsRouter }        = require('./routes/preSignalsRoute');
 const { createScreenerMovesRouter }     = require('./routes/screenerMovesRoute');
+const { createKlineStatsRouter }        = require('./routes/klineStatsRoute');
+const { createFundingRouter }           = require('./routes/fundingRoute');
+const { createCorrelationRouter }       = require('./routes/correlationRoute');
+const { createCorrelationService }      = require('./services/correlationService');
+const { createSymbolDataRouter }        = require('./routes/symbolDataRoute');
 const { createTestTestRouter }          = require('./routes/testtestRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
@@ -148,6 +153,9 @@ runtimeQaSvc.start();
 
 const barAggregatorSvc = createBarAggregatorService(redis, db);
 barAggregatorSvc.start();
+
+const correlationSvc = createCorrelationService(redis);
+correlationSvc.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -788,15 +796,26 @@ app.get('/api/alerts/:symbol', async (req, res) => {
 // ─── WS proxy debug endpoint ─────────────────────────────────────────────────
 // ─── Move Intelligence routes ───────────────────────────────────
 console.log('[backend] registering /api/moves, /api/events, /api/pre-signals, /api/screener routes');
-app.use('/api/moves',         createMovesRouter(redis, db));
-app.use('/api/events',        createMovesRouter(redis, db));
-app.use('/api/pre-signals',   createPreSignalsRouter(redis, db));
-app.use('/api/screener',      createScreenerMovesRouter(redis, db));
+app.use('/api/moves',                    createMovesRouter(redis, db));
+app.use('/api/events',                   createMovesRouter(redis, db));
+app.use('/api/pre-signals',              createPreSignalsRouter(redis, db));
+app.use('/api/screener/kline-stats',     createKlineStatsRouter(redis));
+app.use('/api/screener',                 createScreenerMovesRouter(redis, db));
+
+console.log('[backend] registering /api/funding routes');
+app.use('/api/funding',                  createFundingRouter(redis));
+
+console.log('[backend] registering /api/correlation routes');
+app.use('/api/correlation',              createCorrelationRouter(redis));
+
+console.log('[backend] registering /api/symbol routes');
+app.use('/api/symbol',                   createSymbolDataRouter(redis));
 
 // ─── Phase 2: TESTTEST diagnostic routes ─────────────────────────
 const path = require('path');
 app.use('/api/testtest', createTestTestRouter(redis, db, { moveDetectionSvc, derivativesSvc, rankingSvc }));
 app.get('/testtest', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 'testtest.html')));
+app.get('/screener', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 'screener.html')));
 
 // ─── Phase 3: Runtime QA routes ─────────────────────────────────
 console.log('[backend] registering /api/runtime-qa routes');

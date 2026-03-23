@@ -40,20 +40,29 @@ function r(n, d = 4) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function buildSymbolData(redis, symbol) {
-  const sym   = symbol.toUpperCase();
-  const nowMs = Date.now();
+// Sentinel: a key that is guaranteed to not exist in Redis — used in pipeline
+// slots that are not applicable for a given market (returns null cleanly).
+const REDIS_NULL_KEY = '__trackista_null__';
 
-  // ── 1. Batch read all Redis sources in one round-trip ─────────────
+async function buildSymbolData(redis, symbol, market = 'futures') {
+  const sym    = symbol.toUpperCase();
+  const isSpot = market === 'spot';
+  const nowMs  = Date.now();
+
+  // Key prefixes and bar key differ between markets
+  const pfx     = isSpot ? 'spot:' : '';
+  const barsKey = isSpot ? `bars:1m:spot:${sym}` : `bars:1m:${sym}`;
+
+  // ── 1. Batch read all Redis sources in one round-trip ─────────────────
   const pipe = redis.pipeline();
-  pipe.get(`price:${sym}`);                                                         // 0
-  pipe.get(`metrics:${sym}`);                                                       // 1
-  pipe.get(`signal:${sym}`);                                                        // 2
-  pipe.get(`funding:current:${sym}`);                                               // 3
-  pipe.get(`derivatives:${sym}`);                                                   // 4
-  pipe.get(`move:live:${sym}`);                                                     // 5
+  pipe.get(`${pfx}price:${sym}`);                                                   // 0
+  pipe.get(`${pfx}metrics:${sym}`);                                                 // 1
+  pipe.get(`${pfx}signal:${sym}`);                                                  // 2
+  pipe.get(isSpot ? REDIS_NULL_KEY : `funding:current:${sym}`);                   // 3
+  pipe.get(isSpot ? REDIS_NULL_KEY : `derivatives:${sym}`);                       // 4
+  pipe.get(isSpot ? REDIS_NULL_KEY : `move:live:${sym}`);                         // 5
   pipe.get(`correlation:btc:current:${sym}:${CORR_TF}:${CORR_WINDOW}`);           // 6
-  pipe.zrange(`bars:1m:${sym}`, -MAX_BARS, -1);                                    // 7
+  pipe.zrange(barsKey, -MAX_BARS, -1);                                             // 7
 
   const results       = await pipe.exec();
   const priceRaw      = results[0][1];
@@ -217,3 +226,4 @@ async function buildSymbolData(redis, symbol) {
 }
 
 module.exports = { buildSymbolData };
+

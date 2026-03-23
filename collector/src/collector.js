@@ -11,6 +11,14 @@ const BINANCE_REST_BASE     = 'https://fapi.binance.com';          // Binance Fu
 const BINANCE_WS_BASE       = 'wss://fstream.binance.com';         // Binance Futures WS
 const STREAMS_PER_BATCH     = 100;        // max streams per combined WebSocket connection
 const MIN_QUOTE_VOLUME      = parseInt(process.env.TRACK_MIN_VOLUME_24H_USD || '1000000', 10);
+
+// ─── Spot configuration ──────────────────────────────────────────
+const SPOT_REST_BASE         = 'https://api.binance.com';           // Binance Spot REST
+const SPOT_WS_BASE           = 'wss://stream.binance.com:9443';     // Binance Spot WS
+const SPOT_STREAMS_PER_BATCH = 100;       // max streams per spot WS connection
+const SPOT_MIN_QUOTE_VOLUME  = parseInt(process.env.SPOT_MIN_VOLUME_24H_USD || '1000000', 10);
+// Delay before spot REST calls on startup (avoid burst overlap with futures)
+const SPOT_STARTUP_DELAY_MS  = parseInt(process.env.SPOT_STARTUP_DELAY_MS  || '12000', 10);
 const SYMBOL_REFRESH_MS     = 60 * 60 * 1000; // re-fetch symbol list every hour
 const FLUSH_INTERVAL_MS     = 1000;       // write metrics to Redis once per second
 const SUMMARY_LOG_INTERVAL  = 30;        // print aggregation summary every N seconds
@@ -106,6 +114,61 @@ function chunkArray(arr, size) {
 
 // Map<symbol, SymbolState>
 const symbolStates = new Map();
+
+// ─── Spot in-memory state ─────────────────────────────────────────
+const spotStates = new Map();
+
+function getOrCreateSpotState(symbol) {
+  if (!spotStates.has(symbol)) {
+    spotStates.set(symbol, {
+      symbol,
+      lastPrice:     0,
+      lastTradeTime: 0,
+      currentBucket: null,
+      secondBuckets: [],
+      signalHistory: [],
+    });
+  }
+  return spotStates.get(symbol);
+}
+
+// Spot aggTrade handler — same logic as onTrade but uses spotStates
+function onSpotTrade(msg) {
+  const symbol         = (msg.s || '').toUpperCase();
+  const price          = Number(msg.p);
+  const qty            = Number(msg.q);
+  const tradeTime      = msg.T;
+  const isMakerSell    = msg.m === true;
+  const tradeValueUsdt = price * qty;
+  const tradeSec       = Math.floor(tradeTime / 1000);
+
+  if (!symbol || !price || !qty) return;
+
+  const state = getOrCreateSpotState(symbol);
+  state.lastPrice     = price;
+  state.lastTradeTime = tradeTime;
+
+  if (!state.currentBucket || state.currentBucket.tsSec !== tradeSec) {
+    if (state.currentBucket) {
+      state.secondBuckets.push(state.currentBucket);
+      if (state.secondBuckets.length > BUCKET_COUNT) state.secondBuckets.shift();
+    }
+    state.currentBucket = makeBucket(tradeSec);
+  }
+
+  const b = state.currentBucket;
+  b.volumeUsdt   += tradeValueUsdt;
+  b.tradeCount   += 1;
+  if (isMakerSell) {
+    b.sellVolumeUsdt += tradeValueUsdt;
+  } else {
+    b.buyVolumeUsdt  += tradeValueUsdt;
+  }
+  if (b.openPrice === null) b.openPrice = price;
+  b.closePrice = price;
+  if (b.highPrice === null || price > b.highPrice) b.highPrice = price;
+  if (b.lowPrice  === null || price < b.lowPrice)  b.lowPrice  = price;
+}
 
 function makeBucket(tsSec) {
   return {
@@ -385,6 +448,7 @@ function startFlushTimer() {
     const topInPlayList  = [];
     const topImpulseList = [];
 
+    // ── Futures flush ──────────────────────────────────────────────
     for (const state of symbolStates.values()) {
       if (state.lastTradeTime === 0) continue; // no trades yet
 
@@ -414,6 +478,27 @@ function startFlushTimer() {
       }
     }
 
+    // ── Spot flush ────────────────────────────────────────────────
+    for (const state of spotStates.values()) {
+      if (state.lastTradeTime === 0) continue;
+
+      const snapshot = buildSnapshot(state, nowMs);
+      pipeline.set(`spot:metrics:${state.symbol}`, JSON.stringify(snapshot));
+      pipeline.set(`spot:price:${state.symbol}`, String(state.lastPrice));
+
+      const signal = buildSignal(snapshot, state.signalHistory, nowMs);
+      pipeline.set(`spot:signal:${state.symbol}`, JSON.stringify(signal));
+
+      state.signalHistory.push({
+        volumeUsdt60s: snapshot.volumeUsdt60s,
+        volumeUsdt15s: snapshot.volumeUsdt15s,
+        tradeCount60s: snapshot.tradeCount60s,
+      });
+      if (state.signalHistory.length > SIGNAL_HISTORY_SIZE) state.signalHistory.shift();
+
+      snapshotCount++;
+    }
+
     if (snapshotCount > 0) {
       pipeline.exec().catch((err) => {
         console.error('[aggregator] Redis pipeline flush error:', err.message);
@@ -439,6 +524,163 @@ function startFlushTimer() {
 
 // ─── WebSocket batches ───────────────────────────────────────────
 const batchSockets = [];
+
+// ─── Spot symbol fetching ─────────────────────────────────────────
+async function fetchValidSpotSymbols() {
+  console.log('[spot-collector] Fetching spot exchangeInfo from Binance...');
+  const exchangeInfo = await fetchJSON(
+    `${SPOT_REST_BASE}/api/v3/exchangeInfo`,
+    'collector-spot', '*', 'exchangeInfo',
+  );
+
+  const tradingMap = new Map();
+  for (const s of exchangeInfo.symbols) {
+    if (s.status === 'TRADING' && s.quoteAsset === 'USDT' && s.isSpotTradingAllowed) {
+      tradingMap.set(s.symbol, s.baseAsset);
+    }
+  }
+  console.log(`[spot-collector] exchangeInfo: ${tradingMap.size} active USDT spot pairs`);
+
+  console.log('[spot-collector] Fetching spot ticker/24hr from Binance...');
+  const tickers = await fetchJSON(
+    `${SPOT_REST_BASE}/api/v3/ticker/24hr`,
+    'collector-spot', '*', 'ticker24hr',
+  );
+
+  const validSymbols = [];
+  let excludedVolume = 0, excludedStablecoin = 0, excludedStatus = 0;
+
+  for (const ticker of tickers) {
+    const baseAsset = tradingMap.get(ticker.symbol);
+    if (!baseAsset) { excludedStatus++; continue; }
+    if (isStablecoin(baseAsset)) { excludedStablecoin++; continue; }
+    const qv = parseFloat(ticker.quoteVolume);
+    if (isNaN(qv) || qv < SPOT_MIN_QUOTE_VOLUME) { excludedVolume++; continue; }
+    validSymbols.push(ticker.symbol);
+  }
+
+  console.log(
+    `[spot-collector] Spot symbol filter: valid=${validSymbols.length}` +
+    ` excluded(status=${excludedStatus} stablecoin=${excludedStablecoin}` +
+    ` volume<${SPOT_MIN_QUOTE_VOLUME}=${excludedVolume})`,
+  );
+  return validSymbols;
+}
+
+// ─── Spot WebSocket batches ───────────────────────────────────────
+const spotBatchSockets = [];
+
+function connectSpotBatch(batchIndex, symbols) {
+  const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
+  const url     = `${SPOT_WS_BASE}/stream?streams=${streams}`;
+
+  console.log(`[spot-collector] Batch ${batchIndex + 1}: connecting (${symbols.length} streams)`);
+
+  const ws = new WebSocket(url);
+
+  ws.on('open', () => {
+    console.log(`[spot-collector] Batch ${batchIndex + 1}: connected`);
+  });
+
+  ws.on('message', (raw) => {
+    try {
+      const envelope = JSON.parse(raw);
+      const msg      = envelope.data;
+      if (!msg || !msg.s) return;
+      onSpotTrade(msg);
+    } catch (err) {
+      console.error('[spot-collector] Parse error:', err.message);
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[spot-collector] Batch ${batchIndex + 1} WS error:`, err.message);
+  });
+
+  ws.on('close', (code) => {
+    console.warn(`[spot-collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in 5s...`);
+    setTimeout(() => connectSpotBatch(batchIndex, symbols), 5000);
+  });
+
+  spotBatchSockets[batchIndex] = ws;
+}
+
+// ─── Spot collector startup ───────────────────────────────────────
+async function startSpotCollector() {
+  // Delay to let futures REST burst complete first (avoids IP rate limit overlap)
+  console.log(`[spot-collector] Startup delayed by ${SPOT_STARTUP_DELAY_MS / 1000}s...`);
+  await new Promise(resolve => setTimeout(resolve, SPOT_STARTUP_DELAY_MS));
+
+  // Respect any active IP ban before hitting REST
+  try {
+    const rawBanState = await redis.get('debug:binance-rate-limit-state');
+    if (rawBanState) {
+      const banState    = JSON.parse(rawBanState);
+      const now         = Date.now();
+      const bannedUntil = Math.max(
+        banState.spot?.backoffUntilTs    || 0,
+        banState.futures?.backoffUntilTs || 0,
+      );
+      if (bannedUntil > now) {
+        const waitMs = bannedUntil - now;
+        console.warn(`[spot-collector] IP ban active — delaying ${Math.ceil(waitMs / 1000)}s`);
+        await new Promise(resolve => setTimeout(resolve, waitMs + 2000));
+      }
+    }
+  } catch (_) { /* Redis not ready — proceed */ }
+
+  let spotSymbols;
+  try {
+    spotSymbols = await fetchValidSpotSymbols();
+  } catch (err) {
+    console.error('[spot-collector] Failed to fetch spot symbols:', err.message);
+    console.log('[spot-collector] Retrying in 30s...');
+    setTimeout(startSpotCollector, 30000);
+    return;
+  }
+
+  if (spotSymbols.length === 0) {
+    console.warn('[spot-collector] No valid spot symbols found. Skipping.');
+    return;
+  }
+
+  await redis.set('spot:symbols:active:usdt', JSON.stringify(spotSymbols));
+  console.log(`[spot-collector] Saved ${spotSymbols.length} spot symbols to Redis (key: spot:symbols:active:usdt)`);
+
+  for (const sym of spotSymbols) getOrCreateSpotState(sym);
+  console.log(`[spot-collector] Pre-initialized state for ${spotSymbols.length} spot symbols`);
+
+  const batches = chunkArray(spotSymbols, SPOT_STREAMS_PER_BATCH);
+  console.log(`[spot-collector] Opening ${batches.length} WS batch(es) of up to ${SPOT_STREAMS_PER_BATCH} streams each`);
+  for (let i = 0; i < batches.length; i++) {
+    connectSpotBatch(i, batches[i]);
+  }
+
+  // Hourly symbol list refresh
+  setInterval(async () => {
+    try {
+      const rawBanState = await redis.get('debug:binance-rate-limit-state').catch(() => null);
+      if (rawBanState) {
+        const banState    = JSON.parse(rawBanState);
+        const now         = Date.now();
+        const bannedUntil = Math.max(
+          banState.spot?.backoffUntilTs    || 0,
+          banState.futures?.backoffUntilTs || 0,
+        );
+        if (bannedUntil > now) {
+          console.warn('[spot-collector] Symbol refresh skipped — IP ban active');
+          return;
+        }
+      }
+      const refreshed = await fetchValidSpotSymbols();
+      await redis.set('spot:symbols:active:usdt', JSON.stringify(refreshed));
+      for (const sym of refreshed) getOrCreateSpotState(sym);
+      console.log(`[spot-collector] Symbol list refreshed: ${refreshed.length} active symbols`);
+    } catch (err) {
+      console.error('[spot-collector] Symbol refresh failed:', err.message);
+    }
+  }, SYMBOL_REFRESH_MS);
+}
 
 function connectBatch(batchIndex, symbols) {
   const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
@@ -600,6 +842,9 @@ async function start() {
 
   // Start the 1s Redis flush timer
   startFlushTimer();
+
+  // Start spot aggTrade collector (delayed to avoid REST burst overlap with futures)
+  startSpotCollector().catch(err => console.error('[spot-collector] Startup error:', err.message));
 
   // Open one combined WebSocket per batch
   const batches = chunkArray(validSymbols, STREAMS_PER_BATCH);

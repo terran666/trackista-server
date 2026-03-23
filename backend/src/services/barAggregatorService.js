@@ -207,6 +207,93 @@ function createBarAggregatorService(redis, db) {
         redisWriteCount += bars.length;
       }
 
+      // ── Spot bars ───────────────────────────────────────────────
+      const rawSpotSymbols = await redis.get('spot:symbols:active:usdt');
+      const _parsedSpot    = tryParse(rawSpotSymbols);
+      const spotSymbols    = Array.isArray(_parsedSpot) ? _parsedSpot : (_parsedSpot?.symbols ?? []);
+
+      let spotBarsWritten = 0;
+      if (spotSymbols.length > 0) {
+        const sPipe = redis.pipeline();
+        for (const sym of spotSymbols) {
+          sPipe.get(`spot:metrics:${sym}`);
+          sPipe.get(`spot:signal:${sym}`);
+        }
+        const sResults = await sPipe.exec();
+
+        const spotBars = [];
+        for (let i = 0; i < spotSymbols.length; i++) {
+          const sym     = spotSymbols[i];
+          const metrics = tryParse(sResults[i * 2]?.[1]);
+          const signal  = tryParse(sResults[i * 2 + 1]?.[1]);
+
+          if (!metrics || !metrics.open60s || !metrics.lastPrice) continue;
+
+          const open  = metrics.open60s;
+          const high  = metrics.high60s  != null ? metrics.high60s  : metrics.lastPrice;
+          const low   = metrics.low60s   != null ? metrics.low60s   : metrics.lastPrice;
+          const close = metrics.lastPrice;
+          const priceChangePct = open !== 0 ? ((close - open) / open) * 100 : 0;
+          const volatility     = open !== 0 ? ((high  - low)  / open) * 100 : 0;
+
+          spotBars.push({
+            symbol          : sym,
+            ts              : barTs,
+            market          : 'spot',
+            open, high, low, close,
+            priceChangePct,
+            volatility,
+            volumeUsdt      : metrics.volumeUsdt60s      ?? 0,
+            buyVolumeUsdt   : metrics.buyVolumeUsdt60s   ?? 0,
+            sellVolumeUsdt  : metrics.sellVolumeUsdt60s  ?? 0,
+            deltaUsdt       : metrics.deltaUsdt60s       ?? 0,
+            tradeCount      : metrics.tradeCount60s      ?? 0,
+            volumeSpikeRatio: signal?.volumeSpikeRatio60s ?? null,
+            fundingRate     : null,
+            oiValue         : null,
+            oiDelta         : null,
+            liqLongUsd      : null,
+            liqShortUsd     : null,
+            impulseScore    : signal?.impulseScore  ?? null,
+            inPlayScore     : signal?.inPlayScore   ?? null,
+          });
+        }
+
+        if (db && spotBars.length > 0) {
+          const phs     = spotBars.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+          const spotSql = `INSERT IGNORE INTO symbol_bars_1m
+            (symbol,ts,market,open,high,low,close,price_change_pct,volatility,
+             volume_usdt,buy_volume_usdt,sell_volume_usdt,delta_usdt,trade_count,
+             volume_spike_ratio,funding_rate,oi_value,oi_delta,
+             liq_long_usd,liq_short_usd,impulse_score,in_play_score)
+            VALUES ${phs}`;
+          const sVals = spotBars.flatMap(b => [
+            b.symbol, b.ts, b.market,
+            b.open, b.high, b.low, b.close,
+            b.priceChangePct, b.volatility,
+            b.volumeUsdt, b.buyVolumeUsdt, b.sellVolumeUsdt, b.deltaUsdt, b.tradeCount,
+            b.volumeSpikeRatio, b.fundingRate, b.oiValue, b.oiDelta,
+            b.liqLongUsd, b.liqShortUsd, b.impulseScore, b.inPlayScore,
+          ]);
+          await db.execute(spotSql, sVals);
+          mysqlWriteCount += spotBars.length;
+        }
+
+        if (spotBars.length > 0) {
+          const swPipe = redis.pipeline();
+          const cutoff = tickTs - REDIS_TTL_MS;
+          for (const bar of spotBars) {
+            const key = `bars:1m:spot:${bar.symbol}`;
+            swPipe.zadd(key, bar.ts, JSON.stringify(bar));
+            swPipe.zremrangebyscore(key, 0, cutoff);
+            swPipe.zremrangebyrank(key, 0, -(MAX_REDIS_BARS + 1));
+          }
+          await swPipe.exec();
+          redisWriteCount += spotBars.length;
+          spotBarsWritten  = spotBars.length;
+        }
+      }
+
       const loopMs = Date.now() - tickTs;
       totalLoopMs += loopMs;
       if (loopMs > maxLoopMs) maxLoopMs = loopMs;
@@ -214,7 +301,8 @@ function createBarAggregatorService(redis, db) {
 
       console.log(
         `[barAggregatorService] tick barTs=${new Date(barTs).toISOString()}` +
-        ` bars=${bars.length}/${symbols.length}` +
+        ` futures=${bars.length}/${symbols.length}` +
+        ` spot=${spotBarsWritten}/${spotSymbols.length}` +
         ` missing(metrics=${localMissingMetrics} ohlc=${localMissingOhlc})` +
         ` loopMs=${loopMs}`,
       );

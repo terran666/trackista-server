@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS symbol_bars_1m (
   impulse_score      DECIMAL(12,6)    NULL,
   in_play_score      DECIMAL(12,6)    NULL,
   created_at         DATETIME         NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uniq_symbol_ts (symbol, ts),
+  UNIQUE KEY uniq_symbol_ts_market (symbol, ts, market),
   INDEX idx_symbol_ts (symbol, ts),
   INDEX idx_ts (ts)
 ) ENGINE=InnoDB;

@@ -24,6 +24,25 @@
 
 const { createUnifiedWatchLevelsLoader } = require('./unifiedWatchLevelsLoader');
 
+// ── Verbose debug mode ────────────────────────────────────────────
+// Enable:  WATCH_DEBUG_VERBOSE=1
+// Filter:  WATCH_DEBUG_SYMBOL=BTCUSDT   (optional)
+//          WATCH_DEBUG_LEVEL_ID=manual-81  (optional)
+const WATCH_DEBUG_VERBOSE  = process.env.WATCH_DEBUG_VERBOSE  === '1';
+const WATCH_DEBUG_SYMBOL   = process.env.WATCH_DEBUG_SYMBOL   || null;
+const WATCH_DEBUG_LEVEL_ID = process.env.WATCH_DEBUG_LEVEL_ID || null;
+
+/**
+ * Returns true when verbose debug logging is enabled AND
+ * (if filters are set) the symbol/levelId matches.
+ */
+function isDebugLevel(symbol, internalId) {
+  if (!WATCH_DEBUG_VERBOSE) return false;
+  if (WATCH_DEBUG_SYMBOL   && symbol     !== WATCH_DEBUG_SYMBOL)   return false;
+  if (WATCH_DEBUG_LEVEL_ID && internalId !== WATCH_DEBUG_LEVEL_ID) return false;
+  return true;
+}
+
 // ─── Constants ────────────────────────────────────────────────────
 const ENGINE_INTERVAL_MS     = 1000;
 const SUMMARY_LOG_INTERVAL   = 30; // ticks
@@ -408,7 +427,9 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
   const previousPrices = new Map(); // key: `${market}:${symbol}` => price
 
   // In-memory previous watch states per internalId (for speed/accel/change detection)
-  const previousStates = new Map(); // key: internalId => { distancePct, approachSpeed, wallNearby, wallStrength, volumeDeltaPct, tradesDeltaPct, ts }
+  const previousStates    = new Map(); // key: internalId => { distancePct, approachSpeed, wallNearby, wallStrength, volumeDeltaPct, tradesDeltaPct, ts }
+  // Tracks last event suppression reason per level (cooldown / dedup_fingerprint)
+  const suppressedStateMap = new Map(); // key: internalId => { reason, eventType, suppressedAt }
 
   let tickCount    = 0;
   let tickRunning  = false;
@@ -520,6 +541,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     p.lpush('alerts:recent', json);
     p.ltrim('alerts:recent', 0, ALERT_RECENT_LIMIT - 1);
     await p.exec();
+    // Confirms the event is visible in GET /api/alerts/recent
+    console.log(`[watch-engine] written to alerts:recent id=${event.id} type=${event.type} symbol=${event.symbol}`);
   }
 
   // ── Evaluate phase transition events ─────────────────────────────
@@ -542,7 +565,18 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     const onCD  = await isCooldownActive(eventType, level.market, level.symbol, level.internalId);
     const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, eventType, nowMs);
-    if (onCD || !notFP) return events;
+    if (onCD || !notFP) {
+      const suppressReason = onCD ? 'cooldown' : 'dedup_fingerprint';
+      suppressedStateMap.set(level.internalId, { reason: suppressReason, eventType, suppressedAt: nowMs });
+      console.log(
+        `[watch-engine] event suppressed ${level.symbol} ${level.internalId}` +
+        ` evt=${eventType} reason=${suppressReason}`,
+      );
+      return events;
+    }
+
+    // Clear previous suppression record — this event will fire cleanly
+    suppressedStateMap.delete(level.internalId);
 
     const delivery = buildDeliveryConfig(eventType, ao);
     const sev      = getSeverity(eventType, distancePct, signalContext);
@@ -774,16 +808,36 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const ticksInPhase    = phaseChanged ? 0 : ((prevState?.ticksInPhase ?? 0) + 1);
     const phaseDurationMs = nowTs - phaseEnteredAt;
 
-    // Debug logging for pending transitions
+    // Verbose per-tick debug log (only when WATCH_DEBUG_VERBOSE=1 and filter matches)
+    const dbgEnabled = isDebugLevel(level.symbol, level.internalId);
+    if (dbgEnabled) {
+      console.log(
+        `[watch-engine:v] ${level.symbol} ${level.internalId}` +
+        ` phase=${prevPhase}->${nextPhase} dist=${distancePct.toFixed(4)}%` +
+        ` abs=${absDistancePct.toFixed(4)}% side=${sideNow} lastNonAt=${lastNonAtSide}` +
+        ` pendingC=${transition.pending.contactTicks}/${WATCH_CONTACT_HOLD_TICKS}` +
+        ` pendingX=${transition.pending.crossTicks}/${WATCH_CROSS_HOLD_TICKS}` +
+        ` dir=${transition.pending.crossDirection ?? '-'}` +
+        ` reason=${transition.reason}`,
+      );
+    }
+
+    // Pending contact lifecycle logs
     const prevPending = prevState?.pending ?? {};
-    if (transition.pending.contactCandidate && !prevPending.contactCandidate) {
+    if (transition.reason === 'contact_hold_confirmed') {
+      console.log(`[watch-engine] contact confirmed ${level.symbol} ${level.internalId} dist=${absDistancePct.toFixed(3)}%`);
+    } else if (transition.pending.contactCandidate && !prevPending.contactCandidate) {
       console.log(`[watch-engine] pending contact started ${level.symbol} ${level.internalId} dist=${absDistancePct.toFixed(3)}%`);
-    } else if (prevPending.contactCandidate && !transition.pending.contactCandidate && transition.reason !== 'contact_hold_confirmed') {
+    } else if (prevPending.contactCandidate && !transition.pending.contactCandidate) {
       console.log(`[watch-engine] pending contact cancelled ${level.symbol} ${level.internalId}`);
     }
-    if (transition.pending.crossCandidate && !prevPending.crossCandidate) {
+
+    // Pending cross lifecycle logs
+    if (transition.reason === 'cross_hold_confirmed') {
+      console.log(`[watch-engine] cross confirmed ${level.symbol} ${level.internalId} dir=${sideNow} dist=${absDistancePct.toFixed(3)}%`);
+    } else if (transition.pending.crossCandidate && !prevPending.crossCandidate) {
       console.log(`[watch-engine] pending cross started ${level.symbol} ${level.internalId} dir=${transition.pending.crossDirection} dist=${absDistancePct.toFixed(3)}%`);
-    } else if (prevPending.crossCandidate && !transition.pending.crossCandidate && transition.reason !== 'cross_hold_confirmed') {
+    } else if (prevPending.crossCandidate && !transition.pending.crossCandidate) {
       console.log(`[watch-engine] pending cross cancelled ${level.symbol} ${level.internalId}`);
     }
 
@@ -886,11 +940,15 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       wallBreakoutCandidate: false,
       lastEventType: prevState?.lastEventType ?? null,
       lastEventAt:   prevState?.lastEventAt   ?? null,
-      transitionReason:      transition.reason,
+      transitionReason:       transition.reason,
       lastNonAtSide,
-      pendingContactTicks:   transition.pending.contactTicks,
-      pendingCrossTicks:     transition.pending.crossTicks,
-      pendingCrossDirection: transition.pending.crossDirection,
+      pendingContact:         transition.pending.contactTicks > 0,
+      pendingContactTicks:    transition.pending.contactTicks,
+      pendingCross:           transition.pending.crossTicks   > 0,
+      pendingCrossTicks:      transition.pending.crossTicks,
+      pendingCrossDirection:  transition.pending.crossDirection,
+      // One-tick delay: reads suppression from previous tick's outcome
+      lastEventSuppressedReason: prevState?.lastEventSuppressedReason ?? null,
       updatedAt:     nowTs,
     };
 
@@ -1003,6 +1061,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             pendingCrossTicks:     state.pendingCrossTicks,
             pendingCrossDirection: state.pendingCrossDirection,
             pending:               transition.pending,
+            // Updated AFTER evaluateTransitionEvents so next tick sees current suppression
+            lastEventSuppressedReason: suppressedStateMap.get(level.internalId)?.reason ?? null,
             ts:                    nowMs,
           });
 
@@ -1030,6 +1090,10 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
             // Publish to recent feed
             await publishToRecentFeed(ev);
+            console.log(
+              `[watch-engine] event published ${level.symbol} ${level.internalId}` +
+              ` id=${ev.id} evt=${ev.type}`,
+            );
 
             // Telegram delivery
             const ao = level.alertOptions;

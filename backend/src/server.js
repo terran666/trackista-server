@@ -565,17 +565,30 @@ app.get('/api/manual-levels/:id/watch-state', async (req, res) => {
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
 
+  const debugMode = req.query.debug === '1';
+
   try {
     const market = level.marketType || 'futures';
     const key    = `levelwatchstate:${market}:${level.symbol}:manual-${id}`;
     const raw    = await redis.get(key);
     const state  = raw ? JSON.parse(raw) : null;
+
+    // When debug=1 return the full state as-is; in normal mode strip raw pending internals
+    let returnState = state;
+    if (state && !debugMode) {
+      const { pendingContactTicks, pendingCrossTicks, pendingCrossDirection,
+              lastNonAtSide, transitionReason, lastEventSuppressedReason,
+              pending, ...publicState } = state;
+      returnState = publicState;
+    }
+
     return res.json({
       success:      true,
       levelId:      id,
       watchEnabled: Boolean(level.alertEnabled),
       watchMode:    level.watchMode || 'simple',
-      state,
+      debug:        debugMode,
+      state:        returnState,
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: 'Internal server error' });

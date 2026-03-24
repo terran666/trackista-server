@@ -33,15 +33,41 @@ const ALERT_EVENT_TTL_SEC    = 7 * 24 * 60 * 60;
 
 // Cooldowns (seconds) per event type
 const COOLDOWNS = {
-  level_approaching:          60,
-  level_touched:              60,
-  level_crossed:              60,
-  early_warning:              90,
-  nearby_volume_spike:        90,
-  nearby_trades_spike:        90,
-  nearby_wall_appeared:       120,
-  nearby_wall_strengthened:   120,
-  nearby_approach_accelerated: 90,
+  approaching_entered:          60,
+  precontact_entered:           30,
+  contact_hit:                  60,
+  crossed_up:                   60,
+  crossed_down:                 60,
+  early_warning:                90,
+  nearby_volume_spike:          90,
+  nearby_trades_spike:          90,
+  nearby_wall_appeared:         120,
+  nearby_wall_strengthened:     120,
+  nearby_approach_accelerated:  90,
+};
+
+// ── Phase State Machine ───────────────────────────────────────────
+// Centralized thresholds — single source of truth for all phase boundaries
+const PHASE_APPROACHING_PCT  = 0.5;    // % distance: entering approach zone
+const PHASE_PRECONTACT_PCT   = 0.15;   // % distance: close approach
+const PHASE_CONTACT_PCT      = 0.05;   // % distance: touching level
+
+// Allowed transitions (state machine guard table)
+// Only listed transitions are permitted; others keep current phase
+const ALLOWED_TRANSITIONS = {
+  watching:    new Set(['approaching']),
+  approaching: new Set(['watching', 'precontact']),
+  precontact:  new Set(['approaching', 'contact']),
+  contact:     new Set(['precontact', 'watching', 'crossed']),
+  crossed:     new Set(['watching']),
+};
+
+// Which transition key produces a user-facing event type
+// contact->crossed is resolved to crossed_up / crossed_down based on price side
+const TRANSITION_EVENT = {
+  'watching->approaching':   'approaching_entered',
+  'approaching->precontact': 'precontact_entered',
+  'precontact->contact':     'contact_hit',
 };
 
 // Epsilon for speed calculation
@@ -49,9 +75,11 @@ const SPEED_EPSILON = 1e-10;
 
 // ─── Sound mapping by event type ─────────────────────────────────
 const DEFAULT_SOUND_BY_TYPE = {
-  level_approaching:           'soft_ping',
-  level_touched:               'default_alert',
-  level_crossed:               'default_alert',
+  approaching_entered:         'soft_ping',
+  precontact_entered:          'soft_ping',
+  contact_hit:                 'default_alert',
+  crossed_up:                  'breakout_high',
+  crossed_down:                'default_alert',
   early_warning:               'soft_ping',
   nearby_volume_spike:         'soft_ping',
   nearby_trades_spike:         'soft_ping',
@@ -61,9 +89,11 @@ const DEFAULT_SOUND_BY_TYPE = {
 };
 
 const POPUP_PRIORITY_BY_TYPE = {
-  level_approaching:           'normal',
-  level_touched:               'high',
-  level_crossed:               'high',
+  approaching_entered:         'normal',
+  precontact_entered:          'normal',
+  contact_hit:                 'high',
+  crossed_up:                  'high',
+  crossed_down:                'high',
   early_warning:               'normal',
   nearby_volume_spike:         'low',
   nearby_trades_spike:         'low',
@@ -76,12 +106,15 @@ const POPUP_PRIORITY_BY_TYPE = {
 function getSeverity(eventType, distancePct, signalCtx) {
   const { signalConfidence = 0, inPlayScore = 0 } = signalCtx || {};
   switch (eventType) {
-    case 'level_approaching':
+    case 'approaching_entered':
       return signalConfidence >= 80 ? 'medium' : 'low';
-    case 'level_touched':
+    case 'precontact_entered':
+      return signalConfidence >= 80 ? 'medium' : 'low';
+    case 'contact_hit':
       if (inPlayScore >= 120) return 'high';
       return signalConfidence >= 80 ? 'medium' : 'low';
-    case 'level_crossed':
+    case 'crossed_up':
+    case 'crossed_down':
       return signalConfidence >= 80 ? 'high' : 'medium';
     case 'early_warning':
       return 'medium';
@@ -90,14 +123,60 @@ function getSeverity(eventType, distancePct, signalCtx) {
   }
 }
 
-// ─── Phase calculation ────────────────────────────────────────────
-function calcPhase(state) {
-  if (state.touched || state.crossed)   return 'contact';
-  if (state.approaching) {
-    if (state.absDistancePct < 0.15)    return 'precontact';
-    return 'approaching';
+// ─── Side relative to level ───────────────────────────────────────
+function computeSide(currentPrice, levelPrice) {
+  const toleranceAbs = levelPrice * (PHASE_CONTACT_PCT / 100);
+  if (Math.abs(currentPrice - levelPrice) <= toleranceAbs) return 'at';
+  return currentPrice > levelPrice ? 'above' : 'below';
+}
+
+// ─── Phase state machine ──────────────────────────────────────────
+/**
+ * Resolve next phase using strict allowed-transitions table.
+ * Prevents chaotic phase jumps — only valid transitions occur.
+ * Crossed is only reachable from contact/precontact when price flips side.
+ */
+function resolvePhase(prevPhase, absDistancePct, sideNow, sidePrev) {
+  // Compute candidate phase from distance alone
+  let candidate;
+  if      (absDistancePct <= PHASE_CONTACT_PCT)      candidate = 'contact';
+  else if (absDistancePct <= PHASE_PRECONTACT_PCT)   candidate = 'precontact';
+  else if (absDistancePct <= PHASE_APPROACHING_PCT)  candidate = 'approaching';
+  else                                                candidate = 'watching';
+
+  // Crossed condition: price flipped side while in contact or precontact
+  const sideFlipped = (
+    sidePrev != null &&
+    sidePrev !== 'at' &&
+    sideNow  !== 'at' &&
+    sidePrev !== sideNow
+  );
+  if (sideFlipped && (prevPhase === 'contact' || prevPhase === 'precontact')) {
+    candidate = 'crossed';
   }
-  return 'watching';
+
+  if (candidate === prevPhase) return prevPhase;
+
+  const allowed = ALLOWED_TRANSITIONS[prevPhase] ?? new Set(['approaching']);
+  return allowed.has(candidate) ? candidate : prevPhase;
+}
+
+/**
+ * Build a structured transition result.
+ * eventType is null for transitions without a user-facing alert.
+ */
+function buildTransitionResult(prevPhase, nextPhase, sideRelativeToLevel) {
+  const changed       = prevPhase !== nextPhase;
+  const transitionKey = changed ? `${prevPhase}->${nextPhase}` : null;
+  let eventType = null;
+  if (changed) {
+    if (transitionKey === 'contact->crossed') {
+      eventType = sideRelativeToLevel === 'above' ? 'crossed_up' : 'crossed_down';
+    } else {
+      eventType = TRANSITION_EVENT[transitionKey] ?? null;
+    }
+  }
+  return { prevPhase, nextPhase, changed, transitionKey, eventType, sideRelativeToLevel };
 }
 
 // ─── ETA to level ─────────────────────────────────────────────────
@@ -140,19 +219,22 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
 
   const event = {
     id,
-    type:            eventType,
-    symbol:          level.symbol,
-    market:          level.market,
-    severity:        severity || getSeverity(eventType, distancePct, signalContext),
-    title:           buildTitle(eventType, level.symbol, levelPrice),
-    message:         buildMessage(eventType, level.symbol, levelPrice, distancePct),
-    createdAt:       nowMs,
-    levelId:         level.levelId ?? (level.externalLevelId != null ? parseInt(level.externalLevelId, 10) : null),
-    externalLevelId: level.externalLevelId,
-    geometryType:    level.geometryType,
-    watchMode:       level.watchMode,
-    phase:           phase || null,
-    levelPrice:      levelPrice,
+    type:                eventType,
+    symbol:              level.symbol,
+    market:              level.market,
+    severity:            severity || getSeverity(eventType, distancePct, signalContext),
+    title:               buildTitle(eventType, level.symbol, levelPrice),
+    message:             buildMessage(eventType, level.symbol, levelPrice, distancePct),
+    createdAt:           nowMs,
+    levelId:             level.levelId ?? (level.externalLevelId != null ? parseInt(level.externalLevelId, 10) : null),
+    externalLevelId:     level.externalLevelId,
+    geometryType:        level.geometryType,
+    watchMode:           level.watchMode,
+    phase:               phase || null,
+    phaseFrom:           opts.phaseFrom || null,
+    phaseTo:             opts.phaseTo   || null,
+    sideRelativeToLevel: opts.sideRelativeToLevel || null,
+    levelPrice:          levelPrice,
     currentPrice:    currentPrice,
     distancePct:     distancePct != null ? parseFloat(distancePct.toFixed(4)) : null,
     approachSpeed:   approachSpeed != null ? parseFloat(approachSpeed.toFixed(8)) : null,
@@ -172,9 +254,11 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
 
 function buildTitle(eventType, symbol, levelPrice) {
   switch (eventType) {
-    case 'level_approaching':           return `${symbol} approaching level ${levelPrice}`;
-    case 'level_touched':               return `${symbol} touched level ${levelPrice}`;
-    case 'level_crossed':               return `${symbol} crossed level ${levelPrice}`;
+    case 'approaching_entered':         return `${symbol} approaching level ${levelPrice}`;
+    case 'precontact_entered':          return `${symbol} close approach to level ${levelPrice}`;
+    case 'contact_hit':                 return `${symbol} touched level ${levelPrice}`;
+    case 'crossed_up':                  return `${symbol} crossed level ${levelPrice} upward`;
+    case 'crossed_down':                return `${symbol} crossed level ${levelPrice} downward`;
     case 'early_warning':               return `${symbol} early warning near ${levelPrice}`;
     case 'nearby_volume_spike':         return `${symbol} volume spike near level ${levelPrice}`;
     case 'nearby_trades_spike':         return `${symbol} trades spike near level ${levelPrice}`;
@@ -188,11 +272,13 @@ function buildTitle(eventType, symbol, levelPrice) {
 function buildMessage(eventType, symbol, levelPrice, distancePct) {
   const dist = distancePct != null ? `${Math.abs(distancePct).toFixed(2)}%` : '';
   switch (eventType) {
-    case 'level_approaching':  return `${symbol} is approaching level ${levelPrice} (${dist} away).`;
-    case 'level_touched':      return `${symbol} touched level ${levelPrice}.`;
-    case 'level_crossed':      return `${symbol} crossed level ${levelPrice}.`;
-    case 'early_warning':      return `Early warning: ${symbol} approaching level ${levelPrice} (${dist} away).`;
-    default:                   return `${symbol} triggered ${eventType} near level ${levelPrice}.`;
+    case 'approaching_entered': return `${symbol} is approaching level ${levelPrice} (${dist} away).`;
+    case 'precontact_entered':  return `${symbol} is in close approach to level ${levelPrice} (${dist} away).`;
+    case 'contact_hit':         return `${symbol} touched level ${levelPrice}.`;
+    case 'crossed_up':          return `${symbol} crossed level ${levelPrice} upward.`;
+    case 'crossed_down':        return `${symbol} crossed level ${levelPrice} downward.`;
+    case 'early_warning':       return `Early warning: ${symbol} approaching level ${levelPrice} (${dist} away).`;
+    default:                    return `${symbol} triggered ${eventType} near level ${levelPrice}.`;
   }
 }
 
@@ -331,71 +417,52 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     await p.exec();
   }
 
-  // ── Evaluate simple watch events for one level ───────────────────
-  async function evaluateSimpleEvents(level, state, prevState, signal, metrics, nowMs) {
+  // ── Evaluate phase transition events ─────────────────────────────
+  // Fires at most one event per tick, only on valid phase transitions.
+  async function evaluateTransitionEvents(level, state, transition, nowMs) {
     const events = [];
+    if (!transition.changed || !transition.eventType) return events;
 
-    const { touched, crossed, approaching, distancePct, absDistancePct } = state;
-    const { proximityZonePct, touchZonePct, cooldownSec } = level.config;
+    const { eventType, prevPhase, nextPhase, sideRelativeToLevel } = transition;
     const ao  = level.alertOptions;
+    const { distancePct, currentPrice, wallContext } = state;
+    const levelPrice = level.price;
 
-    const signalContext = signal ? {
-      impulseScore:     signal.impulseScore     ?? 0,
-      impulseDirection: signal.impulseDirection ?? 'mixed',
-      inPlayScore:      signal.inPlayScore      ?? 0,
-      signalConfidence: signal.signalConfidence ?? 0,
+    const signalContext = state.impulseScore != null ? {
+      impulseScore:     state.impulseScore,
+      impulseDirection: state.impulseDirection ?? 'mixed',
+      inPlayScore:      state.inPlayScore      ?? 0,
+      signalConfidence: state.signalConfidence ?? 0,
     } : null;
 
-    const levelPrice   = level.price;
-    const currentPrice = state.currentPrice;
+    const onCD  = await isCooldownActive(eventType, level.market, level.symbol, level.internalId);
+    const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, eventType, nowMs);
+    if (onCD || !notFP) return events;
 
-    // ── approaching ─────────────────────────────────────────────
-    if (approaching) {
-      const onCD  = await isCooldownActive('level_approaching', level.market, level.symbol, level.internalId);
-      const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'level_approaching', nowMs);
-      if (!onCD && notFP) {
-        const delivery = buildDeliveryConfig('level_approaching', ao);
-        const sev = getSeverity('level_approaching', distancePct, signalContext);
-        events.push(buildWatchEvent('level_approaching', level, state, {
-          nowMs, distancePct, currentPrice, levelPrice, signalContext,
-          approachSpeed: state.approachSpeed, approachAcceleration: state.approachAcceleration,
-          wallContext: state.wallContext, delivery, phase: state.phase, severity: sev,
-        }));
-        await setCooldown('level_approaching', level.market, level.symbol, level.internalId, cooldownSec);
-      }
-    }
+    const delivery = buildDeliveryConfig(eventType, ao);
+    const sev      = getSeverity(eventType, distancePct, signalContext);
 
-    // ── touched ──────────────────────────────────────────────────
-    if (touched) {
-      const onCD  = await isCooldownActive('level_touched', level.market, level.symbol, level.internalId);
-      const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'level_touched', nowMs);
-      if (!onCD && notFP) {
-        const delivery = buildDeliveryConfig('level_touched', ao);
-        const sev = getSeverity('level_touched', distancePct, signalContext);
-        events.push(buildWatchEvent('level_touched', level, state, {
-          nowMs, distancePct, currentPrice, levelPrice, signalContext,
-          approachSpeed: state.approachSpeed,
-          wallContext: state.wallContext, delivery, phase: state.phase, severity: sev,
-        }));
-        await setCooldown('level_touched', level.market, level.symbol, level.internalId, COOLDOWNS.level_touched);
-      }
-    }
+    events.push(buildWatchEvent(eventType, level, state, {
+      nowMs, distancePct, currentPrice, levelPrice, signalContext,
+      approachSpeed:        state.approachSpeed,
+      approachAcceleration: state.approachAcceleration,
+      wallContext,
+      delivery,
+      phase:               nextPhase,
+      phaseFrom:           prevPhase,
+      phaseTo:             nextPhase,
+      sideRelativeToLevel,
+      severity:            sev,
+    }));
 
-    // ── crossed ──────────────────────────────────────────────────
-    if (crossed) {
-      const onCD  = await isCooldownActive('level_crossed', level.market, level.symbol, level.internalId);
-      const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'level_crossed', nowMs);
-      if (!onCD && notFP) {
-        const delivery = buildDeliveryConfig('level_crossed', { ...ao, popupPriority: 'high' });
-        const sev = getSeverity('level_crossed', distancePct, signalContext);
-        events.push(buildWatchEvent('level_crossed', level, state, {
-          nowMs, distancePct, currentPrice, levelPrice, signalContext,
-          approachSpeed: state.approachSpeed,
-          wallContext: state.wallContext, delivery, phase: state.phase, severity: sev,
-        }));
-        await setCooldown('level_crossed', level.market, level.symbol, level.internalId, COOLDOWNS.level_crossed);
-      }
-    }
+    await setCooldown(eventType, level.market, level.symbol, level.internalId, COOLDOWNS[eventType] ?? 60);
+
+    console.log(
+      `[watch-engine] transition ${level.symbol} ${level.internalId}` +
+      ` ${prevPhase}->${nextPhase} evt=${eventType}` +
+      ` price=${currentPrice} level=${levelPrice} dist=${distancePct?.toFixed(3)}%` +
+      ` side=${sideRelativeToLevel}`,
+    );
 
     return events;
   }
@@ -568,33 +635,38 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     return events;
   }
 
-  // ── Compute watch state for one level ────────────────────────────
+  // ── Compute watch state for one level (state machine) ────────────────
   function computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState) {
     const levelPrice = level.price;
     if (isNaN(levelPrice) || levelPrice <= 0) return null;
-
-    const { proximityZonePct, touchZonePct } = level.config;
 
     const distancePct    = ((currentPrice - levelPrice) / levelPrice) * 100;
     const absDistancePct = Math.abs(distancePct);
     const distanceAbs    = Math.abs(currentPrice - levelPrice);
 
-    let priceSide;
-    if      (currentPrice > levelPrice) priceSide = 'above';
-    else if (currentPrice < levelPrice) priceSide = 'below';
-    else                                priceSide = 'at';
+    // Side relative to level (above / below / at)
+    const sideNow  = computeSide(currentPrice, levelPrice);
+    const sidePrev = prevState?.sideRelativeToLevel ?? null;
 
-    const approaching  = absDistancePct <= proximityZonePct;
-    const touched      = absDistancePct <= touchZonePct;
-    const isNearby     = approaching; // nearby = same as approaching zone for now
+    // State machine: resolve next phase from previous phase + distance + side
+    const prevPhase = prevState?.phase ?? 'watching';
+    const nextPhase = resolvePhase(prevPhase, absDistancePct, sideNow, sidePrev);
 
-    // crossed detection
-    let crossed = false;
-    if (prevPrice !== null && prevPrice !== currentPrice) {
-      const prevAbove = prevPrice > levelPrice;
-      const currAbove = currentPrice > levelPrice;
-      if (prevAbove !== currAbove) crossed = true;
-    }
+    // Phase timing
+    const nowTs         = Date.now();
+    const phaseChanged  = nextPhase !== prevPhase;
+    const phaseEnteredAt  = phaseChanged ? nowTs : (prevState?.phaseEnteredAt ?? nowTs);
+    const ticksInPhase    = phaseChanged ? 0 : ((prevState?.ticksInPhase ?? 0) + 1);
+    const phaseDurationMs = nowTs - phaseEnteredAt;
+
+    // Build transition result (consumed by evaluateTransitionEvents)
+    const transition = buildTransitionResult(prevPhase, nextPhase, sideNow);
+
+    // Derived boolean flags (backward compat for earlyWarnings and external checks)
+    const isNearby    = nextPhase === 'approaching' || nextPhase === 'precontact' || nextPhase === 'contact';
+    const approaching = isNearby;
+    const touched     = nextPhase === 'contact';
+    const crossed     = nextPhase === 'crossed';
 
     // approachSpeed: change in distancePct per second (positive = moving toward level)
     let approachSpeed        = null;
@@ -603,18 +675,14 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     if (prevState) {
       const prevDistancePct = prevState.distancePct;
-      // Speed = how much closer we got (positive = approaching)
       approachSpeed = prevDistancePct - distancePct;
-      // If level is above current price, moving toward = distancePct trending toward 0 from negative side
-      // In absolute terms: moving toward = absDistancePct decreased
       const prevAbsDist = Math.abs(prevDistancePct);
       if (prevAbsDist > absDistancePct) {
         movingToward  = true;
-        approachSpeed = Math.abs(approachSpeed); // positive = heading toward level
+        approachSpeed = Math.abs(approachSpeed);
       } else {
-        approachSpeed = -Math.abs(approachSpeed); // negative = moving away
+        approachSpeed = -Math.abs(approachSpeed);
       }
-
       if (prevState.approachSpeed != null) {
         approachAcceleration = approachSpeed - prevState.approachSpeed;
       }
@@ -645,25 +713,29 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       signalConfidence: signal.signalConfidence  ?? null,
     } : null;
 
-    const phase = calcPhase({ approaching, touched, crossed, absDistancePct });
-
     const state = {
       internalId:          level.internalId,
       symbol:              level.symbol,
       market:              level.market,
-      phase,
+      phase:               nextPhase,
+      prevPhase,
+      phaseEnteredAt,
+      phaseDurationMs,
+      ticksInPhase,
       levelPrice,
       currentPrice,
       distancePct:         parseFloat(distancePct.toFixed(6)),
+      signedDistancePct:   parseFloat(distancePct.toFixed(6)),
       absDistancePct:      parseFloat(absDistancePct.toFixed(6)),
       distanceAbs,
-      priceSide,
+      sideRelativeToLevel: sideNow,
+      priceSide:           sideNow,
       approaching,
       touched,
       crossed,
       isNearby,
       movingToward,
-      approachSpeed:       approachSpeed != null ? parseFloat(approachSpeed.toFixed(8)) : null,
+      approachSpeed:       approachSpeed        != null ? parseFloat(approachSpeed.toFixed(8))        : null,
       approachAcceleration: approachAcceleration != null ? parseFloat(approachAcceleration.toFixed(8)) : null,
       volumeNow,
       tradesNow,
@@ -673,12 +745,11 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       inPlayScore:         signalCtx?.inPlayScore       ?? null,
       signalConfidence:    signalCtx?.signalConfidence  ?? null,
       impulseDirection:    signalCtx?.impulseDirection  ?? null,
-      // Wall context populated from walls data (Phase 3 placeholder)
       wallContext: {
-        wallNearby:     false,
-        wallStrength:   null,
+        wallNearby:      false,
+        wallStrength:    null,
         wallDistancePct: null,
-        wallChange:     'unknown',
+        wallChange:      'unknown',
       },
       breakoutCandidate: false,
       breakoutConfirmed: false,
@@ -688,12 +759,12 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       fakeoutConfirmed:  false,
       wallBounceCandidate:   false,
       wallBreakoutCandidate: false,
-      lastEventType: null,
-      lastEventAt:   null,
-      updatedAt:     Date.now(),
+      lastEventType: prevState?.lastEventType ?? null,
+      lastEventAt:   prevState?.lastEventAt   ?? null,
+      updatedAt:     nowTs,
     };
 
-    return state;
+    return { state, transition };
   }
 
   // ── Persist watch state to Redis ─────────────────────────────────
@@ -778,32 +849,37 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         for (const level of lvlArr) {
           const prevState = previousStates.get(level.internalId) ?? null;
 
-          // Compute current watch state
-          const state = computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState);
-          if (!state) continue;
+          // Compute current watch state via state machine
+          const computed = computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState);
+          if (!computed) continue;
+          const { state, transition } = computed;
 
-          // Store partial state snapshot for next tick
+          // Store state snapshot for next tick (includes phase for state machine)
           previousStates.set(level.internalId, {
-            distancePct:  state.distancePct,
-            approachSpeed: state.approachSpeed,
-            wallNearby:   state.wallContext.wallNearby,
-            wallStrength: state.wallContext.wallStrength,
-            volumeNow:    state.volumeNow,
-            tradesNow:    state.tradesNow,
-            ts:           nowMs,
+            phase:               state.phase,
+            sideRelativeToLevel: state.sideRelativeToLevel,
+            phaseEnteredAt:      state.phaseEnteredAt,
+            ticksInPhase:        state.ticksInPhase,
+            distancePct:         state.distancePct,
+            approachSpeed:       state.approachSpeed,
+            wallNearby:          state.wallContext.wallNearby,
+            wallStrength:        state.wallContext.wallStrength,
+            volumeNow:           state.volumeNow,
+            tradesNow:           state.tradesNow,
+            lastEventType:       state.lastEventType,
+            lastEventAt:         state.lastEventAt,
+            ts:                  nowMs,
           });
 
-          // Persist watch state to Redis whenever price is within proximity zone
-          if (state.isNearby || state.approaching || state.touched || state.crossed) {
-            await persistWatchState(level, state, writePipeline);
-          }
+          // Always persist watch state to Redis
+          await persistWatchState(level, state, writePipeline);
 
           // Evaluate events
-          const simpleEvts  = await evaluateSimpleEvents(level, state, prevState, signal, metrics, nowMs);
-          const earlyEvts   = await evaluateEarlyWarnings(level, state, prevState, signal, metrics, nowMs);
-          const allEvents   = [...simpleEvts, ...earlyEvts];
+          const transEvts = await evaluateTransitionEvents(level, state, transition, nowMs);
+          const earlyEvts = await evaluateEarlyWarnings(level, state, prevState, signal, metrics, nowMs);
+          const allEvents = [...transEvts, ...earlyEvts];
 
-          simpleEvents += simpleEvts.length;
+          simpleEvents += transEvts.length;
           earlyEvents  += earlyEvts.length;
           totalEvents  += allEvents.length;
 
@@ -813,7 +889,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             storedDB++;
 
             // Update level trigger stats (only for MySQL-sourced levels)
-            if (level.levelId && simpleEvts.includes(ev)) {
+            if (level.levelId && transEvts.includes(ev)) {
               await updateLevelTriggerStats(level.levelId, nowMs);
             }
 
@@ -824,7 +900,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             const ao = level.alertOptions;
             if (ao && ao.telegramEnabled && deliveryService) {
               const sendTypes = new Set([
-                'level_touched', 'level_crossed',
+                'contact_hit', 'crossed_up', 'crossed_down',
                 'early_warning',
               ]);
               if (sendTypes.has(ev.type)) {

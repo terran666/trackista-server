@@ -46,24 +46,39 @@ const COOLDOWNS = {
   nearby_approach_accelerated:  90,
 };
 
-// ── Phase State Machine ───────────────────────────────────────────
-// Centralized thresholds — single source of truth for all phase boundaries
-const PHASE_APPROACHING_PCT  = 0.5;    // % distance: entering approach zone
-const PHASE_PRECONTACT_PCT   = 0.15;   // % distance: close approach
-const PHASE_CONTACT_PCT      = 0.05;   // % distance: touching level
+// ── Phase State Machine (Step 4: Hysteresis + Hold Time) ──────────────────────
+//
+// Each boundary has two thresholds creating a dead zone (enter < exit):
+//   enter = price must come this close to enter a deeper phase
+//   exit  = price must move this far away to return to shallower phase
+// This prevents jitter when price oscillates near a boundary.
+const WATCH_ENTER_APPROACHING_PCT = 0.50;   // enter approaching from watching
+const WATCH_EXIT_APPROACHING_PCT  = 0.65;   // exit approaching back to watching
 
-// Allowed transitions (state machine guard table)
-// Only listed transitions are permitted; others keep current phase
+const WATCH_ENTER_PRECONTACT_PCT  = 0.15;   // enter precontact from approaching
+const WATCH_EXIT_PRECONTACT_PCT   = 0.22;   // exit precontact back to approaching
+
+const WATCH_ENTER_CONTACT_PCT     = 0.05;   // enter contact candidate zone
+const WATCH_EXIT_CONTACT_PCT      = 0.10;   // exit contact back to precontact
+
+// Contact confirmation: must stay in contact zone this many consecutive ticks
+const WATCH_CONTACT_HOLD_TICKS    = 2;
+
+// Cross confirmation: price must hold past level N ticks at min distance
+const WATCH_CROSS_HOLD_TICKS      = 2;
+const WATCH_CROSS_CONFIRM_PCT     = 0.03;   // min absDistancePct past level
+
+// Allowed transitions (state machine guard)
+// precontact->crossed allowed for fast moves that skip contact confirmation
 const ALLOWED_TRANSITIONS = {
   watching:    new Set(['approaching']),
   approaching: new Set(['watching', 'precontact']),
-  precontact:  new Set(['approaching', 'contact']),
+  precontact:  new Set(['approaching', 'contact', 'crossed']),
   contact:     new Set(['precontact', 'watching', 'crossed']),
   crossed:     new Set(['watching']),
 };
 
-// Which transition key produces a user-facing event type
-// contact->crossed is resolved to crossed_up / crossed_down based on price side
+// Transition key → user-facing event type (crossed_up/down resolved separately)
 const TRANSITION_EVENT = {
   'watching->approaching':   'approaching_entered',
   'approaching->precontact': 'precontact_entered',
@@ -125,58 +140,148 @@ function getSeverity(eventType, distancePct, signalCtx) {
 
 // ─── Side relative to level ───────────────────────────────────────
 function computeSide(currentPrice, levelPrice) {
-  const toleranceAbs = levelPrice * (PHASE_CONTACT_PCT / 100);
+  const toleranceAbs = levelPrice * (WATCH_ENTER_CONTACT_PCT / 100);
   if (Math.abs(currentPrice - levelPrice) <= toleranceAbs) return 'at';
   return currentPrice > levelPrice ? 'above' : 'below';
 }
 
-// ─── Phase state machine ──────────────────────────────────────────
+// ─── Phase state machine (Step 4: Hysteresis + Hold Time) ────────
 /**
- * Resolve next phase using strict allowed-transitions table.
- * Prevents chaotic phase jumps — only valid transitions occur.
- * Crossed is only reachable from contact/precontact when price flips side.
+ * Resolve next phase with hysteresis dead zones and hold-time confirmation.
+ *
+ * Hysteresis: each boundary uses separate enter/exit thresholds.
+ * Contact hold: precontact→contact requires WATCH_CONTACT_HOLD_TICKS in zone.
+ * Cross hold:   contact/precontact→crossed requires WATCH_CROSS_HOLD_TICKS + confirm distance.
+ *
+ * ctx fields:
+ *   prevPhase, absDistancePct, sideNow, lastNonAtSide,
+ *   pendingContactTicks, pendingCrossTicks, pendingCrossDirection
+ *
+ * Returns:
+ *   { nextPhase, prevPhase, changed, transitionKey, eventType, reason,
+ *     sideRelativeToLevel, pending: { contactTicks, crossTicks, crossDirection } }
  */
-function resolvePhase(prevPhase, absDistancePct, sideNow, sidePrev) {
-  // Compute candidate phase from distance alone
-  let candidate;
-  if      (absDistancePct <= PHASE_CONTACT_PCT)      candidate = 'contact';
-  else if (absDistancePct <= PHASE_PRECONTACT_PCT)   candidate = 'precontact';
-  else if (absDistancePct <= PHASE_APPROACHING_PCT)  candidate = 'approaching';
-  else                                                candidate = 'watching';
+function resolvePhase(ctx) {
+  const {
+    prevPhase,
+    absDistancePct,
+    sideNow,
+    lastNonAtSide,
+    pendingContactTicks   = 0,
+    pendingCrossTicks     = 0,
+    pendingCrossDirection = null,
+  } = ctx;
 
-  // Crossed condition: price flipped side while in contact or precontact
-  const sideFlipped = (
-    sidePrev != null &&
-    sidePrev !== 'at' &&
-    sideNow  !== 'at' &&
-    sidePrev !== sideNow
-  );
-  if (sideFlipped && (prevPhase === 'contact' || prevPhase === 'precontact')) {
-    candidate = 'crossed';
+  let nextPhase = prevPhase;
+  let reason    = 'no_change';
+
+  // ── 1. Hysteresis: apply enter/exit thresholds per phase ──────────────────
+  if (prevPhase === 'watching') {
+    if (absDistancePct <= WATCH_ENTER_APPROACHING_PCT) {
+      nextPhase = 'approaching';
+      reason    = 'enter_threshold_met';
+    }
+  } else if (prevPhase === 'approaching') {
+    if (absDistancePct <= WATCH_ENTER_PRECONTACT_PCT) {
+      nextPhase = 'precontact';
+      reason    = 'enter_threshold_met';
+    } else if (absDistancePct > WATCH_EXIT_APPROACHING_PCT) {
+      nextPhase = 'watching';
+      reason    = 'exit_threshold_met';
+    }
+  } else if (prevPhase === 'precontact') {
+    if (absDistancePct > WATCH_EXIT_PRECONTACT_PCT) {
+      nextPhase = 'approaching';
+      reason    = 'exit_threshold_met';
+    }
+    // contact entry via hold confirmation below
+  } else if (prevPhase === 'contact') {
+    if (absDistancePct > WATCH_EXIT_APPROACHING_PCT) {
+      nextPhase = 'watching';           // price jumped far away
+      reason    = 'exit_threshold_met';
+    } else if (absDistancePct > WATCH_EXIT_CONTACT_PCT) {
+      nextPhase = 'precontact';
+      reason    = 'exit_threshold_met';
+    }
+    // crossed via hold confirmation below
+  } else if (prevPhase === 'crossed') {
+    if (absDistancePct > WATCH_EXIT_APPROACHING_PCT) {
+      nextPhase = 'watching';
+      reason    = 'exit_threshold_met';
+    }
   }
 
-  if (candidate === prevPhase) return prevPhase;
+  // ── 2. Contact hold confirmation (precontact → contact) ──────────────────
+  let newPendingContactTicks = 0;
+  if (prevPhase === 'precontact' && absDistancePct <= WATCH_ENTER_CONTACT_PCT) {
+    newPendingContactTicks = pendingContactTicks + 1;
+    if (newPendingContactTicks >= WATCH_CONTACT_HOLD_TICKS) {
+      nextPhase  = 'contact';
+      reason     = 'contact_hold_confirmed';
+      newPendingContactTicks = 0;       // reset after confirmation
+    }
+  }
 
-  const allowed = ALLOWED_TRANSITIONS[prevPhase] ?? new Set(['approaching']);
-  return allowed.has(candidate) ? candidate : prevPhase;
-}
+  // ── 3. Cross hold confirmation (contact / precontact → crossed) ──────────
+  let newPendingCrossTicks    = 0;
+  let newPendingCrossDirection = null;
+  const canCross       = prevPhase === 'contact' || prevPhase === 'precontact';
+  const crossedToSide  = sideNow !== 'at' && lastNonAtSide != null && sideNow !== lastNonAtSide;
+  const crossDistance  = absDistancePct >= WATCH_CROSS_CONFIRM_PCT;
 
-/**
- * Build a structured transition result.
- * eventType is null for transitions without a user-facing alert.
- */
-function buildTransitionResult(prevPhase, nextPhase, sideRelativeToLevel) {
-  const changed       = prevPhase !== nextPhase;
+  if (canCross && crossedToSide && crossDistance) {
+    if (pendingCrossDirection === sideNow) {
+      newPendingCrossTicks     = pendingCrossTicks + 1;
+      newPendingCrossDirection = sideNow;
+    } else {
+      newPendingCrossTicks     = 1;     // new direction — restart
+      newPendingCrossDirection = sideNow;
+    }
+    if (newPendingCrossTicks >= WATCH_CROSS_HOLD_TICKS) {
+      nextPhase  = 'crossed';
+      reason     = 'cross_hold_confirmed';
+      newPendingCrossTicks     = 0;
+      newPendingCrossDirection = null;
+    }
+  }
+
+  // ── 4. ALLOWED_TRANSITIONS guard ─────────────────────────────────────────
+  if (nextPhase !== prevPhase) {
+    const allowed = ALLOWED_TRANSITIONS[prevPhase] ?? new Set();
+    if (!allowed.has(nextPhase)) {
+      nextPhase = prevPhase;
+      reason    = 'transition_not_allowed';
+    }
+  }
+
+  // ── 5. Build event type for confirmed transition ──────────────────────────
+  const changed       = nextPhase !== prevPhase;
   const transitionKey = changed ? `${prevPhase}->${nextPhase}` : null;
   let eventType = null;
-  if (changed) {
-    if (transitionKey === 'contact->crossed') {
-      eventType = sideRelativeToLevel === 'above' ? 'crossed_up' : 'crossed_down';
+  if (changed && transitionKey) {
+    if (nextPhase === 'crossed') {
+      eventType = sideNow === 'above' ? 'crossed_up' : 'crossed_down';
     } else {
       eventType = TRANSITION_EVENT[transitionKey] ?? null;
     }
   }
-  return { prevPhase, nextPhase, changed, transitionKey, eventType, sideRelativeToLevel };
+
+  return {
+    nextPhase,
+    prevPhase,
+    changed,
+    transitionKey,
+    eventType,
+    reason,
+    sideRelativeToLevel: sideNow,
+    pending: {
+      contactCandidate: newPendingContactTicks > 0,
+      contactTicks:     newPendingContactTicks,
+      crossCandidate:   newPendingCrossTicks > 0,
+      crossTicks:       newPendingCrossTicks,
+      crossDirection:   newPendingCrossDirection,
+    },
+  };
 }
 
 // ─── ETA to level ─────────────────────────────────────────────────
@@ -423,7 +528,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const events = [];
     if (!transition.changed || !transition.eventType) return events;
 
-    const { eventType, prevPhase, nextPhase, sideRelativeToLevel } = transition;
+    const { eventType, prevPhase, nextPhase, sideRelativeToLevel, reason } = transition;
     const ao  = level.alertOptions;
     const { distancePct, currentPrice, wallContext } = state;
     const levelPrice = level.price;
@@ -459,7 +564,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     console.log(
       `[watch-engine] transition ${level.symbol} ${level.internalId}` +
-      ` ${prevPhase}->${nextPhase} evt=${eventType}` +
+      ` ${prevPhase}->${nextPhase} evt=${eventType} reason=${reason}` +
       ` price=${currentPrice} level=${levelPrice} dist=${distancePct?.toFixed(3)}%` +
       ` side=${sideRelativeToLevel}`,
     );
@@ -645,22 +750,42 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const distanceAbs    = Math.abs(currentPrice - levelPrice);
 
     // Side relative to level (above / below / at)
-    const sideNow  = computeSide(currentPrice, levelPrice);
-    const sidePrev = prevState?.sideRelativeToLevel ?? null;
+    const sideNow = computeSide(currentPrice, levelPrice);
+    // lastNonAtSide: last confirmed side that was not 'at' — needed for cross direction detection
+    const lastNonAtSide = sideNow !== 'at' ? sideNow : (prevState?.lastNonAtSide ?? null);
 
-    // State machine: resolve next phase from previous phase + distance + side
-    const prevPhase = prevState?.phase ?? 'watching';
-    const nextPhase = resolvePhase(prevPhase, absDistancePct, sideNow, sidePrev);
+    // State machine: resolve next phase with hysteresis + hold confirmation
+    const prevPhase  = prevState?.phase ?? 'watching';
+    const nowTs      = Date.now();
+    const transition = resolvePhase({
+      prevPhase,
+      absDistancePct,
+      sideNow,
+      lastNonAtSide,
+      pendingContactTicks:   prevState?.pendingContactTicks   ?? 0,
+      pendingCrossTicks:     prevState?.pendingCrossTicks     ?? 0,
+      pendingCrossDirection: prevState?.pendingCrossDirection ?? null,
+    });
+    const nextPhase = transition.nextPhase;
 
     // Phase timing
-    const nowTs         = Date.now();
-    const phaseChanged  = nextPhase !== prevPhase;
+    const phaseChanged    = transition.changed;
     const phaseEnteredAt  = phaseChanged ? nowTs : (prevState?.phaseEnteredAt ?? nowTs);
     const ticksInPhase    = phaseChanged ? 0 : ((prevState?.ticksInPhase ?? 0) + 1);
     const phaseDurationMs = nowTs - phaseEnteredAt;
 
-    // Build transition result (consumed by evaluateTransitionEvents)
-    const transition = buildTransitionResult(prevPhase, nextPhase, sideNow);
+    // Debug logging for pending transitions
+    const prevPending = prevState?.pending ?? {};
+    if (transition.pending.contactCandidate && !prevPending.contactCandidate) {
+      console.log(`[watch-engine] pending contact started ${level.symbol} ${level.internalId} dist=${absDistancePct.toFixed(3)}%`);
+    } else if (prevPending.contactCandidate && !transition.pending.contactCandidate && transition.reason !== 'contact_hold_confirmed') {
+      console.log(`[watch-engine] pending contact cancelled ${level.symbol} ${level.internalId}`);
+    }
+    if (transition.pending.crossCandidate && !prevPending.crossCandidate) {
+      console.log(`[watch-engine] pending cross started ${level.symbol} ${level.internalId} dir=${transition.pending.crossDirection} dist=${absDistancePct.toFixed(3)}%`);
+    } else if (prevPending.crossCandidate && !transition.pending.crossCandidate && transition.reason !== 'cross_hold_confirmed') {
+      console.log(`[watch-engine] pending cross cancelled ${level.symbol} ${level.internalId}`);
+    }
 
     // Derived boolean flags (backward compat for earlyWarnings and external checks)
     const isNearby    = nextPhase === 'approaching' || nextPhase === 'precontact' || nextPhase === 'contact';
@@ -761,6 +886,11 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       wallBreakoutCandidate: false,
       lastEventType: prevState?.lastEventType ?? null,
       lastEventAt:   prevState?.lastEventAt   ?? null,
+      transitionReason:      transition.reason,
+      lastNonAtSide,
+      pendingContactTicks:   transition.pending.contactTicks,
+      pendingCrossTicks:     transition.pending.crossTicks,
+      pendingCrossDirection: transition.pending.crossDirection,
       updatedAt:     nowTs,
     };
 
@@ -856,19 +986,24 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
           // Store state snapshot for next tick (includes phase for state machine)
           previousStates.set(level.internalId, {
-            phase:               state.phase,
-            sideRelativeToLevel: state.sideRelativeToLevel,
-            phaseEnteredAt:      state.phaseEnteredAt,
-            ticksInPhase:        state.ticksInPhase,
-            distancePct:         state.distancePct,
-            approachSpeed:       state.approachSpeed,
-            wallNearby:          state.wallContext.wallNearby,
-            wallStrength:        state.wallContext.wallStrength,
-            volumeNow:           state.volumeNow,
-            tradesNow:           state.tradesNow,
-            lastEventType:       state.lastEventType,
-            lastEventAt:         state.lastEventAt,
-            ts:                  nowMs,
+            phase:                 state.phase,
+            sideRelativeToLevel:   state.sideRelativeToLevel,
+            lastNonAtSide:         state.lastNonAtSide,
+            phaseEnteredAt:        state.phaseEnteredAt,
+            ticksInPhase:          state.ticksInPhase,
+            distancePct:           state.distancePct,
+            approachSpeed:         state.approachSpeed,
+            wallNearby:            state.wallContext.wallNearby,
+            wallStrength:          state.wallContext.wallStrength,
+            volumeNow:             state.volumeNow,
+            tradesNow:             state.tradesNow,
+            lastEventType:         state.lastEventType,
+            lastEventAt:           state.lastEventAt,
+            pendingContactTicks:   state.pendingContactTicks,
+            pendingCrossTicks:     state.pendingCrossTicks,
+            pendingCrossDirection: state.pendingCrossDirection,
+            pending:               transition.pending,
+            ts:                    nowMs,
           });
 
           // Always persist watch state to Redis

@@ -556,6 +556,9 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     wallContext:     wallContext  || null,
     delivery:        delivery || null,
     confirmed:       false,
+    // Popup lifecycle + sound snapshot
+    popupTitleKey:           state.popupTitleKey          ?? 'default_tracking',
+    soundPreset:             state.soundPreset             ?? 'standard',
     // Display / scenario snapshot (state at the moment the event fires)
     setupDirection:          state.setupDirection         ?? null,
     levelRole:               state.levelRole              ?? null,
@@ -1145,6 +1148,65 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       );
     }
 
+    // ── Popup lifecycle ────────────────────────────────────────────
+    // lastStrongEventType: derived from phase transition (no event eval needed)
+    let newStrongEventType = null;
+    if (nextPhase === 'crossed' && prevPhase !== 'crossed') {
+      newStrongEventType = sideNow === 'above' ? 'crossed_up' : 'crossed_down';
+    } else if (nextPhase === 'contact' && prevPhase !== 'contact') {
+      newStrongEventType = 'contact_hit';
+    }
+    const lastStrongEventType = newStrongEventType ?? (prevState?.lastStrongEventType ?? null);
+    const lastStrongEventAt   = newStrongEventType   ? nowTs : (prevState?.lastStrongEventAt ?? null);
+
+    // rollbackAfterAlert: crossed phase exited back toward watching/approaching
+    const wasJustCrossed   = prevState?.phase === 'crossed';
+    const retractedFromCross = wasJustCrossed && (nextPhase === 'watching' || nextPhase === 'approaching' || nextPhase === 'precontact');
+    const rollbackAfterAlert =
+      retractedFromCross ||
+      (prevState?.rollbackAfterAlert === true &&
+        (nextPhase === 'approaching' || nextPhase === 'precontact' || nextPhase === 'watching'));
+
+    // scenarioTrend: compare current leading to previous
+    const prevScenarioLeading = prevState?.scenarioLeading ?? null;
+    const prevScenarioScores  = prevState?.scenarioScores  ?? null;
+    let scenarioTrend = 'stable';
+    if (prevScenarioLeading && prevScenarioLeading !== scenarioResult.scenarioLeading) {
+      scenarioTrend = 'changed';
+    } else if (prevScenarioScores) {
+      const bDiff = scenarioResult.scenarioScores.breakout - (prevScenarioScores.breakout ?? 0);
+      const boBncDiff = Math.max(
+        scenarioResult.scenarioScores.bounce   - (prevScenarioScores.bounce   ?? 0),
+        scenarioResult.scenarioScores.wick     - (prevScenarioScores.wick     ?? 0),
+      );
+      if      (bDiff   >  5) scenarioTrend = 'rising';
+      else if (boBncDiff > 5) scenarioTrend = 'falling';
+    }
+
+    // popupTitleKey
+    let popupTitleKey = 'default_tracking';
+    if (nextPhase === 'crossed') {
+      popupTitleKey = 'level_broken';
+    } else if (rollbackAfterAlert) {
+      popupTitleKey = 'level_pulling_back';
+    }
+
+    // Popup lifecycle debug logs
+    const prevPopupTitleKey = prevState?.popupTitleKey ?? 'default_tracking';
+    if (popupTitleKey !== prevPopupTitleKey) {
+      console.log(
+        `[watch-engine] popup_title_changed ${level.symbol} ${level.internalId}` +
+        ` ${prevPopupTitleKey}->${popupTitleKey} phase=${nextPhase}` +
+        ` scenario=${scenarioResult.scenarioLeading}`,
+      );
+    }
+    if (rollbackAfterAlert && !prevState?.rollbackAfterAlert) {
+      console.log(
+        `[watch-engine] rollback_after_alert_detected ${level.symbol} ${level.internalId}` +
+        ` lastStrong=${lastStrongEventType} scenario=${scenarioResult.scenarioLeading}`,
+      );
+    }
+
     const state = {
       internalId:          level.internalId,
       symbol:              level.symbol,
@@ -1213,6 +1275,17 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       etaLabel:              etaResult.etaLabel,
       smoothedApproachSpeed,
       approachVelocityLabel,
+      // ── Popup lifecycle fields ───────────────────────────────────────────
+      popupTitleKey,
+      rollbackAfterAlert,
+      lastStrongEventType,
+      lastStrongEventAt,
+      scenarioTrend,
+      // Sound config (from level alertOptions, read-only here)
+      soundPreset:             level.alertOptions?.soundPreset ?? 'standard',
+      soundEnabled:            level.alertOptions?.soundEnabled ?? true,
+      popupEnabled:            level.alertOptions?.popupEnabled ?? true,
+      badgeEnabled:            level.alertOptions?.badgeEnabled ?? true,
       // ── Scenario engine ────────────────────────────────────────────
       scenarioMode:            level.scenarioMode    ?? 'all_in',
       scenarioScores:          scenarioResult.scenarioScores,
@@ -1334,6 +1407,12 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             pendingCrossTicks:     state.pendingCrossTicks,
             pendingCrossDirection: state.pendingCrossDirection,
             pending:               transition.pending,
+            lastStrongEventType:   state.lastStrongEventType,
+            lastStrongEventAt:     state.lastStrongEventAt,
+            rollbackAfterAlert:    state.rollbackAfterAlert,
+            popupTitleKey:         state.popupTitleKey,
+            scenarioLeading:       state.scenarioLeading,
+            scenarioScores:        state.scenarioScores,
             // Updated AFTER evaluateTransitionEvents so next tick sees current suppression
             lastEventSuppressedReason: suppressedStateMap.get(level.internalId)?.reason ?? null,
             ts:                    nowMs,

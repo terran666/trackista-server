@@ -513,6 +513,10 @@ const VALID_MANUAL_SOUNDS = new Set([
 
 const VALID_WATCH_MODES    = new Set(['off', 'simple']);
 const VALID_SCENARIO_MODES = new Set(['bounce_only', 'breakout_only', 'wick_only', 'auto', 'all_in']);
+const VALID_SOUND_PRESETS  = new Set([
+  'standard', 'soft', 'danger', 'breakout', 'bounce', 'wick',
+  'meme-airhorn', 'meme-bruh', 'meme-ohno',
+]);
 
 app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -521,7 +525,10 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
 
-  const { watchEnabled, watchMode, alertOptions, scenarioMode } = req.body || {};
+  const {
+    watchEnabled, watchMode, alertOptions, scenarioMode,
+    soundEnabled, soundPreset, popupEnabled, badgeEnabled,
+  } = req.body || {};
 
   if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
     return res.status(400).json({ success: false, error: 'watchEnabled must be a boolean' });
@@ -532,6 +539,10 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   if (scenarioMode !== undefined && !VALID_SCENARIO_MODES.has(scenarioMode)) {
     return res.status(400).json({ success: false, error: `scenarioMode must be one of: ${[...VALID_SCENARIO_MODES].join(', ')}` });
   }
+  if (soundPreset !== undefined && !VALID_SOUND_PRESETS.has(soundPreset)) {
+    console.log(`[watch-config] invalid_sound_preset_rejected id=${id} preset=${soundPreset}`);
+    return res.status(400).json({ success: false, error: `soundPreset must be one of: ${[...VALID_SOUND_PRESETS].join(', ')}` });
+  }
   if (alertOptions && alertOptions.soundId && !VALID_MANUAL_SOUNDS.has(alertOptions.soundId)) {
     return res.status(400).json({ success: false, error: `soundId must be one of: ${[...VALID_MANUAL_SOUNDS].join(', ')}` });
   }
@@ -540,11 +551,27 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   if (watchEnabled  !== undefined) updates.alertEnabled  = watchEnabled;
   if (watchMode     !== undefined) updates.watchMode     = watchMode;
   if (scenarioMode  !== undefined) updates.scenarioMode  = scenarioMode;
-  if (alertOptions  !== undefined) {
-    updates.alertOptions = { ...(level.alertOptions || {}), ...alertOptions };
+
+  // Merge sound/popup fields into alertOptions
+  const aoOverrides = {};
+  if (soundEnabled !== undefined)  aoOverrides.soundEnabled  = soundEnabled;
+  if (soundPreset  !== undefined)  aoOverrides.soundPreset   = soundPreset;
+  if (popupEnabled !== undefined)  aoOverrides.popupEnabled  = popupEnabled;
+  if (badgeEnabled !== undefined)  aoOverrides.badgeEnabled  = badgeEnabled;
+
+  const hasAoOverrides = Object.keys(aoOverrides).length > 0;
+  if (hasAoOverrides || alertOptions !== undefined) {
+    updates.alertOptions = {
+      ...(level.alertOptions || {}),
+      ...(alertOptions || {}),
+      ...aoOverrides,
+    };
   }
 
   const updated = manualLevelsPatch(id, updates);
+  if (soundPreset !== undefined) {
+    console.log(`[watch-config] sound_preset_saved id=${id} preset=${soundPreset}`);
+  }
   levelWatchEngine.loader.invalidate();
   return res.json({ success: true, levelId: id });
 });
@@ -556,13 +583,18 @@ app.get('/api/manual-levels/:id/watch', (req, res) => {
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
 
+  const ao = level.alertOptions || {};
   return res.json({
     success:      true,
     levelId:      id,
     watchEnabled: Boolean(level.alertEnabled),
     watchMode:    level.watchMode    || 'simple',
     scenarioMode: level.scenarioMode || 'all_in',
-    alertOptions: level.alertOptions || null,
+    soundEnabled: ao.soundEnabled  ?? true,
+    soundPreset:  ao.soundPreset   ?? 'standard',
+    popupEnabled: ao.popupEnabled  ?? true,
+    badgeEnabled: ao.badgeEnabled  ?? true,
+    alertOptions: ao,
   });
 });
 

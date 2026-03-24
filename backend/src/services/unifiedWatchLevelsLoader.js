@@ -154,8 +154,14 @@ function normalizeTrackedLevel(tl) {
 
 /**
  * Normalise a manual-levels.json record with alertEnabled=true.
+ * Uses stored alertOptions/watchMode if present, otherwise defaults.
  */
 function normalizeManualLevel(ml) {
+  const storedOpts = ml.alertOptions || {};
+  const alertOptions = {
+    ...defaultAlertOptions(),
+    ...storedOpts,
+  };
   return {
     internalId:       `manual-${ml.id}`,
     levelId:          null,
@@ -168,13 +174,13 @@ function normalizeManualLevel(ml) {
     side:             ml.side || null,
     price:            parseFloat(ml.price),
     watchEnabled:     true,
-    watchMode:        'simple',
+    watchMode:        ml.watchMode || 'simple',
     tactics: {
       breakout: false, bounce: false, fakeout: false,
       wallBounce: false, wallBreakout: false,
     },
     config:       defaultConfig(),
-    alertOptions: defaultAlertOptions(),
+    alertOptions,
     isActive:     true,
     meta:         null,
   };

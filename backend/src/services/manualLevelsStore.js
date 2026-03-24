@@ -62,4 +62,18 @@ function remove(id) {
   return removed;
 }
 
-module.exports = { getAll, create, remove };
+function getById(id) {
+  const { levels } = readStore();
+  return levels.find(l => l.id === id) || null;
+}
+
+function patch(id, updates) {
+  const store = readStore();
+  const idx   = store.levels.findIndex(l => l.id === id);
+  if (idx === -1) return null;
+  store.levels[idx] = { ...store.levels[idx], ...updates, updatedAt: Date.now() };
+  writeStore(store);
+  return store.levels[idx];
+}
+
+module.exports = { getAll, create, remove, getById, patch };

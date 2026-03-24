@@ -8,6 +8,7 @@ const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
 const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete } = require('./routes/manualLevelsRoute');
+const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
@@ -501,6 +502,91 @@ console.log('[backend] registering /api/manual-levels routes');
 app.post('/api/manual-levels',       manualLevelsCreate);
 app.get('/api/manual-levels',        manualLevelsList);
 app.delete('/api/manual-levels/:id', manualLevelsDelete);
+
+// Watch endpoints for file-based manual levels
+// These persist alertEnabled + watchMode + alertOptions into manual-levels.json
+// and the unified watch loader picks them up automatically (alertEnabled=true filter).
+const VALID_MANUAL_SOUNDS = new Set([
+  'default_alert','soft_ping','breakout_high','bounce_soft',
+  'fakeout_warning','wall_alert','urgent_alarm',
+]);
+
+app.patch('/api/manual-levels/:id/watch', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const level = manualLevelsGetById(id);
+  if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+
+  const { watchEnabled, watchMode, alertOptions } = req.body || {};
+
+  if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'watchEnabled must be a boolean' });
+  }
+  if (watchMode !== undefined && !['off','simple'].includes(watchMode)) {
+    return res.status(400).json({ success: false, error: 'watchMode must be off or simple' });
+  }
+  if (alertOptions && alertOptions.soundId && !VALID_MANUAL_SOUNDS.has(alertOptions.soundId)) {
+    return res.status(400).json({ success: false, error: `soundId must be one of: ${[...VALID_MANUAL_SOUNDS].join(', ')}` });
+  }
+
+  const updates = {};
+  if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+  if (watchMode    !== undefined) updates.watchMode    = watchMode;
+  if (alertOptions !== undefined) {
+    updates.alertOptions = { ...(level.alertOptions || {}), ...alertOptions };
+  }
+
+  const updated = manualLevelsPatch(id, updates);
+  levelWatchEngine.loader.invalidate();
+  return res.json({ success: true, levelId: id });
+});
+
+app.get('/api/manual-levels/:id/watch', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const level = manualLevelsGetById(id);
+  if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+
+  return res.json({
+    success:      true,
+    levelId:      id,
+    watchEnabled: Boolean(level.alertEnabled),
+    watchMode:    level.watchMode || 'simple',
+    alertOptions: level.alertOptions || null,
+  });
+});
+
+app.get('/api/manual-levels/:id/watch-state', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const level = manualLevelsGetById(id);
+  if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+
+  try {
+    const market = level.marketType || 'futures';
+    const key    = `levelwatchstate:${market}:${level.symbol}:manual-${id}`;
+    const raw    = await redis.get(key);
+    const state  = raw ? JSON.parse(raw) : null;
+    return res.json({
+      success:      true,
+      levelId:      id,
+      watchEnabled: Boolean(level.alertEnabled),
+      watchMode:    level.watchMode || 'simple',
+      state,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+app.get('/api/manual-levels/:id/events', (_req, res) => {
+  // File-based levels have no MySQL event history — events flow via alerts:recent
+  const id = parseInt(_req.params.id, 10);
+  return res.json({ success: true, levelId: id, count: 0, nextCursor: null, items: [] });
+});
 
 // ─── Tracked levels endpoints ─────────────────────────────────────
 console.log('[backend] registering /api/tracked-levels routes');

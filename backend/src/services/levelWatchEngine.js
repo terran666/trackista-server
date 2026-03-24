@@ -130,7 +130,7 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     tradesDeltaPct,
     wallContext,
     earlyWarning,
-    deliveryConfig,
+    delivery,
     phase,
     severity,
   } = opts;
@@ -159,7 +159,7 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     approachAcceleration: approachAcceleration != null ? parseFloat(approachAcceleration.toFixed(8)) : null,
     signalContext:   signalContext || null,
     wallContext:     wallContext  || null,
-    delivery:        deliveryConfig || null,
+    delivery:        delivery || null,
     confirmed:       false,
   };
 
@@ -262,6 +262,9 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         tradesDeltaPct:  event.tradesDeltaPct  ?? null,
         earlyWarning:    event.earlyWarning     ?? null,
       };
+
+      // Skip MySQL persist for file-based levels (no levelId)
+      if (!level.levelId) return;
 
       await db.query(`
         INSERT INTO level_events
@@ -790,8 +793,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             ts:           nowMs,
           });
 
-          // Persist watch state to Redis (only when approaching/active to save writes)
-          if (state.approaching || state.touched || state.crossed) {
+          // Persist watch state to Redis whenever price is within proximity zone
+          if (state.isNearby || state.approaching || state.touched || state.crossed) {
             await persistWatchState(level, state, writePipeline);
           }
 

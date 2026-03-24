@@ -147,7 +147,7 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     title:           buildTitle(eventType, level.symbol, levelPrice),
     message:         buildMessage(eventType, level.symbol, levelPrice, distancePct),
     createdAt:       nowMs,
-    levelId:         level.levelId,
+    levelId:         level.levelId ?? (level.externalLevelId != null ? parseInt(level.externalLevelId, 10) : null),
     externalLevelId: level.externalLevelId,
     geometryType:    level.geometryType,
     watchMode:       level.watchMode,

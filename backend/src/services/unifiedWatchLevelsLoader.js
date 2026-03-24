@@ -174,7 +174,8 @@ function normalizeManualLevel(ml) {
     side:             ml.side || null,
     price:            parseFloat(ml.price),
     watchEnabled:     true,
-    watchMode:        ml.watchMode || 'simple',
+    watchMode:        ml.watchMode    || 'simple',
+    scenarioMode:     ml.scenarioMode || 'all_in',
     tactics: {
       breakout: false, bounce: false, fakeout: false,
       wallBounce: false, wallBreakout: false,

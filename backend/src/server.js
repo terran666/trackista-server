@@ -511,6 +511,9 @@ const VALID_MANUAL_SOUNDS = new Set([
   'fakeout_warning','wall_alert','urgent_alarm',
 ]);
 
+const VALID_WATCH_MODES    = new Set(['off', 'simple']);
+const VALID_SCENARIO_MODES = new Set(['bounce_only', 'breakout_only', 'wick_only', 'auto', 'all_in']);
+
 app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
@@ -518,22 +521,26 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
 
-  const { watchEnabled, watchMode, alertOptions } = req.body || {};
+  const { watchEnabled, watchMode, alertOptions, scenarioMode } = req.body || {};
 
   if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
     return res.status(400).json({ success: false, error: 'watchEnabled must be a boolean' });
   }
-  if (watchMode !== undefined && !['off','simple'].includes(watchMode)) {
+  if (watchMode !== undefined && !VALID_WATCH_MODES.has(watchMode)) {
     return res.status(400).json({ success: false, error: 'watchMode must be off or simple' });
+  }
+  if (scenarioMode !== undefined && !VALID_SCENARIO_MODES.has(scenarioMode)) {
+    return res.status(400).json({ success: false, error: `scenarioMode must be one of: ${[...VALID_SCENARIO_MODES].join(', ')}` });
   }
   if (alertOptions && alertOptions.soundId && !VALID_MANUAL_SOUNDS.has(alertOptions.soundId)) {
     return res.status(400).json({ success: false, error: `soundId must be one of: ${[...VALID_MANUAL_SOUNDS].join(', ')}` });
   }
 
   const updates = {};
-  if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
-  if (watchMode    !== undefined) updates.watchMode    = watchMode;
-  if (alertOptions !== undefined) {
+  if (watchEnabled  !== undefined) updates.alertEnabled  = watchEnabled;
+  if (watchMode     !== undefined) updates.watchMode     = watchMode;
+  if (scenarioMode  !== undefined) updates.scenarioMode  = scenarioMode;
+  if (alertOptions  !== undefined) {
     updates.alertOptions = { ...(level.alertOptions || {}), ...alertOptions };
   }
 
@@ -553,7 +560,8 @@ app.get('/api/manual-levels/:id/watch', (req, res) => {
     success:      true,
     levelId:      id,
     watchEnabled: Boolean(level.alertEnabled),
-    watchMode:    level.watchMode || 'simple',
+    watchMode:    level.watchMode    || 'simple',
+    scenarioMode: level.scenarioMode || 'all_in',
     alertOptions: level.alertOptions || null,
   });
 });

@@ -87,6 +87,11 @@ const WATCH_CONTACT_HOLD_TICKS    = 2;
 const WATCH_CROSS_HOLD_TICKS      = 2;
 const WATCH_CROSS_CONFIRM_PCT     = 0.03;   // min absDistancePct past level
 
+// ETA smoothing config
+const WATCH_ETA_EMA_ALPHA   = 0.30;  // EMA factor: 0 = fully lagged, 1 = raw
+const WATCH_MIN_ETA_SPEED   = 0.001; // min smoothed %/tick to compute ETA
+const WATCH_MAX_ETA_SECONDS = 300;   // discard ETAs > 5 minutes (too noisy)
+
 // Allowed transitions (state machine guard)
 // precontact->crossed allowed for fast moves that skip contact confirmation
 const ALLOWED_TRANSITIONS = {
@@ -303,14 +308,198 @@ function resolvePhase(ctx) {
   };
 }
 
+// ─── Display context ─────────────────────────────────────────────
+// Returns setupDirection / levelRole / distancePctAbs / distancePriceAbs / relativePositionLabel.
+// Price above level → level is support (long setup).
+// Price below level → level is resistance (short setup).
+function computeDisplayContext(sideNow, distancePct, distanceAbs) {
+  let relativePositionLabel;
+  if      (sideNow === 'above') relativePositionLabel = 'price_above_level';
+  else if (sideNow === 'below') relativePositionLabel = 'price_below_level';
+  else                          relativePositionLabel = 'at_level';
+
+  let setupDirection;
+  let levelRole;
+  if (sideNow === 'above') {
+    setupDirection = 'long';
+    levelRole      = 'support';
+  } else if (sideNow === 'below') {
+    setupDirection = 'short';
+    levelRole      = 'resistance';
+  } else {
+    setupDirection = 'neutral';
+    levelRole      = 'unknown';
+  }
+
+  return {
+    setupDirection,
+    levelRole,
+    distancePctAbs:   parseFloat(Math.abs(distancePct).toFixed(6)),
+    distancePriceAbs: parseFloat(distanceAbs.toFixed(8)),
+    relativePositionLabel,
+  };
+}
+
 // ─── ETA to level ─────────────────────────────────────────────────
-function estimateEtaSec(distanceAbs, approachSpeed) {
-  if (!approachSpeed || Math.abs(approachSpeed) < SPEED_EPSILON) return null;
-  const speed = Math.abs(approachSpeed);
-  // approachSpeed is in price/tick (1 tick = 1 second)
-  // distanceAbs is in price units
-  const etaSec = distanceAbs / speed;
-  return Math.round(etaSec);
+function formatEtaLabel(seconds) {
+  if (seconds < 60) return `~${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `~${m}m ${s}s` : `~${m}m`;
+}
+
+/**
+ * Compute ETA using EMA-smoothed approach speed.
+ * Only valid during approaching / precontact when price is moving toward level.
+ */
+function computeEta(absDistancePct, smoothedSpeed, phase, movingToward) {
+  if (phase !== 'approaching' && phase !== 'precontact') {
+    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_out_of_phase' };
+  }
+  if (!movingToward) {
+    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_moving_away' };
+  }
+  if (!smoothedSpeed || smoothedSpeed < WATCH_MIN_ETA_SPEED) {
+    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_speed_too_low' };
+  }
+  const etaSeconds = Math.round(absDistancePct / smoothedSpeed);
+  if (etaSeconds > WATCH_MAX_ETA_SECONDS) {
+    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_unstable_speed' };
+  }
+  return { etaSeconds, etaLabel: formatEtaLabel(etaSeconds), etaReason: 'eta_from_approach_speed' };
+}
+
+// ─── Approach velocity label ──────────────────────────────────────
+function computeApproachVelocityLabel(approachAcceleration) {
+  if (approachAcceleration == null)          return 'stable';
+  if (approachAcceleration >  0.0001) return 'accelerating';
+  if (approachAcceleration < -0.0001) return 'slowing';
+  return 'stable';
+}
+
+// ─── Scenario score engine ────────────────────────────────────────
+/**
+ * Score three scenarios: breakout / wick / bounce (0..100 each).
+ * Inputs are raw per-level signals — never shared across levels.
+ */
+function computeScenarioScores(ctx) {
+  const {
+    phase                = 'watching',
+    approachSpeed        = null,
+    approachAcceleration = null,
+    movingToward         = false,
+    impulseScore         = null,
+    inPlayScore          = null,
+    pendingCross         = false,
+    pendingCrossTicks    = 0,
+    crossCancelled       = false,  // prev tick had pendingCross, now cancelled
+    prevPhaseWasCrossed  = false,  // was crossed last tick, now not → fast return
+    wallNearby           = false,  // from prevState (one-tick lag is acceptable)
+    wallStrength         = null,
+  } = ctx;
+
+  const isNear        = phase === 'approaching' || phase === 'precontact' || phase === 'contact';
+  const crossFraction = WATCH_CROSS_HOLD_TICKS > 0
+    ? Math.min(1, pendingCrossTicks / WATCH_CROSS_HOLD_TICKS)
+    : 0;
+
+  let breakout = 0;
+  let wick     = 0;
+  let bounce   = 0;
+  const rB = [];
+  const rW = [];
+  const rO = [];
+
+  // ── BREAKOUT signals ────────────────────────────────────────────
+  if (approachAcceleration != null && approachAcceleration > 0.0001 && movingToward) {
+    breakout += 20; rB.push('approach_accelerating');
+  }
+  if (impulseScore != null && impulseScore >= 120) {
+    breakout += 20; rB.push('high_impulse');
+  }
+  if (inPlayScore != null && inPlayScore >= 120) {
+    breakout += 15; rB.push('high_in_play');
+  }
+  if (pendingCross && crossFraction >= 0.4) {
+    breakout += Math.round(20 * crossFraction);
+    rB.push('pending_cross_started');
+    if (crossFraction >= 0.8) rB.push('pending_cross_accumulating');
+  }
+  if (phase === 'crossed') {
+    breakout += 30; rB.push('holding_past_level');
+  }
+  if (wallNearby && wallStrength != null && wallStrength < 0.3) {
+    breakout += 10; rB.push('weak_wall');
+  }
+
+  // ── WICK signals ────────────────────────────────────────────────
+  if (crossCancelled) {
+    wick += 35; rW.push('pending_cross_cancelled');
+  }
+  if (prevPhaseWasCrossed) {
+    wick += 40; rW.push('fast_return_after_probe');
+  }
+  if (pendingCross && crossFraction < 0.4) {
+    wick += 15; rW.push('pending_cross_started');
+  }
+  if ((phase === 'contact' || phase === 'precontact')
+      && !movingToward
+      && approachAcceleration != null && approachAcceleration < -0.0001) {
+    wick += 15; rW.push('strong_reaction_from_level');
+  }
+
+  // ── BOUNCE signals ──────────────────────────────────────────────
+  if (approachAcceleration != null && approachAcceleration < -0.0001 && movingToward) {
+    bounce += 25; rO.push('slowing_into_level');
+  }
+  if ((phase === 'contact' || phase === 'precontact') && !movingToward) {
+    bounce += 25; rO.push('strong_reaction_from_level');
+  }
+  if (wallNearby && wallStrength != null && wallStrength >= 0.4) {
+    bounce += 20; rO.push('nearby_wall_supports_bounce');
+  }
+  if (!pendingCross && isNear) {
+    bounce += 10; rO.push('no_breakout_momentum');
+  }
+  if (impulseScore != null && impulseScore < 80) {
+    bounce += 15; rO.push('low_impulse');
+  }
+  if (movingToward && approachSpeed != null && Math.abs(approachSpeed) < 0.01) {
+    bounce += 10; rO.push('slow_approach');
+  }
+
+  // Clamp
+  breakout = Math.min(100, Math.max(0, breakout));
+  wick     = Math.min(100, Math.max(0, wick));
+  bounce   = Math.min(100, Math.max(0, bounce));
+
+  // Leading scenario
+  const maxScore = Math.max(breakout, wick, bounce);
+  let scenarioLeading;
+  if (maxScore < 20) {
+    scenarioLeading = 'insufficient_confidence';
+  } else {
+    const threshold = maxScore * 0.85;
+    const leaders   = [];
+    if (breakout >= threshold) leaders.push('breakout');
+    if (wick     >= threshold) leaders.push('wick');
+    if (bounce   >= threshold) leaders.push('bounce');
+    scenarioLeading = leaders.length === 1 ? leaders[0] : 'mixed';
+  }
+
+  const confidenceLabel =
+    scenarioLeading === 'breakout' ? 'breakout_favored' :
+    scenarioLeading === 'wick'     ? 'wick_favored'     :
+    scenarioLeading === 'bounce'   ? 'bounce_favored'   : 'mixed';
+
+  return {
+    scenarioScores:          { breakout, wick, bounce },
+    scenarioLeading,
+    confidenceLabel,
+    scenarioReasonsBreakout: rB,
+    scenarioReasonsWick:     rW,
+    scenarioReasonsBounce:   rO,
+  };
 }
 
 // ─── Fingerprint for anti-duplicate ─────────────────────────────
@@ -367,6 +556,19 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     wallContext:     wallContext  || null,
     delivery:        delivery || null,
     confirmed:       false,
+    // Display / scenario snapshot (state at the moment the event fires)
+    setupDirection:          state.setupDirection         ?? null,
+    levelRole:               state.levelRole              ?? null,
+    distancePctAbs:          state.distancePctAbs         ?? null,
+    distancePriceAbs:        state.distancePriceAbs       ?? null,
+    relativePositionLabel:   state.relativePositionLabel  ?? null,
+    etaSeconds:              state.etaSeconds             ?? null,
+    etaLabel:                state.etaLabel               ?? '—',
+    approachVelocityLabel:   state.approachVelocityLabel  ?? 'stable',
+    scenarioMode:            state.scenarioMode           ?? 'all_in',
+    scenarioScores:          state.scenarioScores         ?? null,
+    scenarioLeading:         state.scenarioLeading        ?? null,
+    confidenceLabel:         state.confidenceLabel        ?? null,
   };
 
   if (earlyWarning) event.earlyWarning = earlyWarning;
@@ -867,6 +1069,13 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       }
     }
 
+    // EMA-smoothed approach speed for stable ETA (decays to 0 when moving away)
+    const rawSpeedForEma    = (movingToward && approachSpeed != null) ? Math.abs(approachSpeed) : 0;
+    const prevSmoothed      = prevState?.smoothedApproachSpeed ?? rawSpeedForEma;
+    const smoothedApproachSpeed = movingToward
+      ? parseFloat((WATCH_ETA_EMA_ALPHA * rawSpeedForEma + (1 - WATCH_ETA_EMA_ALPHA) * prevSmoothed).toFixed(8))
+      : 0;
+
     // Volume / trades delta from metrics
     let volumeDeltaPct  = null;
     let tradesDeltaPct  = null;
@@ -891,6 +1100,50 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       inPlayScore:      signal.inPlayScore       ?? null,
       signalConfidence: signal.signalConfidence  ?? null,
     } : null;
+
+    // ── Display context ────────────────────────────────────────────
+    const displayCtx = computeDisplayContext(sideNow, distancePct, distanceAbs);
+
+    // ── ETA to level ───────────────────────────────────────────────
+    const etaResult = computeEta(absDistancePct, smoothedApproachSpeed, nextPhase, movingToward);
+    if (isDebugLevel(level.symbol, level.internalId) && etaResult.etaReason === 'eta_from_approach_speed') {
+      console.log(
+        `[watch-engine:eta] ${level.symbol} ${level.internalId}` +
+        ` smoothedSpeed=${smoothedApproachSpeed.toFixed(5)} dist=${absDistancePct.toFixed(4)}%` +
+        ` eta=${etaResult.etaSeconds}s (${etaResult.etaLabel})`,
+      );
+    }
+
+    // ── Approach velocity label ────────────────────────────────────
+    const approachVelocityLabel = computeApproachVelocityLabel(approachAcceleration);
+
+    // ── Scenario scores (level-specific, never shared) ─────────────
+    const prevCrossActive     = prevState?.pending?.crossCandidate ?? false;
+    const crossCancelled      = prevCrossActive && !transition.pending.crossCandidate;
+    const prevPhaseWasCrossed = (prevState?.phase === 'crossed') && (nextPhase !== 'crossed');
+    const scenarioResult = computeScenarioScores({
+      phase:               nextPhase,
+      approachSpeed,
+      approachAcceleration,
+      movingToward,
+      impulseScore:        signalCtx?.impulseScore  ?? null,
+      inPlayScore:         signalCtx?.inPlayScore   ?? null,
+      pendingCross:        transition.pending.crossTicks > 0,
+      pendingCrossTicks:   transition.pending.crossTicks,
+      crossCancelled,
+      prevPhaseWasCrossed,
+      wallNearby:          prevState?.wallNearby   ?? false,
+      wallStrength:        prevState?.wallStrength ?? null,
+    });
+    if (isDebugLevel(level.symbol, level.internalId)) {
+      const sc = scenarioResult.scenarioScores;
+      console.log(
+        `[watch-engine:scenario] ${level.symbol} ${level.internalId}` +
+        ` breakout=${sc.breakout} wick=${sc.wick} bounce=${sc.bounce}` +
+        ` leading=${scenarioResult.scenarioLeading} eta=${etaResult.etaLabel}` +
+        ` dir=${displayCtx.setupDirection} role=${displayCtx.levelRole}`,
+      );
+    }
 
     const state = {
       internalId:          level.internalId,
@@ -949,7 +1202,26 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       pendingCrossDirection:  transition.pending.crossDirection,
       // One-tick delay: reads suppression from previous tick's outcome
       lastEventSuppressedReason: prevState?.lastEventSuppressedReason ?? null,
-      updatedAt:     nowTs,
+      // ── Display model ─────────────────────────────────────────────
+      setupDirection:        displayCtx.setupDirection,
+      levelRole:             displayCtx.levelRole,
+      distancePctAbs:        displayCtx.distancePctAbs,
+      distancePriceAbs:      displayCtx.distancePriceAbs,
+      relativePositionLabel: displayCtx.relativePositionLabel,
+      // ── ETA ────────────────────────────────────────────────────────
+      etaSeconds:            etaResult.etaSeconds,
+      etaLabel:              etaResult.etaLabel,
+      smoothedApproachSpeed,
+      approachVelocityLabel,
+      // ── Scenario engine ────────────────────────────────────────────
+      scenarioMode:            level.scenarioMode    ?? 'all_in',
+      scenarioScores:          scenarioResult.scenarioScores,
+      scenarioLeading:         scenarioResult.scenarioLeading,
+      confidenceLabel:         scenarioResult.confidenceLabel,
+      scenarioReasonsBreakout: scenarioResult.scenarioReasonsBreakout,
+      scenarioReasonsWick:     scenarioResult.scenarioReasonsWick,
+      scenarioReasonsBounce:   scenarioResult.scenarioReasonsBounce,
+      updatedAt:               nowTs,
     };
 
     return { state, transition };
@@ -1051,6 +1323,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             ticksInPhase:          state.ticksInPhase,
             distancePct:           state.distancePct,
             approachSpeed:         state.approachSpeed,
+            smoothedApproachSpeed: state.smoothedApproachSpeed,
             wallNearby:            state.wallContext.wallNearby,
             wallStrength:          state.wallContext.wallStrength,
             volumeNow:             state.volumeNow,

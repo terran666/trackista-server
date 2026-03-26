@@ -21,6 +21,11 @@ const SEND_FLAGS = {
   level_touched:              () => envBool('TELEGRAM_SEND_LEVEL_TOUCHED',                  false),
   // Watch engine events — per-level telegram_enabled governs delivery; global flag defaults off
   level_crossed:              () => envBool('TELEGRAM_SEND_LEVEL_CROSSED',                  false),
+  approaching_entered:        () => envBool('TELEGRAM_SEND_APPROACHING_ENTERED',             false),
+  precontact_entered:         () => envBool('TELEGRAM_SEND_PRECONTACT_ENTERED',              false),
+  contact_hit:                () => envBool('TELEGRAM_SEND_CONTACT_HIT',                    true),
+  crossed_up:                 () => envBool('TELEGRAM_SEND_CROSSED_UP',                     true),
+  crossed_down:               () => envBool('TELEGRAM_SEND_CROSSED_DOWN',                   true),
   early_warning:              () => envBool('TELEGRAM_SEND_EARLY_WARNING',                  false),
   nearby_wall_appeared:       () => envBool('TELEGRAM_SEND_NEARBY_WALL_APPEARED',           false),
   nearby_wall_strengthened:   () => envBool('TELEGRAM_SEND_NEARBY_WALL_STRENGTHENED',       false),
@@ -36,7 +41,12 @@ function getCooldownSec(type) {
     case 'level_approaching':        return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_APPROACHING',            120);
     case 'level_touched':            return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_TOUCHED',                120);
     case 'level_crossed':            return 120;
-    case 'early_warning':            return 120;
+    case 'approaching_entered':      return envInt('TELEGRAM_DELIVERY_COOLDOWN_APPROACHING_ENTERED',  60);
+    case 'precontact_entered':       return envInt('TELEGRAM_DELIVERY_COOLDOWN_PRECONTACT_ENTERED',   30);
+    case 'contact_hit':              return envInt('TELEGRAM_DELIVERY_COOLDOWN_CONTACT_HIT',         120);
+    case 'crossed_up':               return envInt('TELEGRAM_DELIVERY_COOLDOWN_CROSSED_UP',          120);
+    case 'crossed_down':             return envInt('TELEGRAM_DELIVERY_COOLDOWN_CROSSED_DOWN',        120);
+    case 'early_warning':            return envInt('TELEGRAM_DELIVERY_COOLDOWN_EARLY_WARNING',       120);
     case 'nearby_wall_appeared':     return 180;
     case 'nearby_wall_strengthened': return 180;
     default:                         return 120;
@@ -146,11 +156,54 @@ function formatAlertMessage(alert) {
 
     // ── Watch engine events ──────────────────────────────────────
 
-    case 'level_crossed': {
+    case 'approaching_entered': {
+      const level = fmtNum(alert.levelPrice, 4);
+      const dist  = fmtNum(Math.abs(alert.distancePct || 0), 2);
+      const market = (alert.market || '').toUpperCase();
+      let msg = `📍 <b>APPROACHING LEVEL</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (market) msg += ` [${market}]`;
+      if (level)  msg += `\nLevel: <b>${level}</b>`;
+      if (dist)   msg += `\nDistance: <b>${dist}%</b>`;
+      if (alert.etaLabel && alert.etaLabel !== '—') msg += `\nETA: <b>${alert.etaLabel}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'precontact_entered': {
+      const level = fmtNum(alert.levelPrice, 4);
+      const dist  = fmtNum(Math.abs(alert.distancePct || 0), 2);
+      const market = (alert.market || '').toUpperCase();
+      let msg = `🔔 <b>CLOSE APPROACH</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (market) msg += ` [${market}]`;
+      if (level)  msg += `\nLevel: <b>${level}</b>`;
+      if (dist)   msg += `\nDistance: <b>${dist}%</b>`;
+      if (alert.etaLabel && alert.etaLabel !== '—') msg += `\nETA: <b>${alert.etaLabel}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'level_crossed':
+    case 'crossed_up':
+    case 'crossed_down': {
       const level  = fmtNum(alert.levelPrice, 4);
       const price  = fmtNum(alert.currentPrice, 4);
       const market = (alert.market || '').toUpperCase();
-      let msg = `⚡ <b>LEVEL CROSSED</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      const dirLabel = alert.type === 'crossed_up' ? '⬆️ UP' : alert.type === 'crossed_down' ? '⬇️ DOWN' : '';
+      let msg = `⚡ <b>LEVEL CROSSED</b>`;
+      if (dirLabel) msg += ` ${dirLabel}`;
+      msg += `\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (market) msg += ` [${market}]`;
+      if (level)  msg += `\nLevel: <b>${level}</b>`;
+      if (price)  msg += `\nPrice: <b>${price}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'contact_hit': {
+      const level = fmtNum(alert.levelPrice, 4);
+      const price = fmtNum(alert.currentPrice, 4);
+      const market = (alert.market || '').toUpperCase();
+      let msg = `🎯 <b>LEVEL TOUCHED</b>\n\nSymbol: <b>${alert.symbol}</b>`;
       if (market) msg += ` [${market}]`;
       if (level)  msg += `\nLevel: <b>${level}</b>`;
       if (price)  msg += `\nPrice: <b>${price}</b>`;
@@ -200,9 +253,14 @@ function buildDeliveryKey(alert) {
     case 'level_breakout_candidate':
     case 'level_bounce_candidate':
     case 'level_approaching':
-    case 'level_touched': {
+    case 'level_touched':
+    case 'approaching_entered':
+    case 'precontact_entered':
+    case 'contact_hit':
+    case 'crossed_up':
+    case 'crossed_down': {
       const lvl = alert.levelPrice != null ? alert.levelPrice : 'unknown';
-      return `telegram:delivery:${alert.type}:${alert.symbol}:${alert.levelType || 'level'}:${lvl}`;
+      return `telegram:delivery:${alert.type}:${alert.symbol}:${lvl}`;
     }
 
     default:

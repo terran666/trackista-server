@@ -2,7 +2,7 @@
 
 const store = require('../services/manualLevelsStore');
 
-const VALID_MARKET_TYPES = new Set(['spot', 'futures']);
+const VALID_MARKET_TYPES = new Set(['spot', 'futures', 'synthetic']);
 const VALID_SIDES        = new Set(['support', 'resistance']);
 const VALID_INTERVALS    = new Set([
   '1m','3m','5m','15m','30m',
@@ -75,4 +75,50 @@ function deleteHandler(req, res) {
   }
 }
 
-module.exports = { createHandler, listHandler, deleteHandler };
+// PATCH /api/manual-levels/:id — update price and/or side after drag
+function patchHandler(watchLoader) {
+  return function(req, res) {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid id' });
+    }
+
+    const { price, side } = req.body || {};
+    const updates = {};
+
+    if (price !== undefined) {
+      const p = parseFloat(price);
+      if (!isFinite(p) || p <= 0) {
+        return res.status(400).json({ success: false, error: 'price must be a positive number' });
+      }
+      updates.price = p;
+    }
+    if (side !== undefined) {
+      if (!VALID_SIDES.has(side)) {
+        return res.status(400).json({ success: false, error: `side must be one of: ${[...VALID_SIDES].join(', ')}` });
+      }
+      updates.side = side;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'Nothing to update' });
+    }
+
+    try {
+      const existing = store.getById(id);
+      if (!existing) {
+        return res.status(404).json({ success: false, error: 'Level not found' });
+      }
+      const updated = store.patch(id, updates);
+      console.log(`[manual-levels] patched id=${id}`, updates);
+      // Reload watch engine so it uses the new price immediately
+      if (watchLoader) watchLoader.invalidate();
+      return res.json({ success: true, level: updated });
+    } catch (err) {
+      console.error(`[manual-levels] patch error id=${id}:`, err.message);
+      return res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  };
+}
+
+module.exports = { createHandler, listHandler, deleteHandler, patchHandler };

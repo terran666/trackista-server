@@ -7,7 +7,7 @@ const mysql   = require('mysql2/promise');
 const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
-const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete } = require('./routes/manualLevelsRoute');
+const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete, patchHandler: manualLevelsPatchFactory } = require('./routes/manualLevelsRoute');
 const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
@@ -65,6 +65,8 @@ const { createLevelWatchEngine }        = require('./services/levelWatchEngine')
 const { createLevelWatchRouter }        = require('./routes/levelWatchRoute');
 const { createLevelEventsRouter }       = require('./routes/levelEventsRoute');
 const { createAlertSoundsRouter }       = require('./routes/alertSoundsRoute');
+const { SyntheticPlaybackService }      = require('./services/syntheticPlaybackService');
+const { createSynthRouter }             = require('./routes/synthRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -502,6 +504,7 @@ console.log('[backend] registering /api/manual-levels routes');
 app.post('/api/manual-levels',       manualLevelsCreate);
 app.get('/api/manual-levels',        manualLevelsList);
 app.delete('/api/manual-levels/:id', manualLevelsDelete);
+app.patch('/api/manual-levels/:id',  manualLevelsPatchFactory(levelWatchEngine?.loader));
 
 // Watch endpoints for file-based manual levels
 // These persist alertEnabled + watchMode + alertOptions into manual-levels.json
@@ -517,6 +520,7 @@ const VALID_SOUND_PRESETS  = new Set([
   'standard', 'soft', 'danger', 'breakout', 'bounce', 'wick',
   'meme-airhorn', 'meme-bruh', 'meme-ohno',
 ]);
+const VALID_DISPLAY_SCOPES = new Set(['tab', 'all_tabs', 'system', 'telegram']);
 
 app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -528,6 +532,7 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   const {
     watchEnabled, watchMode, alertOptions, scenarioMode,
     soundEnabled, soundPreset, popupEnabled, badgeEnabled,
+    telegramEnabled, displayScope,
   } = req.body || {};
 
   if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
@@ -543,6 +548,9 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
     console.log(`[watch-config] invalid_sound_preset_rejected id=${id} preset=${soundPreset}`);
     return res.status(400).json({ success: false, error: `soundPreset must be one of: ${[...VALID_SOUND_PRESETS].join(', ')}` });
   }
+  if (displayScope !== undefined && !VALID_DISPLAY_SCOPES.has(displayScope)) {
+    return res.status(400).json({ success: false, error: `displayScope must be one of: ${[...VALID_DISPLAY_SCOPES].join(', ')}` });
+  }
   if (alertOptions && alertOptions.soundId && !VALID_MANUAL_SOUNDS.has(alertOptions.soundId)) {
     return res.status(400).json({ success: false, error: `soundId must be one of: ${[...VALID_MANUAL_SOUNDS].join(', ')}` });
   }
@@ -554,10 +562,12 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
 
   // Merge sound/popup fields into alertOptions
   const aoOverrides = {};
-  if (soundEnabled !== undefined)  aoOverrides.soundEnabled  = soundEnabled;
-  if (soundPreset  !== undefined)  aoOverrides.soundPreset   = soundPreset;
-  if (popupEnabled !== undefined)  aoOverrides.popupEnabled  = popupEnabled;
-  if (badgeEnabled !== undefined)  aoOverrides.badgeEnabled  = badgeEnabled;
+  if (soundEnabled    !== undefined)  aoOverrides.soundEnabled    = soundEnabled;
+  if (soundPreset     !== undefined)  aoOverrides.soundPreset     = soundPreset;
+  if (popupEnabled    !== undefined)  aoOverrides.popupEnabled    = popupEnabled;
+  if (badgeEnabled    !== undefined)  aoOverrides.badgeEnabled    = badgeEnabled;
+  if (telegramEnabled !== undefined)  aoOverrides.telegramEnabled = telegramEnabled;
+  if (displayScope    !== undefined)  aoOverrides.displayScope    = displayScope;
 
   const hasAoOverrides = Object.keys(aoOverrides).length > 0;
   if (hasAoOverrides || alertOptions !== undefined) {
@@ -572,8 +582,24 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   if (soundPreset !== undefined) {
     console.log(`[watch-config] sound_preset_saved id=${id} preset=${soundPreset}`);
   }
+  if (displayScope !== undefined) {
+    console.log(`[watch-config] display_scope_saved id=${id} scope=${displayScope}`);
+  }
   levelWatchEngine.loader.invalidate();
-  return res.json({ success: true, levelId: id });
+  const ao = updated.alertOptions || {};
+  return res.json({
+    success:         true,
+    levelId:         id,
+    watchEnabled:    Boolean(updated.alertEnabled),
+    watchMode:       updated.watchMode    || 'simple',
+    scenarioMode:    updated.scenarioMode || 'all_in',
+    soundPreset:     ao.soundPreset    ?? 'standard',
+    soundEnabled:    ao.soundEnabled   ?? true,
+    popupEnabled:    ao.popupEnabled   ?? true,
+    badgeEnabled:    ao.badgeEnabled   ?? true,
+    telegramEnabled: ao.telegramEnabled ?? false,
+    displayScope:    ao.displayScope   ?? 'tab',
+  });
 });
 
 app.get('/api/manual-levels/:id/watch', (req, res) => {
@@ -585,16 +611,18 @@ app.get('/api/manual-levels/:id/watch', (req, res) => {
 
   const ao = level.alertOptions || {};
   return res.json({
-    success:      true,
-    levelId:      id,
-    watchEnabled: Boolean(level.alertEnabled),
-    watchMode:    level.watchMode    || 'simple',
-    scenarioMode: level.scenarioMode || 'all_in',
-    soundEnabled: ao.soundEnabled  ?? true,
-    soundPreset:  ao.soundPreset   ?? 'standard',
-    popupEnabled: ao.popupEnabled  ?? true,
-    badgeEnabled: ao.badgeEnabled  ?? true,
-    alertOptions: ao,
+    success:         true,
+    levelId:         id,
+    watchEnabled:    Boolean(level.alertEnabled),
+    watchMode:       level.watchMode    || 'simple',
+    scenarioMode:    level.scenarioMode || 'all_in',
+    soundEnabled:    ao.soundEnabled   ?? true,
+    soundPreset:     ao.soundPreset    ?? 'standard',
+    popupEnabled:    ao.popupEnabled   ?? true,
+    badgeEnabled:    ao.badgeEnabled   ?? true,
+    telegramEnabled: ao.telegramEnabled ?? false,
+    displayScope:    ao.displayScope   ?? 'tab',
+    alertOptions:    ao,
   });
 });
 
@@ -967,6 +995,11 @@ console.log('[backend] registering /api/level-events routes');
 app.use('/api/level-events', createLevelEventsRouter(db));
 console.log('[backend] registering /api/alert-sounds route');
 app.use('/api/alert-sounds', createAlertSoundsRouter());
+
+// ─── Synthetic Feed (dev/test) ───────────────────────────────────
+console.log('[backend] registering /api/synth routes');
+const synthPlaybackService = new SyntheticPlaybackService(redis);
+app.use('/api/synth', createSynthRouter(synthPlaybackService));
 
 // ─── Phase 2: TESTTEST diagnostic routes ─────────────────────────
 const path = require('path');

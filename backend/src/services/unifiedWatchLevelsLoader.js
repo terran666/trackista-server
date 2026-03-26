@@ -220,6 +220,7 @@ function defaultAlertOptions() {
     soundEnabled:                 true,
     soundId:                      'default_alert',
     soundGroup:                   'standard',
+    displayScope:                 'tab',
   };
 }
 

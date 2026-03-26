@@ -11,6 +11,8 @@
  * GET   /api/levels/:id/events         — paginated event history from MySQL
  */
 
+const manualLevelsStore = require('../services/manualLevelsStore');
+
 const VALID_WATCH_MODES = new Set(['off', 'simple', 'tactic']);
 const VALID_POPUP_PRIO  = new Set(['low', 'normal', 'high', 'urgent']);
 const VALID_TG_PRIO     = new Set(['low', 'normal', 'high']);
@@ -88,10 +90,19 @@ function createLevelWatchRouter(db, redis, watchLoader) {
     const { watchEnabled, watchMode, tactics, alertOptions } = req.body;
 
     try {
-      // Verify level exists
+      // Verify level exists — fall back to manual-levels.json if not in MySQL
       const [[level]] = await db.query('SELECT id, symbol, market FROM levels WHERE id = ?', [id]);
       if (!level) {
-        return res.status(404).json({ success: false, error: 'Level not found' });
+        const ml = manualLevelsStore.getById(id);
+        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
+        // Apply changes to JSON store
+        const updates = {};
+        if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+        if (watchMode    !== undefined) updates.watchMode    = watchMode;
+        if (alertOptions)               updates.alertOptions = { ...(ml.alertOptions || {}), ...alertOptions };
+        manualLevelsStore.patch(id, updates);
+        if (watchLoader) watchLoader.invalidate();
+        return res.json({ success: true, levelId: id });
       }
 
       const conn = await db.getConnection();
@@ -247,7 +258,19 @@ function createLevelWatchRouter(db, redis, watchLoader) {
         [id],
       );
       if (!level) {
-        return res.status(404).json({ success: false, error: 'Level not found' });
+        const ml = manualLevelsStore.getById(id);
+        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
+        const ao = ml.alertOptions || {};
+        return res.json({
+          success:         true,
+          levelId:         id,
+          watchEnabled:    Boolean(ml.alertEnabled),
+          watchMode:       ml.watchMode || 'simple',
+          tactics:         null,
+          displayScope:    ao.displayScope   ?? 'tab',
+          telegramEnabled: ao.telegramEnabled ?? false,
+          alertOptions:    ao,
+        });
       }
 
       const [[wc]] = await db.query(
@@ -316,7 +339,23 @@ function createLevelWatchRouter(db, redis, watchLoader) {
         [id],
       );
       if (!level) {
-        return res.status(404).json({ success: false, error: 'Level not found' });
+        const ml = manualLevelsStore.getById(id);
+        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
+        const market = ml.marketType || 'futures';
+        const key    = `levelwatchstate:${market}:${ml.symbol}:manual-${id}`;
+        const raw    = await redis.get(key);
+        let   state  = null;
+        if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+        return res.json({
+          success:         true,
+          levelId:         id,
+          symbol:          ml.symbol,
+          watchEnabled:    Boolean(ml.alertEnabled),
+          watchMode:       ml.watchMode || 'simple',
+          lastTriggeredAt: null,
+          triggerCount:    0,
+          state,
+        });
       }
 
       if (!level.watch_enabled) {

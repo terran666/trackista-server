@@ -92,6 +92,19 @@ const WATCH_ETA_EMA_ALPHA   = 0.30;  // EMA factor: 0 = fully lagged, 1 = raw
 const WATCH_MIN_ETA_SPEED   = 0.001; // min smoothed %/tick to compute ETA
 const WATCH_MAX_ETA_SECONDS = 300;   // discard ETAs > 5 minutes (too noisy)
 
+// ── Popup lifecycle constants ─────────────────────────────────────
+const BLINK_TTL_MS              =  8_000;   // blink active for 8 s after strong event
+const POPUP_RECENT_COMPLETED_MS = 300_000;  // 5 min: show 'completed' after crossed/rollback clears
+const POPUP_PRIORITY_SCORES = {
+  crossed:     1000,
+  contact:      800,
+  pulling_back: 600,
+  very_close:   400,
+  approaching:  200,
+  completed:     50,
+  inactive:      10,
+};
+
 // Allowed transitions (state machine guard)
 // precontact->crossed allowed for fast moves that skip contact confirmation
 const ALLOWED_TRANSITIONS = {
@@ -161,6 +174,53 @@ function getSeverity(eventType, distancePct, signalCtx) {
       return 'low';
   }
 }
+
+// ─── Popup lifecycle helpers ─────────────────────────────────────
+
+// Compute popup status from phase + rollback + completed detection
+function computePopupStatus(phase, rollbackAfterAlert, lastStrongEventAt, nowTs) {
+  if (rollbackAfterAlert) return 'pulling_back';
+  if (phase === 'crossed')     return 'crossed';
+  if (phase === 'contact')     return 'contact';
+  if (phase === 'precontact')  return 'very_close';
+  if (phase === 'approaching') return 'approaching';
+  // 'watching' — check if we recently had a strong event
+  if (lastStrongEventAt != null && (nowTs - lastStrongEventAt) < POPUP_RECENT_COMPLETED_MS) {
+    return 'completed';
+  }
+  return 'inactive';
+}
+
+// Priority score for cross-level ranking (higher = more urgent)
+function computePopupPriorityScore(popupStatus, etaSeconds, scenarioLeading) {
+  const base       = POPUP_PRIORITY_SCORES[popupStatus] ?? 10;
+  const etaBoost   = (etaSeconds != null && etaSeconds > 0) ? Math.max(0, 300 - etaSeconds) : 0;
+  const scBoost    = (scenarioLeading === 'breakout' || scenarioLeading === 'bounce') ? 15 : 0;
+  return base + etaBoost + scBoost;
+}
+
+// Normalize a delta-pct value to [0,100] with 50 = neutral
+function normDeltaToPct(deltaPct, range) {
+  if (deltaPct == null) return null;
+  return Math.max(0, Math.min(100, Math.round(50 + (deltaPct / range) * 50)));
+}
+
+// Derive rising/falling/stable trend from delta pct
+function deltaTrend(deltaPct, threshold) {
+  if (deltaPct == null) return 'stable';
+  return deltaPct > threshold ? 'rising' : deltaPct < -threshold ? 'falling' : 'stable';
+}
+
+// Map level.source → ТЗ levelSource
+const LEVEL_SOURCE_MAP = {
+  manual:            'manual',
+  extreme:           'extreme',
+  vertical_extreme:  'vertical_extreme',
+  levels:            'levels',
+  sloped:            'sloped',
+  auto:              'levels',
+  tracked:           'levels',
+};
 
 // ─── Side relative to level ───────────────────────────────────────
 function computeSide(currentPrice, levelPrice) {
@@ -843,8 +903,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       let triggerReason    = null;
 
       if (warnBefore && approachSpeed && Math.abs(approachSpeed) > SPEED_EPSILON) {
-        const distanceAbs = Math.abs(levelPrice - currentPrice);
-        etaSec = estimateEtaSec(distanceAbs, approachSpeed);
+        const rawEta = Math.round(absDistancePct / Math.abs(approachSpeed));
+        etaSec = (isFinite(rawEta) && rawEta >= 0 && rawEta <= WATCH_MAX_ETA_SECONDS) ? rawEta : null;
         if (etaSec !== null && etaSec <= warnBefore && state.movingToward) {
           triggerByETA  = true;
           triggerReason = 'eta_threshold';
@@ -1116,6 +1176,22 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         ` eta=${etaResult.etaSeconds}s (${etaResult.etaLabel})`,
       );
     }
+    // Log ETA transitions: available ↔ unavailable (not gated by debug mode)
+    const prevEtaAvail = prevState ? (prevState.etaSeconds != null) : null;
+    const currEtaAvail = etaResult.etaSeconds != null;
+    if (prevState && prevEtaAvail !== currEtaAvail) {
+      if (currEtaAvail) {
+        console.log(
+          `[watch-engine] eta_available ${level.symbol} ${level.internalId}` +
+          ` eta=${etaResult.etaSeconds}s dist=${absDistancePct.toFixed(3)}%`,
+        );
+      } else {
+        console.log(
+          `[watch-engine] eta_unavailable ${level.symbol} ${level.internalId}` +
+          ` reason=${etaResult.etaReason} phase=${nextPhase}`,
+        );
+      }
+    }
 
     // ── Approach velocity label ────────────────────────────────────
     const approachVelocityLabel = computeApproachVelocityLabel(approachAcceleration);
@@ -1160,12 +1236,14 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const lastStrongEventAt   = newStrongEventType   ? nowTs : (prevState?.lastStrongEventAt ?? null);
 
     // rollbackAfterAlert: crossed phase exited back toward watching/approaching
-    const wasJustCrossed   = prevState?.phase === 'crossed';
-    const retractedFromCross = wasJustCrossed && (nextPhase === 'watching' || nextPhase === 'approaching' || nextPhase === 'precontact');
+    // Cleared when price moves genuinely far from the level (> exit-approaching threshold),
+    // which signals a new approach cycle is starting fresh.
+    const wasJustCrossed     = prevState?.phase === 'crossed';
+    const retractedFromCross = wasJustCrossed && nextPhase !== 'crossed';
+    const priceStillNear     = absDistancePct <= WATCH_EXIT_APPROACHING_PCT;
     const rollbackAfterAlert =
       retractedFromCross ||
-      (prevState?.rollbackAfterAlert === true &&
-        (nextPhase === 'approaching' || nextPhase === 'precontact' || nextPhase === 'watching'));
+      (prevState?.rollbackAfterAlert === true && priceStillNear && nextPhase !== 'crossed');
 
     // scenarioTrend: compare current leading to previous
     const prevScenarioLeading = prevState?.scenarioLeading ?? null;
@@ -1183,12 +1261,16 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       else if (boBncDiff > 5) scenarioTrend = 'falling';
     }
 
-    // popupTitleKey
+    // popupTitleKey (extended with approaching / very_close)
     let popupTitleKey = 'default_tracking';
     if (nextPhase === 'crossed') {
       popupTitleKey = 'level_broken';
     } else if (rollbackAfterAlert) {
       popupTitleKey = 'level_pulling_back';
+    } else if (nextPhase === 'precontact') {
+      popupTitleKey = 'very_close';
+    } else if (nextPhase === 'approaching') {
+      popupTitleKey = 'approaching';
     }
 
     // Popup lifecycle debug logs
@@ -1204,6 +1286,32 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       console.log(
         `[watch-engine] rollback_after_alert_detected ${level.symbol} ${level.internalId}` +
         ` lastStrong=${lastStrongEventType} scenario=${scenarioResult.scenarioLeading}`,
+      );
+    }
+    if (prevState && rollbackAfterAlert === false && prevState.rollbackAfterAlert === true) {
+      console.log(
+        `[watch-engine] rollback_cleared ${level.symbol} ${level.internalId}` +
+        ` phase=${nextPhase} dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+
+    // scenarioLeading change log
+    if (prevScenarioLeading && scenarioResult.scenarioLeading !== prevScenarioLeading) {
+      console.log(
+        `[watch-engine] scenario_leading_changed ${level.symbol} ${level.internalId}` +
+        ` ${prevScenarioLeading}->${scenarioResult.scenarioLeading}` +
+        ` phase=${nextPhase} scores=${JSON.stringify(scenarioResult.scenarioScores)}`,
+      );
+    }
+
+    // scenarioTrend change log
+    if (prevState && scenarioTrend !== 'stable') {
+      console.log(
+        `[watch-engine] scenario_trend ${level.symbol} ${level.internalId}` +
+        ` trend=${scenarioTrend} leading=${scenarioResult.scenarioLeading}` +
+        ` breakout=${scenarioResult.scenarioScores.breakout}` +
+        ` bounce=${scenarioResult.scenarioScores.bounce}` +
+        ` wick=${scenarioResult.scenarioScores.wick}`,
       );
     }
 
@@ -1297,7 +1405,84 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       updatedAt:               nowTs,
     };
 
+    // ── Popup block ────────────────────────────────────────────────
+    // Priority/isPrimary/isSecondary are filled by assignPopupPriorities() in the tick loop.
+    const popupStatus = computePopupStatus(nextPhase, rollbackAfterAlert, lastStrongEventAt, nowTs);
+    const popupActive = popupStatus !== 'inactive';
+    state.popup = {
+      active:      popupActive,
+      status:      popupStatus,
+      titleKey:    popupTitleKey,
+      priority:    0,       // filled post-computation
+      isPrimary:   false,   // filled post-computation
+      isSecondary: false,   // filled post-computation
+      isCompleted: popupStatus === 'completed',
+      blink:       (lastStrongEventAt != null) && (nowTs - lastStrongEventAt) < BLINK_TTL_MS,
+      levelSource: LEVEL_SOURCE_MAP[level.source] || 'manual',
+      displayScope: level.alertOptions?.displayScope || 'tab',
+    };
+
+    // ── Extended metrics for progress bars ────────────────────────
+    // Distance progress: 100 = at level, 0 = far away
+    const distanceProgressPct = absDistancePct >= WATCH_EXIT_APPROACHING_PCT
+      ? 0
+      : Math.round((1 - absDistancePct / WATCH_EXIT_APPROACHING_PCT) * 100);
+
+    // ETA progress: 100 = imminent (0 s), 0 = far away (300+ s)
+    const etaProgressPct = (etaResult.etaSeconds != null && etaResult.etaSeconds > 0)
+      ? Math.max(0, Math.min(100, Math.round((1 - etaResult.etaSeconds / WATCH_MAX_ETA_SECONDS) * 100)))
+      : null;
+
+    state.distanceProgressPct = distanceProgressPct;
+    state.etaProgressPct      = etaProgressPct;
+
+    // Volume / trades normalised to [0,100] centred at 50 (neutral delta)
+    // Range ±30% delta maps to 0/100
+    state.volumeValue   = volumeNow;
+    state.volumePct     = normDeltaToPct(state.volumeDeltaPct, 30);
+    state.volumeTrend   = deltaTrend(state.volumeDeltaPct, 3);
+
+    state.tradeSpeedValue = tradesNow;
+    state.tradeSpeedPct   = normDeltaToPct(state.tradesDeltaPct, 30);
+    state.tradeSpeedTrend = deltaTrend(state.tradesDeltaPct, 3);
+
     return { state, transition };
+  }
+
+  // ── Assign popup priorities across levels in the same (symbol, market) group ─
+  function assignPopupPriorities(groupComputed) {
+    if (groupComputed.length === 0) return;
+
+    // Sort by priority score descending
+    const scored = groupComputed.map(({ level, state, transition }) => ({
+      level, state, transition,
+      score: computePopupPriorityScore(
+        state.popup.status,
+        state.etaSeconds,
+        state.scenarioLeading,
+      ),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+
+    // Assign priority rank + primary/secondary flags
+    for (let i = 0; i < scored.length; i++) {
+      const popup  = scored[i].state.popup;
+      popup.priority    = i + 1;
+      popup.isPrimary   = (i === 0) && popup.active;
+      popup.isSecondary = (i  >  0) && popup.active;
+    }
+
+    // Log primary change vs previous tick
+    for (const { state } of scored) {
+      if (state.popup.isPrimary) {
+        console.log(
+          `[watch-engine] popup_primary ${state.symbol} ${state.internalId}` +
+          ` status=${state.popup.status} priority=${state.popup.priority}` +
+          ` source=${state.popup.levelSource} scope=${state.popup.displayScope}`,
+        );
+        break; // only log the primary
+      }
+    }
   }
 
   // ── Persist watch state to Redis ─────────────────────────────────
@@ -1379,15 +1564,15 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         monitoredSymbols++;
         monitoredLevels += lvlArr.length;
 
+        // ── Phase 1: compute all states for the group ──────────────
+        const groupComputed = [];
         for (const level of lvlArr) {
           const prevState = previousStates.get(level.internalId) ?? null;
-
-          // Compute current watch state via state machine
-          const computed = computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState);
+          const computed  = computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState);
           if (!computed) continue;
           const { state, transition } = computed;
 
-          // Store state snapshot for next tick (includes phase for state machine)
+          // Store state snapshot for next tick
           previousStates.set(level.internalId, {
             phase:                 state.phase,
             sideRelativeToLevel:   state.sideRelativeToLevel,
@@ -1413,11 +1598,18 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             popupTitleKey:         state.popupTitleKey,
             scenarioLeading:       state.scenarioLeading,
             scenarioScores:        state.scenarioScores,
-            // Updated AFTER evaluateTransitionEvents so next tick sees current suppression
             lastEventSuppressedReason: suppressedStateMap.get(level.internalId)?.reason ?? null,
             ts:                    nowMs,
           });
 
+          groupComputed.push({ level, state, transition, prevState });
+        }
+
+        // ── Phase 2: assign cross-level popup priorities ───────────
+        assignPopupPriorities(groupComputed);
+
+        // ── Phase 3: persist states and fire events ────────────────
+        for (const { level, state, transition, prevState } of groupComputed) {
           // Always persist watch state to Redis
           await persistWatchState(level, state, writePipeline);
 
@@ -1451,6 +1643,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             const ao = level.alertOptions;
             if (ao && ao.telegramEnabled && deliveryService) {
               const sendTypes = new Set([
+                'approaching_entered', 'precontact_entered',
                 'contact_hit', 'crossed_up', 'crossed_down',
                 'early_warning',
               ]);

@@ -169,4 +169,9 @@ function patchMany(ids, patch) {
   return count;
 }
 
-module.exports = { bulkSave, getAll, removeOne, removeMany, patchOne, patchMany };
+function getById(id) {
+  const store = readStore();
+  return store.extremes.find(e => e.id === id) || null;
+}
+
+module.exports = { bulkSave, getAll, getById, removeOne, removeMany, patchOne, patchMany };

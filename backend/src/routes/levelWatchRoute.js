@@ -11,9 +11,10 @@
  * GET   /api/levels/:id/events         — paginated event history from MySQL
  */
 
-const manualLevelsStore  = require('../services/manualLevelsStore');
-const trackedLevelsStore = require('../services/trackedLevelsStore');
-const savedRaysStore     = require('../services/savedRaysStore');
+const manualLevelsStore   = require('../services/manualLevelsStore');
+const trackedLevelsStore  = require('../services/trackedLevelsStore');
+const savedRaysStore      = require('../services/savedRaysStore');
+const trackedExtremesStore = require('../services/trackedExtremesStore');
 
 const VALID_WATCH_MODES = new Set(['off', 'simple', 'tactic']);
 const VALID_POPUP_PRIO  = new Set(['low', 'normal', 'high', 'urgent']);
@@ -124,6 +125,17 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(sr.alertOptions || {}), ...alertOptions };
           savedRaysStore.patchOne(id, updates);
+          if (watchLoader) watchLoader.invalidate();
+          return res.json({ success: true, levelId: id });
+        }
+
+        const ex = trackedExtremesStore.getById(id);
+        if (ex) {
+          const updates = {};
+          if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+          if (watchMode    !== undefined) updates.watchMode    = watchMode;
+          if (alertOptions)               updates.alertOptions = { ...(ex.alertOptions || {}), ...alertOptions };
+          trackedExtremesStore.patchOne(id, updates);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
@@ -329,6 +341,21 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           });
         }
 
+        const ex = trackedExtremesStore.getById(id);
+        if (ex) {
+          const ao = ex.alertOptions || {};
+          return res.json({
+            success:         true,
+            levelId:         id,
+            watchEnabled:    Boolean(ex.alertEnabled),
+            watchMode:       ex.watchMode || 'simple',
+            tactics:         null,
+            displayScope:    ao.displayScope   ?? 'tab',
+            telegramEnabled: ao.telegramEnabled ?? false,
+            alertOptions:    ao,
+          });
+        }
+
         return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
@@ -449,6 +476,25 @@ function createLevelWatchRouter(db, redis, watchLoader) {
             symbol:          sr.symbol,
             watchEnabled:    Boolean(sr.alertEnabled),
             watchMode:       sr.watchMode || 'simple',
+            lastTriggeredAt: null,
+            triggerCount:    0,
+            state,
+          });
+        }
+
+        const ex = trackedExtremesStore.getById(id);
+        if (ex) {
+          const market = ex.marketType || 'futures';
+          const key    = `levelwatchstate:${market}:${ex.symbol}:extreme-${id}`;
+          const raw    = await redis.get(key);
+          let   state  = null;
+          if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+          return res.json({
+            success:         true,
+            levelId:         id,
+            symbol:          ex.symbol,
+            watchEnabled:    Boolean(ex.alertEnabled),
+            watchMode:       ex.watchMode || 'simple',
             lastTriggeredAt: null,
             triggerCount:    0,
             state,

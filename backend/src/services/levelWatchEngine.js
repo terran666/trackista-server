@@ -52,9 +52,9 @@ const ALERT_EVENT_TTL_SEC    = 7 * 24 * 60 * 60;
 
 // Cooldowns (seconds) per event type
 const COOLDOWNS = {
-  approaching_entered:          60,
-  precontact_entered:           30,
-  contact_hit:                  60,
+  approaching_entered:          20,   // ↓ was 60 — allow re-fire after fast rollback cycles
+  precontact_entered:           15,   // ↓ was 30
+  contact_hit:                  30,   // ↓ was 60
   crossed_up:                   60,
   crossed_down:                 60,
   early_warning:                90,
@@ -81,7 +81,8 @@ const WATCH_ENTER_CONTACT_PCT     = 0.05;   // enter contact candidate zone
 const WATCH_EXIT_CONTACT_PCT      = 0.10;   // exit contact back to precontact
 
 // Contact confirmation: must stay in contact zone this many consecutive ticks
-const WATCH_CONTACT_HOLD_TICKS    = 2;
+// 1 tick = contact fires in 1 s; raw layer (rawContactDetected) already fires instantly on tick-0
+const WATCH_CONTACT_HOLD_TICKS    = 1;
 
 // Cross confirmation: price must hold past level N ticks at min distance
 const WATCH_CROSS_HOLD_TICKS      = 2;
@@ -95,6 +96,9 @@ const WATCH_MAX_ETA_SECONDS = 300;   // discard ETAs > 5 minutes (too noisy)
 // ── Popup lifecycle constants ─────────────────────────────────────
 const BLINK_TTL_MS              =  8_000;   // blink active for 8 s after strong event
 const POPUP_RECENT_COMPLETED_MS = 300_000;  // 5 min: show 'completed' after crossed/rollback clears
+// After price touches a level and pulls back, keep showing 'level_touched' for this long.
+// Without this, the popup reverts to 'approaching'/'very_close' and the touch context is lost.
+const RECENT_TOUCH_PULLBACK_MS  =  60_000;  // 60 s
 const POPUP_PRIORITY_SCORES = {
   crossed:     1000,
   contact:      800,
@@ -106,10 +110,11 @@ const POPUP_PRIORITY_SCORES = {
 };
 
 // Allowed transitions (state machine guard)
+// approaching->crossed allowed for fast moves that bypass precontact
 // precontact->crossed allowed for fast moves that skip contact confirmation
 const ALLOWED_TRANSITIONS = {
   watching:    new Set(['approaching']),
-  approaching: new Set(['watching', 'precontact']),
+  approaching: new Set(['watching', 'precontact', 'crossed']),
   precontact:  new Set(['approaching', 'contact', 'crossed']),
   contact:     new Set(['precontact', 'watching', 'crossed']),
   crossed:     new Set(['watching']),
@@ -177,13 +182,17 @@ function getSeverity(eventType, distancePct, signalCtx) {
 
 // ─── Popup lifecycle helpers ─────────────────────────────────────
 
-// Compute popup status from phase + rollback + completed detection
-function computePopupStatus(phase, rollbackAfterAlert, lastStrongEventAt, nowTs) {
-  if (rollbackAfterAlert) return 'pulling_back';
-  if (phase === 'crossed')     return 'crossed';
-  if (phase === 'contact')     return 'contact';
-  if (phase === 'precontact')  return 'very_close';
-  if (phase === 'approaching') return 'approaching';
+// Compute popup status from phase + rollback + raw signals + completed detection.
+// Raw signals (rawContactDetected, crossDetectedRaw) take priority over phase hold confirmation
+// so the UI updates immediately on first contact/cross tick, not after HOLD_TICKS delay.
+// wickRecent: a wick/probe was detected within BLINK_TTL — keep popup active briefly.
+// recentTouchPullback: level was touched within RECENT_TOUCH_PULLBACK_MS but price moved back out.
+function computePopupStatus(phase, rollbackAfterAlert, lastStrongEventAt, nowTs, wickRecent, rawContactDetected, crossDetectedRaw, recentTouchPullback) {
+  if (rollbackAfterAlert)                                                             return 'pulling_back';
+  if (phase === 'crossed' || crossDetectedRaw)                                        return 'crossed';
+  if (phase === 'contact' || rawContactDetected || wickRecent || recentTouchPullback)  return 'contact';
+  if (phase === 'precontact')                                  return 'very_close';
+  if (phase === 'approaching')                                 return 'approaching';
   // 'watching' — check if we recently had a strong event
   if (lastStrongEventAt != null && (nowTs - lastStrongEventAt) < POPUP_RECENT_COMPLETED_MS) {
     return 'completed';
@@ -306,21 +315,39 @@ function resolvePhase(ctx) {
     }
   }
 
-  // ── 3. Cross hold confirmation (contact / precontact → crossed) ──────────
+  // ── 3. Cross hold confirmation (approaching / contact / precontact → crossed) ────
+  //
+  // BUG FIX: lastNonAtSide is updated every tick, so on tick-2 of a pending cross
+  // crossedToSide becomes false. We must also continue when price is still on the
+  // crossed side (sideNow === pendingCrossDirection) even without a fresh side flip.
   let newPendingCrossTicks    = 0;
   let newPendingCrossDirection = null;
-  const canCross       = prevPhase === 'contact' || prevPhase === 'precontact';
+  // Allow cross detection from approaching too (fast moves that skip precontact)
+  const canCross       = prevPhase === 'contact' || prevPhase === 'precontact' || prevPhase === 'approaching';
   const crossedToSide  = sideNow !== 'at' && lastNonAtSide != null && sideNow !== lastNonAtSide;
   const crossDistance  = absDistancePct >= WATCH_CROSS_CONFIRM_PCT;
 
-  if (canCross && crossedToSide && crossDistance) {
-    if (pendingCrossDirection === sideNow) {
-      newPendingCrossTicks     = pendingCrossTicks + 1;
+  if (canCross && crossDistance) {
+    if (crossedToSide) {
+      // First tick: side just flipped → start or restart pending cross
+      if (pendingCrossDirection === sideNow) {
+        // Same direction as existing pending — accumulate
+        newPendingCrossTicks = pendingCrossTicks + 1;
+      } else {
+        // New direction or fresh start
+        newPendingCrossTicks = 1;
+      }
       newPendingCrossDirection = sideNow;
-    } else {
-      newPendingCrossTicks     = 1;     // new direction — restart
-      newPendingCrossDirection = sideNow;
+    } else if (pendingCrossTicks > 0 && sideNow !== 'at') {
+      if (pendingCrossDirection === sideNow) {
+        // Continuation: price still on the crossed side (lastNonAtSide already updated)
+        // This is the KEY FIX — keep accumulating without requiring crossedToSide again
+        newPendingCrossTicks     = pendingCrossTicks + 1;
+        newPendingCrossDirection = sideNow;
+      }
+      // else: price reversed to original side during hold — implicit cancel (stays 0)
     }
+
     if (newPendingCrossTicks >= WATCH_CROSS_HOLD_TICKS) {
       nextPhase  = 'crossed';
       reason     = 'cross_hold_confirmed';
@@ -358,6 +385,7 @@ function resolvePhase(ctx) {
     eventType,
     reason,
     sideRelativeToLevel: sideNow,
+    crossDetectedRaw:    crossedToSide,  // raw side flip this tick (no hold required)
     pending: {
       contactCandidate: newPendingContactTicks > 0,
       contactTicks:     newPendingContactTicks,
@@ -627,16 +655,38 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     relativePositionLabel:   state.relativePositionLabel  ?? null,
     etaSeconds:              state.etaSeconds             ?? null,
     etaLabel:                state.etaLabel               ?? '—',
+    etaProgressPct:          state.etaProgressPct         ?? null,
     approachVelocityLabel:   state.approachVelocityLabel  ?? 'stable',
+    distanceProgressPct:     state.distanceProgressPct    ?? 0,
+    // Volume / trades snapshot (always present — null when no data)
+    volumeDeltaPct:          state.volumeDeltaPct         ?? null,
+    volumeValue:             state.volumeValue            ?? null,
+    volumePct:               state.volumePct              ?? null,
+    volumeTrend:             state.volumeTrend            ?? 'stable',
+    tradesDeltaPct:          state.tradesDeltaPct         ?? null,
+    tradeSpeedValue:         state.tradeSpeedValue        ?? null,
+    tradeSpeedPct:           state.tradeSpeedPct          ?? null,
+    tradeSpeedTrend:         state.tradeSpeedTrend        ?? 'stable',
+    // Scenario
     scenarioMode:            state.scenarioMode           ?? 'all_in',
     scenarioScores:          state.scenarioScores         ?? null,
     scenarioLeading:         state.scenarioLeading        ?? null,
     confidenceLabel:         state.confidenceLabel        ?? null,
+    // Touch / wick / cross state snapshot
+    rollbackAfterAlert:      state.rollbackAfterAlert     ?? false,
+    crossStatus:             state.crossStatus            ?? 'none',
+    crossDirection:          state.crossDirection         ?? null,
+    touchDetected:           state.touchDetected          ?? false,
+    touchType:               state.touchType              ?? null,
+    lastTouchAt:             state.lastTouchAt            ?? null,
+    rawContactDetected:      state.rawContactDetected     ?? false,
+    crossDetectedRaw:        state.crossDetectedRaw       ?? false,
+    wickDetected:            state.wickDetected           ?? false,
+    // Full popup block snapshot (priority/isPrimary filled post-computation — zero at event time)
+    popup:                   state.popup                  ?? null,
   };
 
   if (earlyWarning) event.earlyWarning = earlyWarning;
-  if (volumeDeltaPct != null) event.volumeDeltaPct  = parseFloat(volumeDeltaPct.toFixed(4));
-  if (tradesDeltaPct != null) event.tradesDeltaPct  = parseFloat(tradesDeltaPct.toFixed(4));
 
   return event;
 }
@@ -861,6 +911,27 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     await setCooldown(eventType, level.market, level.symbol, level.internalId, COOLDOWNS[eventType] ?? 60);
 
+    // After a confirmed cross, clear approach/precontact/contact cooldowns AND fingerprints
+    // so the NEXT approach cycle (after rollback) fires fresh alerts immediately.
+    // Without clearing fingerprints, re-approach within the same clock-minute would be silently
+    // blocked even after cooldowns are cleared (fingerprint TTL = 70s, same minuteBucket key).
+    if (eventType === 'crossed_up' || eventType === 'crossed_down') {
+      const minuteBucket = Math.floor(nowMs / 60000);
+      await redis.del(
+        `watchcooldown:approaching_entered:${level.market}:${level.symbol}:${level.internalId}`,
+        `watchcooldown:precontact_entered:${level.market}:${level.symbol}:${level.internalId}`,
+        `watchcooldown:contact_hit:${level.market}:${level.symbol}:${level.internalId}`,
+        // Also clear per-minute fingerprints so they don't block same-minute re-approach
+        `watcheventfp:${level.symbol}:${level.market}:${level.internalId}:approaching_entered:${minuteBucket}`,
+        `watcheventfp:${level.symbol}:${level.market}:${level.internalId}:precontact_entered:${minuteBucket}`,
+        `watcheventfp:${level.symbol}:${level.market}:${level.internalId}:contact_hit:${minuteBucket}`,
+      );
+      console.log(
+        `[watch-engine] cooldowns_reset_after_cross ${level.symbol} ${level.internalId}` +
+        ` evt=${eventType} minuteBucket=${minuteBucket}`,
+      );
+    }
+
     console.log(
       `[watch-engine] transition ${level.symbol} ${level.internalId}` +
       ` ${prevPhase}->${nextPhase} evt=${eventType} reason=${reason}` +
@@ -1060,12 +1131,27 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       prevPhase,
       absDistancePct,
       sideNow,
-      lastNonAtSide,
+      // FIX: must pass PREVIOUS tick's lastNonAtSide so crossedToSide can detect side flip.
+      // Passing current-tick value (sideNow) made crossedToSide always false.
+      lastNonAtSide: prevState?.lastNonAtSide ?? null,
       pendingContactTicks:   prevState?.pendingContactTicks   ?? 0,
       pendingCrossTicks:     prevState?.pendingCrossTicks     ?? 0,
       pendingCrossDirection: prevState?.pendingCrossDirection ?? null,
     });
     const nextPhase = transition.nextPhase;
+
+    // ── Raw touch / cross detection (no hold required — for UI / live-card layer) ────────
+    // crossDetectedRaw: price flipped sides this tick regardless of phase or hold time.
+    // With fixed lastNonAtSide above, resolvePhase.crossDetectedRaw is now correct.
+    const crossDetectedRaw  = transition.crossDetectedRaw;
+    const lastRawCrossAt    = crossDetectedRaw ? nowTs : (prevState?.lastRawCrossAt ?? null);
+    // rawContactDetected: price is within contact zone (sideNow === 'at') — no hold required
+    const rawContactDetected = (sideNow === 'at');
+    const prevRawContact     = prevState?.rawContactDetected ?? false;
+    const rawContactEntered  = rawContactDetected && !prevRawContact;
+    const lastRawContactAt   = rawContactEntered  ? nowTs
+                             : rawContactDetected ? (prevState?.lastRawContactAt ?? nowTs) : null;
+    const crossConfirmed     = nextPhase === 'crossed';
 
     // Phase timing
     const phaseChanged    = transition.changed;
@@ -1225,11 +1311,19 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     }
 
     // ── Popup lifecycle ────────────────────────────────────────────
-    // lastStrongEventType: derived from phase transition (no event eval needed)
+    // lastStrongEventType: raw signals fire FIRST (before confirmed hold)
     let newStrongEventType = null;
-    if (nextPhase === 'crossed' && prevPhase !== 'crossed') {
-      newStrongEventType = sideNow === 'above' ? 'crossed_up' : 'crossed_down';
+    if (crossDetectedRaw) {
+      // Raw side flip → strongest immediate signal, don't wait for hold
+      newStrongEventType = sideNow === 'below' ? 'crossed_down' : 'crossed_up';
+    } else if (nextPhase === 'crossed' && prevPhase !== 'crossed') {
+      // Confirmed held cross (may follow raw cross by 1-2 ticks)
+      newStrongEventType = sideNow === 'below' ? 'crossed_down' : 'crossed_up';
+    } else if (rawContactEntered) {
+      // First tick entering contact zone (raw, no hold required)
+      newStrongEventType = 'contact_hit';
     } else if (nextPhase === 'contact' && prevPhase !== 'contact') {
+      // Confirmed held contact (may follow rawContactEntered by 1 tick)
       newStrongEventType = 'contact_hit';
     }
     const lastStrongEventType = newStrongEventType ?? (prevState?.lastStrongEventType ?? null);
@@ -1244,6 +1338,67 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const rollbackAfterAlert =
       retractedFromCross ||
       (prevState?.rollbackAfterAlert === true && priceStillNear && nextPhase !== 'crossed');
+
+    // ── Touch / wick / probe detection ───────────────────────────────────────
+    // contactEntered: first tick in contact zone (raw or confirmed phase)
+    const contactEntered = (nextPhase === 'contact') && (prevPhase !== 'contact');
+    const lastTouchAt    = (contactEntered || rawContactEntered) ? nowTs : (prevState?.lastTouchAt ?? null);
+
+    // wickDetected: a pending cross was started last tick but cancelled this tick
+    // (price probed/wicked through level without holding)
+    const wickDetected   = crossCancelled;
+    const lastWickAt     = wickDetected ? nowTs : (prevState?.lastWickAt ?? null);
+    // Direction the attempted cross was heading (from previous tick's pendingCrossDirection)
+    const probeDirection = wickDetected
+      ? (prevState?.pendingCrossDirection ?? null)
+      : (prevState?.probeDirection ?? null);
+    // wickRecent: wick happened within BLINK_TTL — keeps popup alive and visible briefly
+    const wickRecent     = (lastWickAt != null) && (nowTs - lastWickAt) < BLINK_TTL_MS;
+
+    // crossStatus / crossDirection — full lifecycle of cross attempt
+    // Priority: confirmed > raw > pending > cancelled > rollback
+    let crossStatus    = 'none';
+    let crossDirection = null;
+    if (nextPhase === 'crossed') {
+      crossStatus    = 'confirmed';
+      crossDirection = sideNow === 'below' ? 'down' : 'up';
+    } else if (crossDetectedRaw) {
+      crossStatus    = 'raw';   // side flip detected, hold confirmation not yet met
+      crossDirection = sideNow === 'below' ? 'down' : 'up';
+    } else if (transition.pending.crossTicks > 0) {
+      crossStatus    = 'pending';
+      crossDirection = transition.pending.crossDirection === 'below' ? 'down'
+                     : transition.pending.crossDirection === 'above' ? 'up' : null;
+    } else if (crossCancelled) {
+      crossStatus    = 'cancelled';
+      crossDirection = probeDirection === 'below' ? 'down'
+                     : probeDirection === 'above' ? 'up' : null;
+    } else if (rollbackAfterAlert) {
+      crossStatus    = 'confirmed'; // was confirmed, now pulling back
+      crossDirection = lastStrongEventType === 'crossed_down' ? 'down'
+                     : lastStrongEventType === 'crossed_up'   ? 'up' : null;
+    }
+
+    // recentTouchPullback: level was touched within RECENT_TOUCH_PULLBACK_MS but price has pulled back.
+    // Prevents popupTitleKey / popup.status reverting to 'approaching'/'very_close' after a touch,
+    // which made the live-card silently lose the 'level_touched' state.
+    const recentTouchPullback =
+      !rollbackAfterAlert && !crossDetectedRaw && !rawContactDetected && !wickRecent &&
+      nextPhase !== 'contact' && nextPhase !== 'crossed' &&
+      lastStrongEventType === 'contact_hit' &&
+      lastStrongEventAt != null &&
+      (nowTs - lastStrongEventAt) < RECENT_TOUCH_PULLBACK_MS;
+
+    // touchType / touchDetected — raw signals take priority over confirmed phase
+    let touchType = null;
+    if (nextPhase === 'crossed' || crossDetectedRaw || rollbackAfterAlert) {
+      touchType = 'cross';
+    } else if (nextPhase === 'contact' || rawContactDetected || recentTouchPullback) {
+      touchType = 'contact';
+    } else if (wickRecent) {
+      touchType = 'wick';
+    }
+    const touchDetected = touchType !== null;
 
     // scenarioTrend: compare current leading to previous
     const prevScenarioLeading = prevState?.scenarioLeading ?? null;
@@ -1261,12 +1416,14 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       else if (boBncDiff > 5) scenarioTrend = 'falling';
     }
 
-    // popupTitleKey (extended with approaching / very_close)
+    // popupTitleKey — raw signals take priority over confirmed phase (UI should not wait for hold)
     let popupTitleKey = 'default_tracking';
-    if (nextPhase === 'crossed') {
-      popupTitleKey = 'level_broken';
-    } else if (rollbackAfterAlert) {
+    if (rollbackAfterAlert) {
       popupTitleKey = 'level_pulling_back';
+    } else if (crossDetectedRaw || nextPhase === 'crossed') {
+      popupTitleKey = 'level_broken';
+    } else if (rawContactDetected || nextPhase === 'contact' || wickRecent || recentTouchPullback) {
+      popupTitleKey = 'level_touched';
     } else if (nextPhase === 'precontact') {
       popupTitleKey = 'very_close';
     } else if (nextPhase === 'approaching') {
@@ -1292,6 +1449,42 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       console.log(
         `[watch-engine] rollback_cleared ${level.symbol} ${level.internalId}` +
         ` phase=${nextPhase} dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+
+    // Touch / wick / cross detection logs
+    if (contactEntered) {
+      console.log(
+        `[watch-engine] level_touch_detected ${level.symbol} ${level.internalId}` +
+        ` price=${currentPrice} level=${levelPrice} dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+    if (wickDetected) {
+      console.log(
+        `[watch-engine] level_probe_detected ${level.symbol} ${level.internalId}` +
+        ` dir=${crossDirection ?? probeDirection ?? 'unknown'} phase=${nextPhase}` +
+        ` dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+    if (nextPhase === 'crossed' && prevPhase !== 'crossed') {
+      console.log(
+        `[watch-engine] level_cross_detected ${level.symbol} ${level.internalId}` +
+        ` dir=${crossDirection} price=${currentPrice} level=${levelPrice}` +
+        ` dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+    // Raw touch / raw cross logs (fires before hold confirmation)
+    if (crossDetectedRaw) {
+      console.log(
+        `[watch-engine] level_raw_cross_detected ${level.symbol} ${level.internalId}` +
+        ` dir=${sideNow === 'below' ? 'down' : 'up'} phase=${prevPhase}->${nextPhase}` +
+        ` price=${currentPrice} level=${levelPrice} dist=${absDistancePct.toFixed(3)}%`,
+      );
+    }
+    if (rawContactEntered) {
+      console.log(
+        `[watch-engine] level_raw_contact_detected ${level.symbol} ${level.internalId}` +
+        ` price=${currentPrice} level=${levelPrice} dist=${absDistancePct.toFixed(4)}%`,
       );
     }
 
@@ -1370,6 +1563,20 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       pendingCross:           transition.pending.crossTicks   > 0,
       pendingCrossTicks:      transition.pending.crossTicks,
       pendingCrossDirection:  transition.pending.crossDirection,
+      // Touch / wick / probe / cross state
+      touchDetected,
+      touchType,
+      lastTouchAt,
+      rawContactDetected,
+      lastRawContactAt,
+      crossDetectedRaw,
+      crossConfirmed,
+      lastRawCrossAt,
+      wickDetected,
+      lastWickAt,
+      probeDirection,
+      crossStatus,
+      crossDirection,
       // One-tick delay: reads suppression from previous tick's outcome
       lastEventSuppressedReason: prevState?.lastEventSuppressedReason ?? null,
       // ── Display model ─────────────────────────────────────────────
@@ -1407,19 +1614,38 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     // ── Popup block ────────────────────────────────────────────────
     // Priority/isPrimary/isSecondary are filled by assignPopupPriorities() in the tick loop.
-    const popupStatus = computePopupStatus(nextPhase, rollbackAfterAlert, lastStrongEventAt, nowTs);
+    const popupStatus = computePopupStatus(nextPhase, rollbackAfterAlert, lastStrongEventAt, nowTs, wickRecent, rawContactDetected, crossDetectedRaw, recentTouchPullback);
     const popupActive = popupStatus !== 'inactive';
     state.popup = {
-      active:      popupActive,
-      status:      popupStatus,
-      titleKey:    popupTitleKey,
-      priority:    0,       // filled post-computation
-      isPrimary:   false,   // filled post-computation
-      isSecondary: false,   // filled post-computation
-      isCompleted: popupStatus === 'completed',
-      blink:       (lastStrongEventAt != null) && (nowTs - lastStrongEventAt) < BLINK_TTL_MS,
-      levelSource: LEVEL_SOURCE_MAP[level.source] || 'manual',
+      active:       popupActive,
+      status:       popupStatus,
+      titleKey:     popupTitleKey,
+      priority:     0,       // filled post-computation
+      isPrimary:    false,   // filled post-computation
+      isSecondary:  false,   // filled post-computation
+      isCompleted:  popupStatus === 'completed',
+      // blink: fires on raw contact/cross entry and lasts BLINK_TTL_MS
+      blink:        ((lastStrongEventAt != null) && (nowTs - lastStrongEventAt) < BLINK_TTL_MS) ||
+                    ((lastRawContactAt  != null) && (nowTs - lastRawContactAt)  < BLINK_TTL_MS) ||
+                    ((lastRawCrossAt    != null) && (nowTs - lastRawCrossAt)    < BLINK_TTL_MS) ||
+                    wickRecent,
+      levelSource:  LEVEL_SOURCE_MAP[level.source] || 'manual',
       displayScope: level.alertOptions?.displayScope || 'tab',
+      // Touch / wick / cross state (all layers)
+      touchDetected,
+      touchType,
+      lastTouchAt,
+      rawContactDetected,
+      lastRawContactAt,
+      crossDetectedRaw,
+      crossConfirmed,
+      lastRawCrossAt,
+      wickDetected,
+      lastWickAt,
+      probeDirection,
+      crossStatus,
+      crossDirection,
+      lastSuppressedReason: prevState?.lastEventSuppressedReason ?? null,
     };
 
     // ── Extended metrics for progress bars ────────────────────────
@@ -1599,6 +1825,15 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             scenarioLeading:       state.scenarioLeading,
             scenarioScores:        state.scenarioScores,
             lastEventSuppressedReason: suppressedStateMap.get(level.internalId)?.reason ?? null,
+            lastTouchAt:           state.lastTouchAt,
+            wickDetected:          state.wickDetected,
+            lastWickAt:            state.lastWickAt,
+            probeDirection:        state.probeDirection,
+            crossStatus:           state.crossStatus,
+            crossDirection:        state.crossDirection,
+            rawContactDetected:    state.rawContactDetected,
+            lastRawContactAt:      state.lastRawContactAt,
+            lastRawCrossAt:        state.lastRawCrossAt,
             ts:                    nowMs,
           });
 
@@ -1660,6 +1895,13 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
       await writePipeline.exec();
 
+      // GC: remove state for levels that are no longer in the active watch list.
+      // Prevents unbounded growth of previousStates and suppressedStateMap when
+      // levels are deleted or watch is disabled.
+      const activeIds = new Set(levels.map(l => l.internalId));
+      for (const id of previousStates.keys())     { if (!activeIds.has(id)) previousStates.delete(id); }
+      for (const id of suppressedStateMap.keys()) { if (!activeIds.has(id)) suppressedStateMap.delete(id); }
+
       if (logSummary) {
         console.log(
           `[watch-engine] activeLevels=${monitoredLevels} symbols=${monitoredSymbols}` +
@@ -1687,3 +1929,26 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 }
 
 module.exports = { createLevelWatchEngine };
+
+// Exported ONLY for unit tests — do not use in production code.
+module.exports._testing = {
+  computeSide,
+  resolvePhase,
+  computePopupStatus,
+  computeScenarioScores,
+  normDeltaToPct,
+  deltaTrend,
+  // Constants
+  WATCH_ENTER_APPROACHING_PCT,
+  WATCH_EXIT_APPROACHING_PCT,
+  WATCH_ENTER_PRECONTACT_PCT,
+  WATCH_EXIT_PRECONTACT_PCT,
+  WATCH_ENTER_CONTACT_PCT,
+  WATCH_EXIT_CONTACT_PCT,
+  WATCH_CONTACT_HOLD_TICKS,
+  WATCH_CROSS_HOLD_TICKS,
+  WATCH_CROSS_CONFIRM_PCT,
+  POPUP_RECENT_COMPLETED_MS,
+  BLINK_TTL_MS,
+  RECENT_TOUCH_PULLBACK_MS,
+};

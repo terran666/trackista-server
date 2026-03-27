@@ -174,7 +174,7 @@ function createLevelMonitorService(redis) {
 
         const redisKey = `levelstate:${sym}`;
         writePipeline.setex(redisKey, LEVELSTATE_TTL_SEC, JSON.stringify(state));
-        console.log(`[monitor] wrote ${redisKey} levels=${computedLevels.length}`);
+        if (logSummary) console.log(`[monitor] wrote ${redisKey} levels=${computedLevels.length}`);
       }
 
       const writeResults = await writePipeline.exec();

@@ -438,6 +438,96 @@ test('clearing fingerprint keys after cross: del targets include both cooldown a
 });
 
 // ══════════════════════════════════════════════════════════════════
+section('Geometry helpers — getSlopedLevelValueAtTimestamp');
+
+test('value at anchor p1 equals p1.value', () => {
+  const p1 = { timestamp: 1000, value: 100 };
+  const p2 = { timestamp: 2000, value: 110 };
+  assert.equal(T.getSlopedLevelValueAtTimestamp([p1, p2], 1000), 100);
+});
+
+test('value at anchor p2 equals p2.value', () => {
+  const p1 = { timestamp: 1000, value: 100 };
+  const p2 = { timestamp: 2000, value: 110 };
+  assert.equal(T.getSlopedLevelValueAtTimestamp([p1, p2], 2000), 110);
+});
+
+test('value at midpoint is linear interpolation', () => {
+  const p1 = { timestamp: 0, value: 100 };
+  const p2 = { timestamp: 1000, value: 200 };
+  assert.equal(T.getSlopedLevelValueAtTimestamp([p1, p2], 500), 150);
+});
+
+test('extrapolates beyond p2 (same slope)', () => {
+  const p1 = { timestamp: 0, value: 100 };
+  const p2 = { timestamp: 1000, value: 200 };
+  // slope = 0.1 per ms → at ts=2000: 100 + 0.1*2000 = 300
+  assert.equal(T.getSlopedLevelValueAtTimestamp([p1, p2], 2000), 300);
+});
+
+test('descending slope extrapolates correctly', () => {
+  const p1 = { timestamp: 0,    value: 200 };
+  const p2 = { timestamp: 1000, value: 100 };
+  // slope = -0.1 per ms → at ts=1500: 200 + (-0.1)*1500 = 50
+  assert.equal(T.getSlopedLevelValueAtTimestamp([p1, p2], 1500), 50);
+});
+
+// ══════════════════════════════════════════════════════════════════
+section('Geometry helpers — getLevelPriceRef');
+
+test('horizontal level returns level.price', () => {
+  const level = { geometryType: 'horizontal', price: 42000 };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), 42000);
+});
+
+test('horizontal level with price=null returns null', () => {
+  const level = { geometryType: 'horizontal', price: null };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), null);
+});
+
+test('horizontal level with price=0 returns null', () => {
+  const level = { geometryType: 'horizontal', price: 0 };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), null);
+});
+
+test('sloped level returns extrapolated price at nowTs', () => {
+  const level = {
+    geometryType: 'sloped',
+    price: null,
+    points: [{ timestamp: 0, value: 100 }, { timestamp: 1000, value: 200 }],
+  };
+  assert.equal(T.getLevelPriceRef(level, 500), 150);
+});
+
+test('sloped level with missing points returns null', () => {
+  const level = { geometryType: 'sloped', price: null, points: null };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), null);
+});
+
+test('sloped level with only 1 point returns null', () => {
+  const level = {
+    geometryType: 'sloped',
+    price: null,
+    points: [{ timestamp: 1000, value: 100 }],
+  };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), null);
+});
+
+test('sloped level with duplicate timestamps returns null', () => {
+  const level = {
+    geometryType: 'sloped',
+    price: null,
+    points: [{ timestamp: 1000, value: 100 }, { timestamp: 1000, value: 200 }],
+  };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), null);
+});
+
+test('unknown geometryType falls back to level.price', () => {
+  const level = { geometryType: 'vertical', price: 55000 };
+  assert.equal(T.getLevelPriceRef(level, Date.now()), 55000);
+});
+
+// ══════════════════════════════════════════════════════════════════
 // Results
 console.log(`\n${'═'.repeat(52)}`);
 console.log(`Results: ${pass} passed, ${fail} failed`);

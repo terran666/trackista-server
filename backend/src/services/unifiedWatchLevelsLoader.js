@@ -55,6 +55,18 @@ function readManualSlopedLevels() {
   return store.levels;
 }
 
+function readTrackedExtremes() {
+  const store = safeReadJson(path.join(DATA_DIR, 'tracked-extremes.json'));
+  if (!store || !Array.isArray(store.extremes)) return [];
+  return store.extremes;
+}
+
+function readSavedRays() {
+  const store = safeReadJson(path.join(DATA_DIR, 'saved-rays.json'));
+  if (!store || !Array.isArray(store.rays)) return [];
+  return store.rays;
+}
+
 // ─── Normalizers ──────────────────────────────────────────────────
 
 /**
@@ -187,7 +199,112 @@ function normalizeManualLevel(ml) {
   };
 }
 
-// ─── Defaults ─────────────────────────────────────────────────────
+/**
+ * Normalise a manual-sloped-levels.json record with alertEnabled=true.
+ * geometryType = 'sloped'; price is computed at runtime from points.
+ */
+function normalizeSlopedLevel(sl) {
+  const storedOpts = sl.alertOptions || {};
+  const alertOptions = { ...defaultAlertOptions(), ...storedOpts };
+  return {
+    internalId:       `sloped-${sl.id}`,
+    levelId:          null,
+    externalLevelId:  String(sl.id),
+    symbol:           sl.symbol,
+    market:           sl.marketType || 'futures',
+    timeframe:        null,
+    source:           sl.source || 'manual-sloped',
+    geometryType:     'sloped',
+    side:             sl.side || null,
+    price:            null,   // no static price — computed each tick from points
+    points:           sl.points || null,
+    watchEnabled:     true,
+    watchMode:        sl.watchMode    || 'simple',
+    scenarioMode:     sl.scenarioMode || 'all_in',
+    tactics: {
+      breakout: false, bounce: false, fakeout: false,
+      wallBounce: false, wallBreakout: false,
+    },
+    config:       defaultConfig(),
+    alertOptions,
+    isActive:     true,
+    meta:         null,
+  };
+}
+
+/**
+ * Normalise a tracked-extremes.json record with alertEnabled=true.
+ * Extremes have a stored `price` so geometryType = 'horizontal'.
+ */
+function normalizeExtremeLevel(ex) {
+  const storedOpts = ex.alertOptions || {};
+  const alertOptions = { ...defaultAlertOptions(), ...storedOpts };
+  return {
+    internalId:       `extreme-${ex.id}`,
+    levelId:          null,
+    externalLevelId:  String(ex.id),
+    symbol:           ex.symbol,
+    market:           ex.marketType || 'futures',
+    timeframe:        ex.tf || null,
+    source:           ex.source || 'tracked-extreme',
+    geometryType:     'horizontal',
+    side:             ex.side || null,
+    price:            parseFloat(ex.price),
+    watchEnabled:     true,
+    watchMode:        ex.watchMode    || 'simple',
+    scenarioMode:     ex.scenarioMode || 'all_in',
+    tactics: {
+      breakout: false, bounce: false, fakeout: false,
+      wallBounce: false, wallBreakout: false,
+    },
+    config:       defaultConfig(),
+    alertOptions,
+    isActive:     true,
+    meta: {
+      strength: ex.strength,
+      touches:  ex.touches,
+      type:     ex.type,
+    },
+  };
+}
+
+/**
+ * Normalise a saved-rays.json record with alertEnabled=true.
+ * Shape 'sloped' → geometryType='sloped', shape 'horizontal' → 'horizontal'.
+ */
+function normalizeSavedRay(ray) {
+  const storedOpts = ray.alertOptions || {};
+  const alertOptions = { ...defaultAlertOptions(), ...storedOpts };
+  const isSloped = (ray.shape || 'sloped') === 'sloped';
+  return {
+    internalId:       `sray-${ray.id}`,
+    levelId:          null,
+    externalLevelId:  String(ray.id),
+    symbol:           ray.symbol,
+    market:           ray.marketType || 'futures',
+    timeframe:        null,
+    source:           ray.source || 'saved-rays',
+    geometryType:     isSloped ? 'sloped' : 'horizontal',
+    side:             ray.side || null,
+    price:            isSloped ? null : (ray.price != null ? parseFloat(ray.price) : null),
+    points:           ray.points || null,
+    watchEnabled:     true,
+    watchMode:        ray.watchMode    || 'simple',
+    scenarioMode:     ray.scenarioMode || 'all_in',
+    tactics: {
+      breakout: false, bounce: false, fakeout: false,
+      wallBounce: false, wallBreakout: false,
+    },
+    config:       defaultConfig(),
+    alertOptions,
+    isActive:     true,
+    meta: {
+      strength:   ray.strength,
+      touches:    ray.touches,
+      createdFrom: ray.createdFrom,
+    },
+  };
+}
 
 function defaultConfig() {
   return {
@@ -295,6 +412,32 @@ function createUnifiedWatchLevelsLoader(db) {
       result.push(normalizeManualLevel(ml));
     }
 
+    // manual-sloped-levels with alertEnabled (geometry=sloped, price from points at runtime)
+    const sloped = readManualSlopedLevels().filter(sl => sl.alertEnabled);
+    for (const sl of sloped) {
+      if (!sl.points || !Array.isArray(sl.points) || sl.points.length < 2) continue;
+      result.push(normalizeSlopedLevel(sl));
+    }
+
+    // tracked-extremes with alertEnabled (horizontal price stored)
+    const extremes = readTrackedExtremes().filter(ex => ex.alertEnabled);
+    for (const ex of extremes) {
+      if (!ex.price || isNaN(parseFloat(ex.price))) continue;
+      result.push(normalizeExtremeLevel(ex));
+    }
+
+    // saved-rays with alertEnabled (sloped or horizontal depending on shape)
+    const srays = readSavedRays().filter(r => r.alertEnabled);
+    for (const ray of srays) {
+      const isSloped = (ray.shape || 'sloped') === 'sloped';
+      if (isSloped) {
+        if (!ray.points || !Array.isArray(ray.points) || ray.points.length < 2) continue;
+      } else {
+        if (!ray.price || isNaN(parseFloat(ray.price))) continue;
+      }
+      result.push(normalizeSavedRay(ray));
+    }
+
     return result;
   }
 
@@ -319,11 +462,13 @@ function createUnifiedWatchLevelsLoader(db) {
 
     try {
       const fileLevels = loadFromFiles();
-      // Deduplicate: if a file-level has same symbol+price as a DB level, skip
-      const dbKeys = new Set(levels.map(l => `${l.symbol}:${l.market}:${l.price}`));
+      // Deduplicate by internalId (covers sloped levels that have price=null)
+      const seen = new Set(levels.map(l => l.internalId));
       for (const fl of fileLevels) {
-        const key = `${fl.symbol}:${fl.market}:${fl.price}`;
-        if (!dbKeys.has(key)) levels.push(fl);
+        if (!seen.has(fl.internalId)) {
+          seen.add(fl.internalId);
+          levels.push(fl);
+        }
       }
     } catch (err) {
       console.error('[watchLevels] file load error:', err.message);
@@ -346,6 +491,11 @@ function createUnifiedWatchLevelsLoader(db) {
 module.exports = {
   createUnifiedWatchLevelsLoader,
   normalizeDbLevel,
+  normalizeTrackedLevel,
+  normalizeManualLevel,
+  normalizeSlopedLevel,
+  normalizeExtremeLevel,
+  normalizeSavedRay,
   defaultConfig,
   defaultAlertOptions,
 };

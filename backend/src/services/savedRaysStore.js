@@ -185,7 +185,7 @@ function removeMany(ids) {
 
 /**
  * Patch a single saved ray.
- * Patchable fields: points, alertEnabled, tracked.
+ * Patchable fields: points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
  *
  * If points are patched the geometry fingerprint is updated so the old geometry
  * can be re-saved and the new geometry won't be treated as a duplicate.
@@ -193,7 +193,7 @@ function removeMany(ids) {
  * Returns the updated record, or null if not found.
  */
 function patchOne(id, patch) {
-  const PATCHABLE = new Set(['points', 'alertEnabled', 'tracked']);
+  const PATCHABLE = new Set(['points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.rays.findIndex(r => r.id === id);
   if (idx === -1) return null;
@@ -226,11 +226,11 @@ function patchOne(id, patch) {
 
 /**
  * Patch multiple saved rays with the same patch object.
- * Patchable fields: alertEnabled, tracked (not points for bulk patch).
+ * Patchable fields: alertEnabled, tracked, watchMode, alertOptions, scenarioMode (not points for bulk patch).
  * Returns count of updated records.
  */
 function patchMany(ids, patch) {
-  const PATCHABLE = new Set(['alertEnabled', 'tracked']);
+  const PATCHABLE = new Set(['alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const idSet     = new Set(ids);
   const store     = readStore();
   const now       = Date.now();

@@ -83,11 +83,11 @@ function remove(id) {
 
 /**
  * Patch a single manual sloped level.
- * Patchable fields: points, side, alertEnabled, tracked.
+ * Patchable fields: points, side, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
  * Returns the updated record, or null if not found.
  */
 function patch(id, changes) {
-  const PATCHABLE = new Set(['points', 'side', 'alertEnabled', 'tracked']);
+  const PATCHABLE = new Set(['points', 'side', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.levels.findIndex(l => l.id === id);
   if (idx === -1) return null;

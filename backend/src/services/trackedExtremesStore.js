@@ -131,10 +131,10 @@ function removeMany(ids) {
 
 /**
  * Patch a single extreme.
- * Patchable fields: price, points, alertEnabled, tracked.
+ * Patchable fields: price, points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
  */
 function patchOne(id, patch) {
-  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked']);
+  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.extremes.findIndex(e => e.id === id);
   if (idx === -1) return null;
@@ -148,11 +148,11 @@ function patchOne(id, patch) {
 
 /**
  * Patch multiple extremes with the same patch object.
- * Patchable fields: price, points, alertEnabled, tracked.
+ * Patchable fields: price, points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
  * Returns count of updated records.
  */
 function patchMany(ids, patch) {
-  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked']);
+  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const idSet     = new Set(ids);
   const store     = readStore();
   const now       = Date.now();

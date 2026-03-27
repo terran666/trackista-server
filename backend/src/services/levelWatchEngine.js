@@ -130,6 +130,37 @@ const TRANSITION_EVENT = {
 // Epsilon for speed calculation
 const SPEED_EPSILON = 1e-10;
 
+// ─── Geometry helpers ─────────────────────────────────────────────
+
+/**
+ * Linear extrapolation of a sloped level's price at a given timestamp.
+ * Points must be sorted so p1.timestamp < p2.timestamp (or at least different).
+ * Extrapolates beyond p2 — intentional for live watching.
+ */
+function getSlopedLevelValueAtTimestamp(points, nowTs) {
+  const [p1, p2] = points;
+  const slope = (p2.value - p1.value) / (p2.timestamp - p1.timestamp);
+  return p1.value + slope * (nowTs - p1.timestamp);
+}
+
+/**
+ * Returns the effective price reference for a level at the current moment.
+ * For horizontal levels: level.price.
+ * For sloped levels:     linear extrapolation from level.points at nowTs.
+ * Returns null if geometry is invalid.
+ */
+function getLevelPriceRef(level, nowTs) {
+  if (level.geometryType === 'sloped') {
+    if (!Array.isArray(level.points) || level.points.length < 2) return null;
+    const [p1, p2] = level.points;
+    if (p1.timestamp === p2.timestamp) return null;
+    const price = getSlopedLevelValueAtTimestamp(level.points, nowTs);
+    return (price > 0 && isFinite(price)) ? price : null;
+  }
+  // horizontal (default) — use level.price
+  return (level.price != null && !isNaN(level.price) && level.price > 0) ? level.price : null;
+}
+
 // ─── Sound mapping by event type ─────────────────────────────────
 const DEFAULT_SOUND_BY_TYPE = {
   approaching_entered:         'soft_ping',
@@ -869,7 +900,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const { eventType, prevPhase, nextPhase, sideRelativeToLevel, reason } = transition;
     const ao  = level.alertOptions;
     const { distancePct, currentPrice, wallContext } = state;
-    const levelPrice = level.price;
+    const levelPrice = getLevelPriceRef(level, nowMs) ?? level.price;
 
     const signalContext = state.impulseScore != null ? {
       impulseScore:     state.impulseScore,
@@ -949,7 +980,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     if (!ao || !ao.earlyWarningEnabled) return events;
 
     const { distancePct, absDistancePct, currentPrice, approaching, approachSpeed, approachAcceleration } = state;
-    const levelPrice = level.price;
+    const levelPrice = getLevelPriceRef(level, nowMs) ?? level.price;
 
     // Only evaluate if price is moving toward the level
     if (!approaching && !state.isNearby) return events;
@@ -1112,8 +1143,9 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
   // ── Compute watch state for one level (state machine) ────────────────
   function computeWatchState(level, currentPrice, prevPrice, signal, metrics, prevState) {
-    const levelPrice = level.price;
-    if (isNaN(levelPrice) || levelPrice <= 0) return null;
+    const nowTs      = Date.now();
+    const levelPrice = getLevelPriceRef(level, nowTs);
+    if (levelPrice == null) return null;
 
     const distancePct    = ((currentPrice - levelPrice) / levelPrice) * 100;
     const absDistancePct = Math.abs(distancePct);
@@ -1126,7 +1158,6 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     // State machine: resolve next phase with hysteresis + hold confirmation
     const prevPhase  = prevState?.phase ?? 'watching';
-    const nowTs      = Date.now();
     const transition = resolvePhase({
       prevPhase,
       absDistancePct,
@@ -1938,6 +1969,9 @@ module.exports._testing = {
   computeScenarioScores,
   normDeltaToPct,
   deltaTrend,
+  // Geometry helpers
+  getSlopedLevelValueAtTimestamp,
+  getLevelPriceRef,
   // Constants
   WATCH_ENTER_APPROACHING_PCT,
   WATCH_EXIT_APPROACHING_PCT,

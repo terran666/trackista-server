@@ -234,11 +234,15 @@ function normalizeSlopedLevel(sl) {
 
 /**
  * Normalise a tracked-extremes.json record with alertEnabled=true.
- * Extremes have a stored `price` so geometryType = 'horizontal'.
+ * Regular extremes have a stored `price` → geometryType = 'horizontal'.
+ * vertical-extremes have points and no price → geometryType = 'sloped'.
  */
 function normalizeExtremeLevel(ex) {
   const storedOpts = ex.alertOptions || {};
   const alertOptions = { ...defaultAlertOptions(), ...storedOpts };
+  // Detect sloped geometry: vertical-extremes store points instead of a fixed price
+  const isSloped = (ex.source === 'vertical-extremes') ||
+                   (ex.price == null && Array.isArray(ex.points) && ex.points.length >= 2);
   return {
     internalId:       `extreme-${ex.id}`,
     levelId:          null,
@@ -247,9 +251,10 @@ function normalizeExtremeLevel(ex) {
     market:           ex.marketType || 'futures',
     timeframe:        ex.tf || null,
     source:           ex.source || 'tracked-extreme',
-    geometryType:     'horizontal',
+    geometryType:     isSloped ? 'sloped' : 'horizontal',
     side:             ex.side || null,
-    price:            parseFloat(ex.price),
+    price:            isSloped ? null : parseFloat(ex.price),
+    points:           isSloped ? (ex.points || null) : undefined,
     watchEnabled:     true,
     watchMode:        ex.watchMode    || 'simple',
     scenarioMode:     ex.scenarioMode || 'all_in',

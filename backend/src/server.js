@@ -678,7 +678,7 @@ app.post('/api/tracked-levels/bulk',        trackedLevelsBulk);
 app.get('/api/tracked-levels',              trackedLevelsList);
 app.delete('/api/tracked-levels/:id',       trackedLevelsDeleteOne);
 app.post('/api/tracked-levels/delete-many', trackedLevelsDeleteMany);
-app.patch('/api/tracked-levels/:id',        trackedLevelsPatchOne);
+app.patch('/api/tracked-levels/:id',        (req, res) => { trackedLevelsPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.post('/api/tracked-levels/patch-many',  trackedLevelsPatchMany);
 
 // ─── Tracked extremes endpoints ──────────────────────────────────
@@ -687,8 +687,8 @@ app.post('/api/tracked-extremes/bulk',        trackedExtremesBulk);
 app.get('/api/tracked-extremes',              trackedExtremesList);
 app.delete('/api/tracked-extremes/:id',       trackedExtremesDeleteOne);
 app.post('/api/tracked-extremes/delete-many', trackedExtremesDeleteMany);
-app.patch('/api/tracked-extremes/:id',        trackedExtremesPatchOne);
-app.post('/api/tracked-extremes/patch-many',  trackedExtremesPatchMany);
+app.patch('/api/tracked-extremes/:id',        (req, res) => { trackedExtremesPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/tracked-extremes/patch-many',  (req, res) => { trackedExtremesPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Tracked rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/tracked-rays routes');

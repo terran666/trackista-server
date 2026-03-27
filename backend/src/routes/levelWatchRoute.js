@@ -13,6 +13,7 @@
 
 const manualLevelsStore  = require('../services/manualLevelsStore');
 const trackedLevelsStore = require('../services/trackedLevelsStore');
+const savedRaysStore     = require('../services/savedRaysStore');
 
 const VALID_WATCH_MODES = new Set(['off', 'simple', 'tactic']);
 const VALID_POPUP_PRIO  = new Set(['low', 'normal', 'high', 'urgent']);
@@ -95,15 +96,39 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       const [[level]] = await db.query('SELECT id, symbol, market FROM levels WHERE id = ?', [id]);
       if (!level) {
         const ml = manualLevelsStore.getById(id);
-        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
-        // Apply changes to JSON store
-        const updates = {};
-        if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
-        if (watchMode    !== undefined) updates.watchMode    = watchMode;
-        if (alertOptions)               updates.alertOptions = { ...(ml.alertOptions || {}), ...alertOptions };
-        manualLevelsStore.patch(id, updates);
-        if (watchLoader) watchLoader.invalidate();
-        return res.json({ success: true, levelId: id });
+        if (ml) {
+          const updates = {};
+          if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+          if (watchMode    !== undefined) updates.watchMode    = watchMode;
+          if (alertOptions)               updates.alertOptions = { ...(ml.alertOptions || {}), ...alertOptions };
+          manualLevelsStore.patch(id, updates);
+          if (watchLoader) watchLoader.invalidate();
+          return res.json({ success: true, levelId: id });
+        }
+
+        const tl = trackedLevelsStore.getById(id);
+        if (tl) {
+          const updates = {};
+          if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+          if (watchMode    !== undefined) updates.watchMode    = watchMode;
+          if (alertOptions)               updates.alertOptions = { ...(tl.alertOptions || {}), ...alertOptions };
+          trackedLevelsStore.patchOne(id, updates);
+          if (watchLoader) watchLoader.invalidate();
+          return res.json({ success: true, levelId: id });
+        }
+
+        const sr = savedRaysStore.getById(id);
+        if (sr) {
+          const updates = {};
+          if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+          if (watchMode    !== undefined) updates.watchMode    = watchMode;
+          if (alertOptions)               updates.alertOptions = { ...(sr.alertOptions || {}), ...alertOptions };
+          savedRaysStore.patchOne(id, updates);
+          if (watchLoader) watchLoader.invalidate();
+          return res.json({ success: true, levelId: id });
+        }
+
+        return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
       const conn = await db.getConnection();
@@ -289,6 +314,21 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           });
         }
 
+        const sr = savedRaysStore.getById(id);
+        if (sr) {
+          const ao = sr.alertOptions || {};
+          return res.json({
+            success:         true,
+            levelId:         id,
+            watchEnabled:    Boolean(sr.alertEnabled),
+            watchMode:       sr.watchMode || 'simple',
+            tactics:         null,
+            displayScope:    ao.displayScope   ?? 'tab',
+            telegramEnabled: ao.telegramEnabled ?? false,
+            alertOptions:    ao,
+          });
+        }
+
         return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
@@ -390,6 +430,25 @@ function createLevelWatchRouter(db, redis, watchLoader) {
             symbol:          tl.symbol,
             watchEnabled:    Boolean(tl.alertEnabled),
             watchMode:       tl.watchMode || 'simple',
+            lastTriggeredAt: null,
+            triggerCount:    0,
+            state,
+          });
+        }
+
+        const sr = savedRaysStore.getById(id);
+        if (sr) {
+          const market = sr.marketType || 'futures';
+          const key    = `levelwatchstate:${market}:${sr.symbol}:sray-${id}`;
+          const raw    = await redis.get(key);
+          let   state  = null;
+          if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+          return res.json({
+            success:         true,
+            levelId:         id,
+            symbol:          sr.symbol,
+            watchEnabled:    Boolean(sr.alertEnabled),
+            watchMode:       sr.watchMode || 'simple',
             lastTriggeredAt: null,
             triggerCount:    0,
             state,

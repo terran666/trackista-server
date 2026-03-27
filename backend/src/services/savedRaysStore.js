@@ -249,4 +249,12 @@ function patchMany(ids, patch) {
   return count;
 }
 
-module.exports = { bulkSave, getAll, removeOne, removeMany, patchOne, patchMany };
+/**
+ * Return a single saved ray by numeric id, or null if not found.
+ */
+function getById(id) {
+  const store = readStore();
+  return store.rays.find(r => r.id === id) || null;
+}
+
+module.exports = { bulkSave, getAll, getById, removeOne, removeMany, patchOne, patchMany };

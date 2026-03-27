@@ -1046,8 +1046,10 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     if (!state.isNearby) return events; // rest only within zone
 
     // Volume spike
+    // volumeDeltaPct = (spikeRatio - 1) * 100, where spikeRatio = currentVol60s / historicalAvg.
+    // Default threshold 80 = volume is 80% above average (1.8x). Override via minVolumeDeltaPct.
     if (ao.warnOnVolumeChange && state.volumeDeltaPct != null) {
-      const threshold = ao.minVolumeDeltaPct ?? 20;
+      const threshold = ao.minVolumeDeltaPct ?? 80;
       if (state.volumeDeltaPct >= threshold) {
         const onCD  = await isCooldownActive('nearby_volume_spike', level.market, level.symbol, level.internalId);
         const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_volume_spike', nowMs);
@@ -1265,12 +1267,18 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     if (metrics) {
       volumeNow  = metrics.volumeUsdt60s ?? metrics.volume60s ?? null;
       tradesNow  = metrics.tradeCount60s ?? null;
-      if (prevState && prevState.volumeNow && volumeNow) {
-        volumeDeltaPct = ((volumeNow - prevState.volumeNow) / prevState.volumeNow) * 100;
-      }
       if (prevState && prevState.tradesNow && tradesNow) {
         tradesDeltaPct = ((tradesNow - prevState.tradesNow) / prevState.tradesNow) * 100;
       }
+    }
+
+    // Volume spike: use signal's spike ratio (current vs historical avg) for
+    // meaningful spike detection. spikeRatio 2.0 = double average = +100%.
+    // Falls back to tick-over-tick delta if signal isn't warmed yet.
+    if (signal && signal.baselineReady && signal.volumeSpikeRatio60s != null) {
+      volumeDeltaPct = parseFloat(((signal.volumeSpikeRatio60s - 1) * 100).toFixed(2));
+    } else if (metrics && prevState?.volumeNow && volumeNow) {
+      volumeDeltaPct = ((volumeNow - prevState.volumeNow) / prevState.volumeNow) * 100;
     }
 
     // Signal context

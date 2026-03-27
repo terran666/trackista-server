@@ -325,7 +325,7 @@ function defaultConfig() {
 function defaultAlertOptions() {
   return {
     earlyWarningEnabled:          true,
-    warnBeforeSeconds:            null,
+    warnBeforeSeconds:            60,
     warnBeforeDistancePct:        null,
     warnOnApproachSpeedChange:    true,
     warnOnVolumeChange:           true,

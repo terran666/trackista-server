@@ -424,10 +424,16 @@ function createUnifiedWatchLevelsLoader(db) {
       result.push(normalizeSlopedLevel(sl));
     }
 
-    // tracked-extremes with alertEnabled (horizontal price stored)
+    // tracked-extremes with alertEnabled (horizontal or sloped geometry)
     const extremes = readTrackedExtremes().filter(ex => ex.alertEnabled);
     for (const ex of extremes) {
-      if (!ex.price || isNaN(parseFloat(ex.price))) continue;
+      const isSloped = (ex.source === 'vertical-extremes') ||
+                       (ex.price == null && Array.isArray(ex.points) && ex.points.length >= 2);
+      if (isSloped) {
+        if (!Array.isArray(ex.points) || ex.points.length < 2) continue;
+      } else {
+        if (!ex.price || isNaN(parseFloat(ex.price))) continue;
+      }
       result.push(normalizeExtremeLevel(ex));
     }
 

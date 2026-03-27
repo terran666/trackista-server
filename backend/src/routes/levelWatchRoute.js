@@ -11,7 +11,8 @@
  * GET   /api/levels/:id/events         — paginated event history from MySQL
  */
 
-const manualLevelsStore = require('../services/manualLevelsStore');
+const manualLevelsStore  = require('../services/manualLevelsStore');
+const trackedLevelsStore = require('../services/trackedLevelsStore');
 
 const VALID_WATCH_MODES = new Set(['off', 'simple', 'tactic']);
 const VALID_POPUP_PRIO  = new Set(['low', 'normal', 'high', 'urgent']);
@@ -259,18 +260,36 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       );
       if (!level) {
         const ml = manualLevelsStore.getById(id);
-        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
-        const ao = ml.alertOptions || {};
-        return res.json({
-          success:         true,
-          levelId:         id,
-          watchEnabled:    Boolean(ml.alertEnabled),
-          watchMode:       ml.watchMode || 'simple',
-          tactics:         null,
-          displayScope:    ao.displayScope   ?? 'tab',
-          telegramEnabled: ao.telegramEnabled ?? false,
-          alertOptions:    ao,
-        });
+        if (ml) {
+          const ao = ml.alertOptions || {};
+          return res.json({
+            success:         true,
+            levelId:         id,
+            watchEnabled:    Boolean(ml.alertEnabled),
+            watchMode:       ml.watchMode || 'simple',
+            tactics:         null,
+            displayScope:    ao.displayScope   ?? 'tab',
+            telegramEnabled: ao.telegramEnabled ?? false,
+            alertOptions:    ao,
+          });
+        }
+
+        const tl = trackedLevelsStore.getById(id);
+        if (tl) {
+          const ao = tl.alertOptions || {};
+          return res.json({
+            success:         true,
+            levelId:         id,
+            watchEnabled:    Boolean(tl.alertEnabled),
+            watchMode:       tl.watchMode || 'simple',
+            tactics:         null,
+            displayScope:    ao.displayScope   ?? 'tab',
+            telegramEnabled: ao.telegramEnabled ?? false,
+            alertOptions:    ao,
+          });
+        }
+
+        return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
       const [[wc]] = await db.query(
@@ -340,22 +359,44 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       );
       if (!level) {
         const ml = manualLevelsStore.getById(id);
-        if (!ml) return res.status(404).json({ success: false, error: 'Level not found' });
-        const market = ml.marketType || 'futures';
-        const key    = `levelwatchstate:${market}:${ml.symbol}:manual-${id}`;
-        const raw    = await redis.get(key);
-        let   state  = null;
-        if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
-        return res.json({
-          success:         true,
-          levelId:         id,
-          symbol:          ml.symbol,
-          watchEnabled:    Boolean(ml.alertEnabled),
-          watchMode:       ml.watchMode || 'simple',
-          lastTriggeredAt: null,
-          triggerCount:    0,
-          state,
-        });
+        if (ml) {
+          const market = ml.marketType || 'futures';
+          const key    = `levelwatchstate:${market}:${ml.symbol}:manual-${id}`;
+          const raw    = await redis.get(key);
+          let   state  = null;
+          if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+          return res.json({
+            success:         true,
+            levelId:         id,
+            symbol:          ml.symbol,
+            watchEnabled:    Boolean(ml.alertEnabled),
+            watchMode:       ml.watchMode || 'simple',
+            lastTriggeredAt: null,
+            triggerCount:    0,
+            state,
+          });
+        }
+
+        const tl = trackedLevelsStore.getById(id);
+        if (tl) {
+          const market = tl.marketType || 'futures';
+          const key    = `levelwatchstate:${market}:${tl.symbol}:tracked-${id}`;
+          const raw    = await redis.get(key);
+          let   state  = null;
+          if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+          return res.json({
+            success:         true,
+            levelId:         id,
+            symbol:          tl.symbol,
+            watchEnabled:    Boolean(tl.alertEnabled),
+            watchMode:       tl.watchMode || 'simple',
+            lastTriggeredAt: null,
+            triggerCount:    0,
+            state,
+          });
+        }
+
+        return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
       if (!level.watch_enabled) {

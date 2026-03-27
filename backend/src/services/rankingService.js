@@ -64,10 +64,9 @@ function createRankingService(redis, moveDetectionSvc) {
 
   // ── Happened rank ───────────────────────────────────────────────
   async function rankHappened() {
-    const raw = await redis.get('events:recent');
-    if (!raw) return;
-    let events;
-    try { events = JSON.parse(raw); } catch { return; }
+    const items = await redis.lrange('events:recent', 0, 99);
+    if (!items || !items.length) return;
+    const events = items.map(s => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
 
     const ranked = [];
     for (const ev of events) {

@@ -224,16 +224,19 @@ function createRuntimeQaService(redis) {
   // C. Global Redis key checks
   // ─────────────────────────────────────────────────────────────
   async function checkGlobalRedisKeys() {
-    const [happenedRaw, buildingRaw, eventsRecentRaw, outcomeStatsRaw] = await Promise.all([
+    const [happenedRaw, buildingRaw, eventsRecentItems, outcomeStatsRaw] = await Promise.all([
       redis.get('screener:rank:happened'),
       redis.get('screener:rank:building'),
-      redis.get('events:recent'),
+      redis.lrange('events:recent', 0, 99),
       redis.get('outcome:stats'),
     ]);
 
     const happened     = tryParse(happenedRaw);
     const building     = tryParse(buildingRaw);
-    const eventsRecent = tryParse(eventsRecentRaw);
+    // events:recent is a Redis list — parse each item individually
+    const eventsRecent = Array.isArray(eventsRecentItems) && eventsRecentItems.length
+      ? eventsRecentItems.map(s => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean)
+      : null;
     const outcomeStats = tryParse(outcomeStatsRaw);
 
     const results = [
@@ -249,6 +252,10 @@ function createRuntimeQaService(redis) {
     // Override ts check for list payloads (they have no native ts field)
     for (const r of results) {
       if (Array.isArray(happened) && r.keyName === 'screener:rank:happened') {
+        r.stale = false; r.ageMs = 0; r.notes = r.notes.filter(n => !n.includes('stale'));
+        if (r.status === 'warning' && r.notes.length === 0) r.status = 'ok';
+      }
+      if (Array.isArray(eventsRecent) && r.keyName === 'events:recent') {
         r.stale = false; r.ageMs = 0; r.notes = r.notes.filter(n => !n.includes('stale'));
         if (r.status === 'warning' && r.notes.length === 0) r.status = 'ok';
       }

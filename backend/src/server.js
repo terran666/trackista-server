@@ -504,7 +504,8 @@ console.log('[backend] registering /api/manual-levels routes');
 app.post('/api/manual-levels',       manualLevelsCreate);
 app.get('/api/manual-levels',        manualLevelsList);
 app.delete('/api/manual-levels/:id', manualLevelsDelete);
-app.patch('/api/manual-levels/:id',  manualLevelsPatchFactory(levelWatchEngine?.loader));
+// NOTE: app.patch('/api/manual-levels/:id', ...) is registered AFTER all
+// /watch sub-routes below to avoid Express matching '2/watch' as id='2/watch'
 
 // Watch endpoints for file-based manual levels
 // These persist alertEnabled + watchMode + alertOptions into manual-levels.json
@@ -671,6 +672,9 @@ app.get('/api/manual-levels/:id/events', (_req, res) => {
   const id = parseInt(_req.params.id, 10);
   return res.json({ success: true, levelId: id, count: 0, nextCursor: null, items: [] });
 });
+
+// Registered AFTER /watch sub-routes so Express doesn't match '2/watch' as id='2/watch'
+app.patch('/api/manual-levels/:id',  manualLevelsPatchFactory(levelWatchEngine?.loader));
 
 // ─── Tracked levels endpoints ─────────────────────────────────────
 console.log('[backend] registering /api/tracked-levels routes');

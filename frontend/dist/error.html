@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redirecting...</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            text-align: center;
+            max-width: 600px;
+            padding: 2rem;
+        }
+        .logo {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #00d4aa;
+            margin-bottom: 1rem;
+        }
+        .loading {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(0, 212, 170, 0.3);
+            border-radius: 50%;
+            border-top-color: #00d4aa;
+            animation: spin 1s ease-in-out infinite;
+            margin-bottom: 1rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">TRACKISTA</div>
+        <div class="loading"></div>
+        <div>Загружаем страницу...</div>
+    </div>
+
+    <script>
+        // Получаем текущий путь
+        const currentPath = window.location.pathname;
+        const currentSearch = window.location.search;
+        
+        // Строим новый URL с сохранением всех параметров  
+        const targetUrl = '/' + currentSearch + '?spa_route=' + encodeURIComponent(currentPath);
+        
+        // Немедленный редирект без задержки
+        window.location.replace(targetUrl);
+    </script>
+</body>
+</html>

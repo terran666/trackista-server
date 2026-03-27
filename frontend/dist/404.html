@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>404 - Page Not Found | Trackista</title>
+  <style>
+    body {
+      background-color: #0b1220;
+      color: #e5e7eb;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 50px;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 4rem;
+      color: #3b82f6;
+      margin-bottom: 1rem;
+    }
+    h2 {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
+    p {
+      font-size: 1.2rem;
+      margin-bottom: 2rem;
+    }
+    .btn {
+      display: inline-block;
+      background-color: #3b82f6;
+      color: white;
+      padding: 12px 24px;
+      text-decoration: none;
+      border-radius: 5px;
+      font-size: 1.1rem;
+    }
+    .btn:hover {
+      background-color: #2563eb;
+    }
+  </style>
+  <script>
+    // Автоматическая переадресация для SPA маршрутов
+    (function() {
+      var path = window.location.pathname;
+      var validRoutes = [
+        '/',
+        '/screener', 
+        '/correlations',
+        '/signals',
+        '/heatmap',
+        '/alerts',
+        '/scanner',
+        '/monitor'
+      ];
+      
+      if (validRoutes.includes(path)) {
+        window.location.replace('/');
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>404</h1>
+    <h2>Страница не найдена</h2>
+    <p>Извините, запрашиваемая страница не существует.</p>
+    <a href="/" class="btn">Вернуться на главную</a>
+  </div>
+</body>
+</html>

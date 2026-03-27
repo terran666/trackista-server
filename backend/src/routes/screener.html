@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trackista — Скринер</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#0f1117; color:#e2e8f0; font-family:'Inter',system-ui,sans-serif; }
+  .card { background:#1a1f2e; border:1px solid #2d3748; border-radius:8px; }
+  .label { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#718096; }
+  .pos { color:#68d391; }
+  .neg { color:#fc8181; }
+  .neu { color:#90cdf4; }
+
+  /* Modal */
+  .modal-bg  { position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;display:flex;align-items:center;justify-content:center;}
+  .modal-box { background:#1a1f2e;border:1px solid #3d4a63;border-radius:12px;width:560px;max-width:95vw;max-height:90vh;overflow-y:auto;padding:0;}
+
+  /* Filter row */
+  .f-row { display:flex;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid #2d3748;}
+  .f-row:last-child { border-bottom:none; }
+  .f-toggle { margin-top:3px;flex-shrink:0;width:18px;height:18px;accent-color:#63b3ed;cursor:pointer;}
+  .f-body { flex:1;min-width:0; }
+  .f-body.disabled { opacity:.35;pointer-events:none; }
+  .f-title { font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:6px;}
+  .f-controls { display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+
+  /* Inputs */
+  .inp { background:#252e3f;border:1px solid #3d4a63;color:#e2e8f0;border-radius:5px;padding:4px 8px;font-size:12px;width:96px;}
+  .inp:focus { outline:none;border-color:#63b3ed; }
+  .inp.wide { width:130px; }
+  .sel { background:#252e3f;border:1px solid #3d4a63;color:#e2e8f0;border-radius:5px;padding:4px 8px;font-size:12px;cursor:pointer; }
+  .sel:focus { outline:none;border-color:#63b3ed; }
+
+  /* Radio group */
+  .radio-grp { display:flex;gap:6px; }
+  .radio-btn { background:#252e3f;border:1px solid #3d4a63;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer;color:#a0aec0;transition:all .15s; }
+  .radio-btn.active { background:#2a4a7f;border-color:#63b3ed;color:#90cdf4; }
+
+  /* Presets */
+  .preset-btn { background:#1e2535;border:1px solid #3d4a63;border-radius:6px;padding:5px 14px;font-size:12px;color:#90cdf4;cursor:pointer;transition:all .15s;}
+  .preset-btn:hover { background:#253048;border-color:#63b3ed; }
+
+  /* Table */
+  table { width:100%;border-collapse:collapse;font-size:12px; }
+  th { padding:6px 8px;text-align:left;color:#718096;font-weight:500;font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid #2d3748;position:sticky;top:0;background:#0f1117;z-index:1;}
+  td { padding:6px 8px;border-bottom:1px solid #1a2030; }
+  tr:hover td { background:#1a2030; }
+
+  /* Badge */
+  .badge { display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600; }
+  .badge-up   { background:#1a3a25;color:#68d391; }
+  .badge-down { background:#3d1a1a;color:#fc8181; }
+  .badge-neu  { background:#1e2535;color:#718096; }
+
+  /* Scroll */
+  ::-webkit-scrollbar { width:6px;height:6px; }
+  ::-webkit-scrollbar-track { background:#0f1117; }
+  ::-webkit-scrollbar-thumb { background:#3d4a63;border-radius:3px; }
+
+  .spin { animation:spin 1s linear infinite;display:inline-block; }
+  @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  .data-win { font-size:10px;background:#1e3a28;color:#68d391;padding:2px 7px;border-radius:10px;}
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- Header -->
+<div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+  <div class="flex items-center gap-3">
+    <span class="text-base font-bold text-white">⚡ Скринер</span>
+    <span class="data-win">1m live</span>
+    <span id="count-badge" class="text-xs text-gray-500"></span>
+  </div>
+  <div class="flex items-center gap-3">
+    <select id="sortBy" class="sel text-xs" onchange="applyFilters()">
+      <option value="priceChange">Сорт: Изменение цены</option>
+      <option value="volume">Сорт: Объём 1m</option>
+      <option value="trades">Сорт: Сделки 1m</option>
+      <option value="spike">Сорт: Спайк объёма</option>
+      <option value="impulse">Сорт: Импульс</option>
+    </select>
+    <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+      <input type="checkbox" id="autoRefresh" checked class="accent-blue-500">Авто
+    </label>
+    <button onclick="openModal()" class="bg-blue-700 hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded flex items-center gap-1.5">
+      ☰ Фильтры<span id="active-count" class="bg-blue-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center hidden">0</span>
+    </button>
+    <span id="spinner" class="text-blue-400 hidden">⟳</span>
+  </div>
+</div>
+
+<!-- Table -->
+<div class="overflow-x-auto">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Монета</th>
+        <th>Цена</th>
+        <th>Изм 1m %</th>
+        <th>Объём 1m</th>
+        <th>Сделок 1m</th>
+        <th>Спайк объёма</th>
+        <th>Дельта 1m</th>
+        <th>Импульс</th>
+        <th>In-Play</th>
+      </tr>
+    </thead>
+    <tbody id="table-body">
+      <tr><td colspan="10" class="text-center text-gray-500 py-8">Загрузка...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════ FILTER MODAL ═══════════════════════════ -->
+<div id="modal" class="modal-bg hidden" onclick="if(event.target===this)closeModal()">
+  <div class="modal-box">
+    <!-- Modal header -->
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+      <span class="font-bold text-white">Фильтры Скринера</span>
+      <button onclick="closeModal()" class="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+    </div>
+
+    <!-- Filters body -->
+    <div class="px-5 py-4">
+      <div class="text-xs text-gray-500 mb-4">Все включённые фильтры работают как AND-логика. Данные — 1m скользящее окно.</div>
+
+      <!-- 1. Price change -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-price-en" onchange="toggleFilter('price')">
+        <div class="f-body" id="f-price-body">
+          <div class="f-title">Изменение цены</div>
+          <div class="f-controls">
+            <div class="radio-grp" id="price-dir-grp">
+              <div class="radio-btn active" data-val="any" onclick="setRadio('price-dir',this)">Любое</div>
+              <div class="radio-btn" data-val="up" onclick="setRadio('price-dir',this)">▲ Рост</div>
+              <div class="radio-btn" data-val="down" onclick="setRadio('price-dir',this)">▼ Падение</div>
+            </div>
+            <span class="text-gray-500 text-xs">от</span>
+            <input type="number" id="price-min" class="inp" placeholder="мин %" value="2" min="0" step="0.1">
+            <span class="text-gray-500 text-xs">до</span>
+            <input type="number" id="price-max" class="inp" placeholder="макс %" min="0" step="0.1">
+            <span class="text-gray-400 text-xs">%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Volume growth -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-volg-en" onchange="toggleFilter('volg')">
+        <div class="f-body" id="f-volg-body">
+          <div class="f-title">Рост объёма</div>
+          <div class="f-controls">
+            <span class="text-gray-500 text-xs">Минимальный рост</span>
+            <input type="number" id="volg-min" class="inp" placeholder="%" value="200" min="0" step="10">
+            <span class="text-gray-400 text-xs">%</span>
+            <span class="text-gray-500 text-xs ml-2">(спайк ≥ <span id="spike-preview">3.0</span>×)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Trades count -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-trades-en" onchange="toggleFilter('trades')">
+        <div class="f-body" id="f-trades-body">
+          <div class="f-title">Количество сделок (1m)</div>
+          <div class="f-controls">
+            <span class="text-gray-500 text-xs">Не меньше</span>
+            <input type="number" id="trades-min" class="inp wide" placeholder="кол-во" value="10000" min="0" step="1000">
+            <span class="text-gray-400 text-xs">сделок</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Turnover -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-turn-en" onchange="toggleFilter('turn')">
+        <div class="f-body" id="f-turn-body">
+          <div class="f-title">Объём торгов (1m, USDT)</div>
+          <div class="f-controls">
+            <span class="text-gray-500 text-xs">Не меньше</span>
+            <input type="number" id="turn-min" class="inp wide" placeholder="USDT" value="500000" min="0" step="100000">
+            <span class="text-gray-400 text-xs">USDT</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. Vol 24h -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-v24-en" onchange="toggleFilter('v24')">
+        <div class="f-body" id="f-v24-body">
+          <div class="f-title">24ч объём (USDT)</div>
+          <div class="f-controls">
+            <span class="text-gray-500 text-xs">Не меньше</span>
+            <input type="number" id="v24-min" class="inp wide" placeholder="USDT" value="50000000" min="0" step="10000000">
+            <span class="text-gray-400 text-xs">USDT</span>
+            <div class="radio-grp ml-2" id="v24-preset-grp">
+              <div class="radio-btn" onclick="setV24(10e6)">10M</div>
+              <div class="radio-btn" onclick="setV24(50e6)">50M</div>
+              <div class="radio-btn" onclick="setV24(100e6)">100M</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Market type -->
+      <div class="f-row">
+        <input type="checkbox" class="f-toggle" id="f-mkt-en" checked onchange="toggleFilter('mkt')">
+        <div class="f-body" id="f-mkt-body">
+          <div class="f-title">Тип рынка</div>
+          <div class="f-controls">
+            <div class="radio-grp" id="mkt-grp">
+              <div class="radio-btn active" data-val="futures" onclick="setRadio('mkt',this)">Только фьючерсы</div>
+              <div class="radio-btn" data-val="spot" onclick="setRadio('mkt',this)">Только спот</div>
+              <div class="radio-btn" data-val="both" onclick="setRadio('mkt',this)">Оба</div>
+            </div>
+          </div>
+          <div class="text-xs text-gray-600 mt-1">Сейчас доступны только фьючерсы</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Presets -->
+    <div class="px-5 pb-4 border-t border-gray-700 pt-4">
+      <div class="text-xs text-gray-500 mb-3">Быстрые пресеты</div>
+      <div class="flex flex-wrap gap-2">
+        <button class="preset-btn" onclick="applyPreset('pump')">🚀 Памп</button>
+        <button class="preset-btn" onclick="applyPreset('dump')">📉 Дамп</button>
+        <button class="preset-btn" onclick="applyPreset('active')">⚡ Активные</button>
+        <button class="preset-btn" onclick="applyPreset('liquid')">💧 Только ликвидные</button>
+        <button class="preset-btn" onclick="applyPreset('all')">🔄 Все монеты</button>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="flex justify-between items-center px-5 py-4 border-t border-gray-700">
+      <button onclick="resetFilters()" class="text-xs text-gray-400 hover:text-white border border-gray-600 rounded px-4 py-2 hover:border-gray-400 transition-colors">
+        Сбросить
+      </button>
+      <button onclick="applyFilters();closeModal()" class="bg-blue-600 hover:bg-blue-500 text-white text-sm px-6 py-2 rounded font-medium transition-colors">
+        Применить
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────
+const STATE = {
+  price:    { enabled: false, dir: 'any',     minPct: 2,        maxPct: null },
+  volg:     { enabled: false, minPct: 200 },
+  trades:   { enabled: false, minCount: 10000 },
+  turn:     { enabled: false, minUsdt: 500000 },
+  v24:      { enabled: false, minUsdt: 50e6 },
+  market:   { enabled: true,  value: 'futures' },
+};
+
+let autoTimer = null;
+
+// ─── Radio helpers ────────────────────────────────────────────────
+function setRadio(grpId, el) {
+  document.querySelectorAll(`#${grpId}-grp .radio-btn`).forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+function getRadioVal(grpId) {
+  const el = document.querySelector(`#${grpId}-grp .radio-btn.active`);
+  return el ? el.dataset.val : null;
+}
+
+function setV24(val) {
+  document.getElementById('v24-min').value = val;
+}
+
+// ─── Toggle filter rows ───────────────────────────────────────────
+function toggleFilter(key) {
+  const id = `f-${key}`;
+  const en = document.getElementById(`${id}-en`).checked;
+  const body = document.getElementById(`${id}-body`);
+  if (en) body.classList.remove('disabled');
+  else    body.classList.add('disabled');
+  updateActiveCount();
+}
+
+function updateActiveCount() {
+  const keys = ['price','volg','trades','turn','v24'];
+  const n = keys.filter(k => document.getElementById(`f-${k}-en`)?.checked).length;
+  const badge = document.getElementById('active-count');
+  badge.textContent = n;
+  if (n > 0) badge.classList.remove('hidden');
+  else        badge.classList.add('hidden');
+}
+
+// ─── Spike preview ────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('volg-min').addEventListener('input', e => {
+    const r = 1 + parseFloat(e.target.value || 0) / 100;
+    document.getElementById('spike-preview').textContent = r.toFixed(1);
+  });
+  // init disabled states
+  ['price','volg','trades','turn','v24'].forEach(k => {
+    document.getElementById(`f-${k}-body`).classList.add('disabled');
+  });
+  startAutoRefresh();
+  applyFilters();
+});
+
+// ─── Build filter object ──────────────────────────────────────────
+function buildFilters() {
+  const priceEn  = document.getElementById('f-price-en').checked;
+  const volgEn   = document.getElementById('f-volg-en').checked;
+  const tradesEn = document.getElementById('f-trades-en').checked;
+  const turnEn   = document.getElementById('f-turn-en').checked;
+  const v24En    = document.getElementById('f-v24-en').checked;
+
+  const params = new URLSearchParams();
+  params.set('sortBy', document.getElementById('sortBy').value);
+  params.set('limit', '200');
+
+  if (priceEn) {
+    const dir    = getRadioVal('price-dir') || 'any';
+    const minPct = parseFloat(document.getElementById('price-min').value) || 0;
+    const maxPct = parseFloat(document.getElementById('price-max').value) || 0;
+    params.set('priceDir', dir);
+    if (minPct > 0) params.set('priceMinPct', minPct);
+    if (maxPct > 0) params.set('priceMaxPct', maxPct);
+  }
+  if (volgEn) {
+    const v = parseFloat(document.getElementById('volg-min').value) || 0;
+    if (v > 0) params.set('volumeGrowthMin', v);
+  }
+  if (tradesEn) {
+    const v = parseInt(document.getElementById('trades-min').value) || 0;
+    if (v > 0) params.set('tradesMin', v);
+  }
+  if (turnEn) {
+    const v = parseFloat(document.getElementById('turn-min').value) || 0;
+    if (v > 0) params.set('turnoverMin', v);
+  }
+  if (v24En) {
+    const v = parseFloat(document.getElementById('v24-min').value) || 0;
+    if (v > 0) params.set('vol24hMin', v);
+  }
+
+  return params;
+}
+
+// ─── Apply filters + fetch ────────────────────────────────────────
+async function applyFilters() {
+  document.getElementById('spinner').classList.remove('hidden');
+  try {
+    const params = buildFilters();
+    const res  = await fetch(`/api/screener/symbols?${params.toString()}`);
+    const data = await res.json();
+    renderTable(data.rows || [], data.totalScanned || 0);
+  } catch(e) {
+    console.error('screener fetch error:', e);
+  } finally {
+    document.getElementById('spinner').classList.add('hidden');
+  }
+}
+
+// ─── Render table ─────────────────────────────────────────────────
+const fmt = Intl.NumberFormat('en-US', { notation:'compact', maximumFractionDigits:1 });
+const fmtN = n => n == null ? '—' : fmt.format(n);
+
+function renderTable(items, total) {
+  document.getElementById('count-badge').textContent =
+    `Показано ${items.length} из ${total} монет`;
+
+  const tbody = document.getElementById('table-body');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-gray-500 py-8">Нет монет по выбранным фильтрам</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = items.map((r, i) => {
+    const pct     = r.priceChangePct;
+    const pctCls  = pct > 0 ? 'pos' : pct < 0 ? 'neg' : 'neu';
+    const pctStr  = (pct > 0 ? '+' : '') + pct.toFixed(3) + '%';
+    const dir     = r.priceChangePct > 0 ? 'up' : r.priceChangePct < 0 ? 'down' : 'neu';
+    const dirLabel = dir === 'up' ? '▲' : dir === 'down' ? '▼' : '—';
+    const delta   = r.deltaUsdt60s;
+    const deltaCls= delta > 0 ? 'pos' : delta < 0 ? 'neg' : 'neu';
+    const spike   = r.volumeSpikeRatio60s;
+    const spikeCls= spike >= 3 ? 'pos' : spike >= 1.5 ? 'neu' : 'text-gray-500';
+    const impDir  = r.impulseDirection || 'neutral';
+    const impCls  = impDir === 'up' ? 'pos' : impDir === 'down' ? 'neg' : 'neu';
+
+    return `<tr>
+      <td class="text-gray-600">${i + 1}</td>
+      <td class="font-semibold text-white">${r.symbol.replace('USDT','')}<span class="text-gray-600 font-normal">/USDT</span></td>
+      <td class="text-gray-300">${r.lastPrice.toLocaleString('en-US', { maximumSignificantDigits: 6 })}</td>
+      <td class="${pctCls} font-semibold">
+        <span class="badge badge-${dir}">${dirLabel} ${Math.abs(pct).toFixed(3)}%</span>
+      </td>
+      <td class="text-gray-300">${fmtN(r.volumeUsdt60s)}</td>
+      <td class="text-gray-300">${fmtN(r.tradeCount60s)}</td>
+      <td class="${spikeCls} font-semibold">${spike >= 1 ? spike.toFixed(2) + '×' : '—'}</td>
+      <td class="${deltaCls}">${delta > 0 ? '+' : ''}${fmtN(delta)}</td>
+      <td class="${impCls}">${r.impulseScore?.toFixed(0) ?? '—'}</td>
+      <td class="text-gray-300">${r.inPlayScore?.toFixed(0) ?? '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ─── Presets ──────────────────────────────────────────────────────
+function applyPreset(name) {
+  resetFilters(false);
+
+  if (name === 'pump') {
+    document.getElementById('f-price-en').checked = true;
+    toggleFilter('price');
+    setRadioByVal('price-dir', 'up');
+    document.getElementById('price-min').value = 2;
+
+    document.getElementById('f-volg-en').checked = true;
+    toggleFilter('volg');
+    document.getElementById('volg-min').value = 150;
+    document.getElementById('spike-preview').textContent = '2.5';
+
+    document.getElementById('f-trades-en').checked = true;
+    toggleFilter('trades');
+    document.getElementById('trades-min').value = 5000;
+
+  } else if (name === 'dump') {
+    document.getElementById('f-price-en').checked = true;
+    toggleFilter('price');
+    setRadioByVal('price-dir', 'down');
+    document.getElementById('price-min').value = 2;
+
+    document.getElementById('f-volg-en').checked = true;
+    toggleFilter('volg');
+    document.getElementById('volg-min').value = 150;
+    document.getElementById('spike-preview').textContent = '2.5';
+
+    document.getElementById('f-trades-en').checked = true;
+    toggleFilter('trades');
+    document.getElementById('trades-min').value = 5000;
+
+  } else if (name === 'active') {
+    document.getElementById('f-turn-en').checked = true;
+    toggleFilter('turn');
+    document.getElementById('turn-min').value = 1000000;
+
+    document.getElementById('f-trades-en').checked = true;
+    toggleFilter('trades');
+    document.getElementById('trades-min').value = 10000;
+
+    document.getElementById('sortBy').value = 'volume';
+
+  } else if (name === 'liquid') {
+    document.getElementById('f-v24-en').checked = true;
+    toggleFilter('v24');
+    document.getElementById('v24-min').value = 100e6;
+
+    document.getElementById('sortBy').value = 'volume';
+  }
+  // 'all' = reset only (already done)
+
+  updateActiveCount();
+  applyFilters();
+  closeModal();
+}
+
+function setRadioByVal(grpId, val) {
+  const btns = document.querySelectorAll(`#${grpId}-grp .radio-btn`);
+  btns.forEach(b => {
+    if (b.dataset.val === val) b.classList.add('active');
+    else b.classList.remove('active');
+  });
+}
+
+// ─── Reset ────────────────────────────────────────────────────────
+function resetFilters(refresh = true) {
+  ['price','volg','trades','turn','v24'].forEach(k => {
+    const el = document.getElementById(`f-${k}-en`);
+    if (el) el.checked = false;
+    const body = document.getElementById(`f-${k}-body`);
+    if (body) body.classList.add('disabled');
+  });
+  // Reset defaults
+  document.getElementById('price-min').value = 2;
+  document.getElementById('price-max').value = '';
+  setRadioByVal('price-dir', 'any');
+  document.getElementById('volg-min').value = 200;
+  document.getElementById('spike-preview').textContent = '3.0';
+  document.getElementById('trades-min').value = 10000;
+  document.getElementById('turn-min').value = 500000;
+  document.getElementById('v24-min').value = 50000000;
+  document.getElementById('sortBy').value = 'priceChange';
+  updateActiveCount();
+  if (refresh) applyFilters();
+}
+
+// ─── Modal open/close ─────────────────────────────────────────────
+function openModal()  { document.getElementById('modal').classList.remove('hidden'); }
+function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+
+// ─── Auto-refresh ─────────────────────────────────────────────────
+function startAutoRefresh() {
+  const cb = document.getElementById('autoRefresh');
+  cb.addEventListener('change', () => {
+    if (cb.checked) {
+      autoTimer = setInterval(applyFilters, 5000);
+    } else {
+      clearInterval(autoTimer);
+    }
+  });
+  autoTimer = setInterval(applyFilters, 5000);
+}
+</script>
+</body>
+</html>

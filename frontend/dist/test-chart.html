@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тестовый график с уровнями</title>
+    <link rel="preconnect" href="https://unpkg.com">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0e1117;
+            color: #e5e7eb;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 16px;
+        }
+        header { display: flex; align-items: center; gap: 12px; }
+        a { color: #8ab4ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        button {
+            padding: 8px 12px;
+            border: 1px solid #394457;
+            background: #1a2233;
+            color: #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+        button:hover { background: #222c40; border-color: #556583; }
+        button:active { background: #2c3650; }
+        .chart-wrap {
+            border: 1px solid #2a3243;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #0f1624;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+            flex: 1;
+            min-height: 520px;
+        }
+        #chart { width: 100%; height: 100%; min-height: 520px; }
+        .note { color: #9aa5b5; font-size: 14px; }
+        .badge { padding: 3px 8px; border-radius: 999px; background: #1f2a3d; border: 1px solid #30415a; color: #8ab4ff; }
+    </style>
+</head>
+<body>
+    <header>
+        <a href="/">← Назад</a>
+        <span class="badge">Demo</span>
+        <h1 style="margin: 0; font-size: 18px; font-weight: 600;">График с уровнями (KLineCharts)</h1>
+    </header>
+
+    <div class="toolbar">
+        <button id="toggle-levels">Показать уровни</button>
+        <button id="refresh-levels">Обновить уровни</button>
+        <span class="note">Синтетические данные + горизонтальные линии уровней.</span>
+    </div>
+
+    <div class="chart-wrap">
+        <div id="chart"></div>
+    </div>
+
+    <script src="https://unpkg.com/klinecharts@9.8.9/dist/klinecharts.min.js"></script>
+    <script>
+        const { init } = window.klinecharts || {};
+        if (!init) {
+            document.getElementById('chart').innerText = 'Не удалось загрузить klinecharts';
+        } else {
+            const chart = init(document.getElementById('chart'), {
+                styles: {
+                    candle: { type: 'candle_solid' },
+                    grid: { horizontal: { color: '#1f2734' }, vertical: { color: '#1f2734' } }
+                }
+            });
+
+            const bars = generateBars(200);
+            chart.applyNewData(bars);
+            chart.setPriceVolumePrecision(2, 0);
+            chart.setBarSpace(6);
+            chart.scrollToRealTime();
+
+            // === Магнитный курсор (простой демо-вариант) ===
+            function roundToTick(price, tickSize) {
+                if (!tickSize || tickSize <= 0) return price;
+                return Math.round(price / tickSize) * tickSize;
+            }
+
+            function pickMagnetPrice(bar, mousePrice, mode) {
+                if (mode === 'CLOSE') return bar.close;
+                if (mode === 'HIGH_LOW') {
+                    return Math.abs(bar.high - mousePrice) < Math.abs(bar.low - mousePrice) ? bar.high : bar.low;
+                }
+                // AUTO: ближайшее из OHLC
+                const candidates = [bar.open, bar.high, bar.low, bar.close];
+                return candidates.reduce((prev, curr) =>
+                    Math.abs(curr - mousePrice) < Math.abs(prev - mousePrice) ? curr : prev
+                );
+            }
+
+            function findCandlePaneId(chartInstance) {
+                try {
+                    const inds = (chartInstance.getIndicators && chartInstance.getIndicators()) || [];
+                    const paneIds = Array.from(new Set(inds.map(i => i && i.paneId).filter(Boolean)));
+
+                    if (paneIds.length === 0) {
+                        const testEl1 = chartInstance.getDom && chartInstance.getDom('', 'main');
+                        if (testEl1) return '';
+
+                        const testEl2 = chartInstance.getDom && chartInstance.getDom(undefined, 'main');
+                        if (testEl2) return undefined;
+
+                        const testEl3 = chartInstance.getDom && chartInstance.getDom(null, 'main');
+                        if (testEl3) return null;
+
+                        const testEl4 = chartInstance.getDom && chartInstance.getDom('candle_pane', 'main');
+                        if (testEl4) return 'candle_pane';
+
+                        return undefined;
+                    }
+
+                    if (paneIds.length === 1) {
+                        return paneIds[0];
+                    }
+
+                    let bestId = paneIds[0];
+                    let bestH = -1;
+                    for (const id of paneIds) {
+                        const el = (chartInstance.getDom && chartInstance.getDom(id, 'main')) || null;
+                        const h = el && el.getBoundingClientRect ? el.getBoundingClientRect().height : 0;
+                        if (h > bestH) {
+                            bestH = h;
+                            bestId = id;
+                        }
+                    }
+                    return bestId;
+                } catch (e) {
+                    return undefined;
+                }
+            }
+
+            function setupMagnetCursor(chartInstance, data) {
+                const candlePaneId = findCandlePaneId(chartInstance);
+                const container = candlePaneId != null
+                    ? (chartInstance.getDom && chartInstance.getDom(candlePaneId, 'main'))
+                    : (chartInstance.getDom && chartInstance.getDom(undefined, 'main'));
+
+                if (!container) {
+                    console.warn('[test-chart] Не удалось найти candle pane для магнита');
+                    return;
+                }
+
+                const magnetOverlayId = 'magnet_cursor_line';
+
+                chartInstance.createOverlay && chartInstance.createOverlay({
+                    name: 'horizontalStraightLine',
+                    id: magnetOverlayId,
+                    lock: true,
+                    visible: false,
+                    styles: {
+                        line: {
+                            color: '#2196F3',
+                            size: 1,
+                            style: 'dashed'
+                        }
+                    },
+                    points: [{ value: 0 }]
+                });
+
+                function getLocalPoint(e, el) {
+                    const r = el.getBoundingClientRect();
+                    const x = e.clientX - r.left;
+                    const y = e.clientY - r.top;
+                    const xClamped = Math.max(0, Math.min(x, r.width));
+                    const yClamped = Math.max(0, Math.min(y, r.height));
+                    return { x: xClamped, y: yClamped, rect: r, raw: { x, y } };
+                }
+
+                let raf = 0;
+
+                function handleMove(e) {
+                    const p = getLocalPoint(e, container);
+                    const inBounds = p.raw.x >= 0 && p.raw.x <= p.rect.width &&
+                                    p.raw.y >= 0 && p.raw.y <= p.rect.height;
+
+                    if (!inBounds) {
+                        chartInstance.overrideOverlay && chartInstance.overrideOverlay({
+                            id: magnetOverlayId,
+                            visible: false
+                        });
+                        return;
+                    }
+
+                    const conv = chartInstance.convertFromPixel && chartInstance.convertFromPixel(
+                        { x: p.x, y: p.y },
+                        { paneId: candlePaneId, absolute: true }
+                    );
+
+                    const dataIndex = conv && typeof conv.dataIndex === 'number' ? conv.dataIndex : undefined;
+                    const mousePrice = conv && typeof conv.value === 'number' ? conv.value : undefined;
+
+                    if (dataIndex == null || mousePrice == null) {
+                        chartInstance.overrideOverlay && chartInstance.overrideOverlay({
+                            id: magnetOverlayId,
+                            visible: false
+                        });
+                        return;
+                    }
+
+                    const list = (chartInstance.getDataList && chartInstance.getDataList()) || data || [];
+                    const bar = list[dataIndex];
+                    if (!bar) {
+                        chartInstance.overrideOverlay && chartInstance.overrideOverlay({
+                            id: magnetOverlayId,
+                            visible: false
+                        });
+                        return;
+                    }
+
+                    let magnetPrice = pickMagnetPrice(bar, mousePrice, 'AUTO');
+                    magnetPrice = roundToTick(magnetPrice, undefined);
+
+                    chartInstance.overrideOverlay && chartInstance.overrideOverlay({
+                        id: magnetOverlayId,
+                        visible: true,
+                        points: [{ value: magnetPrice }]
+                    });
+                }
+
+                function handleMoveRaf(e) {
+                    if (raf) return;
+                    raf = requestAnimationFrame(() => {
+                        raf = 0;
+                        handleMove(e);
+                    });
+                }
+
+                function handleLeave() {
+                    chartInstance.overrideOverlay && chartInstance.overrideOverlay({
+                        id: magnetOverlayId,
+                        visible: false
+                    });
+                }
+
+                container.addEventListener('pointermove', handleMoveRaf, { passive: true });
+                container.addEventListener('pointerleave', handleLeave);
+            }
+
+            setupMagnetCursor(chart, bars);
+
+            let levelIds = [];
+            const levels = () => buildLevelsFromData(bars);
+
+            function clearLevels() {
+                levelIds.forEach(id => {
+                    try { chart.removeOverlay?.(id); } catch (_) {}
+                    try { chart.removeOverlay?.({ id }); } catch (_) {}
+                });
+                levelIds = [];
+            }
+
+            function drawLevels() {
+                clearLevels();
+                const data = levels();
+                levelIds = data.map((lvl, idx) => chart.createOverlay?.({
+                    name: 'horizontalStraightLine',
+                    extendData: { label: lvl.label },
+                    points: [{ value: lvl.value }],
+                    styles: {
+                        line: { color: lvl.color, size: 1.4, style: idx === 0 ? 'solid' : 'dash' },
+                        text: { color: lvl.color, backgroundColor: 'rgba(10,15,25,0.7)' }
+                    }
+                }));
+                document.getElementById('toggle-levels').innerText = 'Скрыть уровни';
+            }
+
+            function buildLevelsFromData(data) {
+                const closes = data.map(b => b.close);
+                const max = Math.max(...closes);
+                const min = Math.min(...closes);
+                const mid = (max + min) / 2;
+                return [
+                    { label: 'Сопротивление', value: max, color: '#ff6b6b' },
+                    { label: 'Середина', value: mid, color: '#ffd166' },
+                    { label: 'Поддержка', value: min, color: '#22d1a2' }
+                ];
+            }
+
+            function generateBars(count) {
+                const arr = [];
+                let t = Date.now() - count * 60_000;
+                let price = 50000;
+                for (let i = 0; i < count; i++) {
+                    const open = price;
+                    const change = (Math.random() - 0.5) * 200;
+                    const close = Math.max(20000, open + change);
+                    const high = Math.max(open, close) + Math.random() * 80;
+                    const low = Math.min(open, close) - Math.random() * 80;
+                    const volume = Math.round(100 + Math.random() * 900);
+                    arr.push({ timestamp: t, open, high, low, close, volume });
+                    t += 60_000;
+                    price = close;
+                }
+                return arr;
+            }
+
+            drawLevels();
+
+            const toggleBtn = document.getElementById('toggle-levels');
+            toggleBtn.addEventListener('click', () => {
+                if (levelIds.length) {
+                    clearLevels();
+                    toggleBtn.innerText = 'Показать уровни';
+                } else {
+                    drawLevels();
+                }
+            });
+
+            document.getElementById('refresh-levels').addEventListener('click', () => {
+                const jitter = () => (Math.random() - 0.5) * 120;
+                const mutated = bars.map(b => ({ ...b, close: Math.max(20000, b.close + jitter()) }));
+                mutated.forEach((b, i) => {
+                    b.high = Math.max(mutated[i].close, mutated[i].open) + Math.random() * 60;
+                    b.low = Math.min(mutated[i].close, mutated[i].open) - Math.random() * 60;
+                });
+                chart.applyNewData(mutated);
+                drawLevels();
+            });
+        }
+    </script>
+</body>
+</html>

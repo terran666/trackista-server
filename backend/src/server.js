@@ -523,6 +523,9 @@ const VALID_SOUND_PRESETS  = new Set([
 const VALID_DISPLAY_SCOPES = new Set(['tab', 'all_tabs', 'system', 'telegram']);
 
 app.patch('/api/manual-levels/:id/watch', (req, res) => {
+  if (typeof req.params.id === 'string' && req.params.id.startsWith('local_')) {
+    return res.status(404).json({ success: false, error: 'Level not found (local id not yet synced)' });
+  }
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
 

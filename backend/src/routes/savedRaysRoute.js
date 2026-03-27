@@ -2,7 +2,7 @@
 
 const store = require('../services/savedRaysStore');
 
-const VALID_MARKET_TYPES = new Set(['spot', 'futures']);
+const VALID_MARKET_TYPES = new Set(['spot', 'futures', 'synthetic']);
 const VALID_SIDES        = new Set(['support', 'resistance']);
 const VALID_SHAPES       = new Set(['horizontal', 'sloped']);
 const VALID_KINDS        = new Set(['ray', 'line', 'level', 'extreme']);
@@ -212,6 +212,9 @@ function deleteOneHandler(req, res) {
 // Response 200: { success: true, ray: Ray }
 // Response 404: { success: false, error: 'Saved ray not found' }
 function patchOneHandler(req, res) {
+  if (typeof req.params.id === 'string' && req.params.id.startsWith('local_')) {
+    return res.status(404).json({ success: false, error: 'Saved ray not found (local id not yet synced)' });
+  }
   const id = parseInt(req.params.id, 10);
   if (isNaN(id) || id <= 0) {
     return res.status(400).json({ success: false, error: 'Invalid id' });

@@ -128,11 +128,12 @@ function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimefra
  * Return saved rays filtered by symbol and marketType.
  * No tf filter — saved rays are tf-agnostic.
  */
-function getAll({ symbol, marketType } = {}) {
+function getAll({ symbol, marketType, source } = {}) {
   const store = readStore();
   return store.rays.filter(r => {
     if (symbol     && r.symbol     !== symbol.toUpperCase()) return false;
     if (marketType && r.marketType !== marketType)           return false;
+    if (source     && r.source     !== source)               return false;
     return true;
   });
 }

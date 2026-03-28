@@ -1,6 +1,6 @@
 'use strict';
 
-const store = require('../services/savedRaysStore');
+const store  = require('../services/savedRaysStore');
 
 const VALID_MARKET_TYPES = new Set(['spot', 'futures', 'synthetic']);
 const VALID_SIDES        = new Set(['support', 'resistance']);
@@ -155,7 +155,7 @@ function bulkHandler(req, res) {
 // Response 200:
 // { success: true, count: number, rays: Ray[] }
 function listHandler(req, res) {
-  const { symbol, marketType } = req.query;
+  const { symbol, marketType, source } = req.query;
 
   if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
     return res.status(400).json({ success: false, error: 'Query param symbol is required' });
@@ -168,8 +168,8 @@ function listHandler(req, res) {
   }
 
   try {
-    const rays = store.getAll({ symbol, marketType });
-    console.log(`[saved-rays] listed symbol=${symbol.toUpperCase()} marketType=${marketType} count=${rays.length}`);
+    const rays = store.getAll({ symbol, marketType, source: source || undefined });
+    console.log(`[saved-rays] listed symbol=${symbol.toUpperCase()} marketType=${marketType} source=${source || 'any'} count=${rays.length}`);
     for (const r of rays) {
       console.log(`[saved-rays] list id=${r.id} points=${JSON.stringify(r.points)} updatedAt=${r.updatedAt}`);
     }
@@ -329,6 +329,96 @@ function patchManyHandler(req, res) {
   }
 }
 
+// ─── PATCH /api/saved-rays/:id/watch ─────────────────────────────
+// Persists alertEnabled + watchMode + alertOptions into saved-rays.json.
+// Patchable fields: alertEnabled, watchMode, alertOptions, scenarioMode.
+function watchPatchHandler(req, res, watchLoader) {
+  if (typeof req.params.id === 'string' && req.params.id.startsWith('local_')) {
+    return res.status(404).json({ success: false, error: 'Level not found (local id not yet synced)' });
+  }
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id) || id <= 0) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const ray = store.getById(id);
+  if (!ray) return res.status(404).json({ success: false, error: 'Saved ray not found' });
+
+  const { watchEnabled, watchMode, alertOptions, scenarioMode } = req.body || {};
+
+  if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
+    return res.status(400).json({ success: false, error: 'watchEnabled must be a boolean' });
+  }
+  if (watchMode !== undefined && !(['off', 'simple'].includes(watchMode))) {
+    return res.status(400).json({ success: false, error: 'watchMode must be off or simple' });
+  }
+
+  const updates = {};
+  if (watchEnabled  !== undefined) updates.alertEnabled  = watchEnabled;
+  if (watchMode     !== undefined) updates.watchMode     = watchMode;
+  if (scenarioMode  !== undefined) updates.scenarioMode  = scenarioMode;
+  if (alertOptions !== undefined) {
+    updates.alertOptions = { ...(ray.alertOptions || {}), ...alertOptions };
+  }
+
+  const updated = store.patchOne(id, updates);
+  if (watchLoader) watchLoader.invalidate();
+
+  const ao = updated.alertOptions || {};
+  console.log(`[saved-rays] watch-patch id=${id} alertEnabled=${updated.alertEnabled} watchMode=${updated.watchMode || 'simple'}`);
+  return res.json({
+    success:     true,
+    levelId:     id,
+    watchEnabled: Boolean(updated.alertEnabled),
+    watchMode:   updated.watchMode || 'simple',
+    alertOptions: ao,
+  });
+}
+
+// ─── GET /api/saved-rays/:id/watch ───────────────────────────────
+function watchGetHandler(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id) || id <= 0) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const ray = store.getById(id);
+  if (!ray) return res.status(404).json({ success: false, error: 'Saved ray not found' });
+
+  const ao = ray.alertOptions || {};
+  return res.json({
+    success:      true,
+    levelId:      id,
+    watchEnabled: Boolean(ray.alertEnabled),
+    watchMode:    ray.watchMode || 'simple',
+    alertOptions: ao,
+  });
+}
+
+// ─── GET /api/saved-rays/:id/watch-state ─────────────────────────
+async function watchStateHandler(req, res, redis) {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id) || id <= 0) return res.status(400).json({ success: false, error: 'Invalid id' });
+
+  const ray = store.getById(id);
+  if (!ray) return res.status(404).json({ success: false, error: 'Saved ray not found' });
+
+  try {
+    const market = ray.marketType || 'futures';
+    const key    = `levelwatchstate:${market}:${ray.symbol}:sray-${id}`;
+    const raw    = await redis.get(key);
+    let   state  = null;
+    if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+    return res.json({
+      success:      true,
+      levelId:      id,
+      symbol:       ray.symbol,
+      watchEnabled: Boolean(ray.alertEnabled),
+      watchMode:    ray.watchMode || 'simple',
+      state,
+    });
+  } catch (err) {
+    console.error('[saved-rays] watch-state error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
 module.exports = {
   bulkHandler,
   listHandler,
@@ -336,4 +426,7 @@ module.exports = {
   patchOneHandler,
   deleteManyHandler,
   patchManyHandler,
+  watchPatchHandler,
+  watchGetHandler,
+  watchStateHandler,
 };

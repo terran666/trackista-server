@@ -13,7 +13,7 @@ const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOn
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
 const { bulkHandler: trackedRaysBulk, listHandler: trackedRaysList, deleteOneHandler: trackedRaysDeleteOne, deleteManyHandler: trackedRaysDeleteMany, patchOneHandler: trackedRaysPatchOne, patchManyHandler: trackedRaysPatchMany, lineValueHandler: trackedRaysLineValue } = require('./routes/trackedRaysRoute');
-const { bulkHandler: savedRaysBulk, listHandler: savedRaysList, deleteOneHandler: savedRaysDeleteOne, deleteManyHandler: savedRaysDeleteMany, patchOneHandler: savedRaysPatchOne, patchManyHandler: savedRaysPatchMany } = require('./routes/savedRaysRoute');
+const { bulkHandler: savedRaysBulk, listHandler: savedRaysList, deleteOneHandler: savedRaysDeleteOne, deleteManyHandler: savedRaysDeleteMany, patchOneHandler: savedRaysPatchOne, patchManyHandler: savedRaysPatchMany, watchPatchHandler: savedRaysWatchPatch, watchGetHandler: savedRaysWatchGet, watchStateHandler: savedRaysWatchState } = require('./routes/savedRaysRoute');
 const { createHandler: manualSlopedCreate, listHandler: manualSlopedList, deleteHandler: manualSlopedDelete, patchHandler: manualSlopedPatch, lineValueHandler: manualSlopedLineValue } = require('./routes/manualSlopedLevelsRoute');
 const { createLevelMonitorService }  = require('./services/levelMonitorService');
 const { createAlertEngineService }   = require('./services/alertEngineService');
@@ -714,12 +714,15 @@ app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');
-app.post('/api/saved-rays/bulk',        savedRaysBulk);
-app.get('/api/saved-rays',              savedRaysList);
-app.delete('/api/saved-rays/:id',       savedRaysDeleteOne);
-app.post('/api/saved-rays/delete-many', savedRaysDeleteMany);
-app.patch('/api/saved-rays/:id',        savedRaysPatchOne);
-app.post('/api/saved-rays/patch-many',  savedRaysPatchMany);
+app.post('/api/saved-rays/bulk',             savedRaysBulk);
+app.get('/api/saved-rays',                   savedRaysList);
+app.delete('/api/saved-rays/:id',            savedRaysDeleteOne);
+app.post('/api/saved-rays/delete-many',      savedRaysDeleteMany);
+app.patch('/api/saved-rays/:id/watch',       (req, res) => savedRaysWatchPatch(req, res, levelWatchEngine?.loader));
+app.get('/api/saved-rays/:id/watch',         savedRaysWatchGet);
+app.get('/api/saved-rays/:id/watch-state',   (req, res) => savedRaysWatchState(req, res, redis));
+app.patch('/api/saved-rays/:id',             savedRaysPatchOne);
+app.post('/api/saved-rays/patch-many',       savedRaysPatchMany);
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');

@@ -687,7 +687,7 @@ app.post('/api/tracked-levels/patch-many',  trackedLevelsPatchMany);
 
 // ─── Tracked extremes endpoints ──────────────────────────────────
 console.log('[backend] registering /api/tracked-extremes routes');
-app.post('/api/tracked-extremes/bulk',        trackedExtremesBulk);
+app.post('/api/tracked-extremes/bulk',        (req, res) => { trackedExtremesBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/tracked-extremes',              trackedExtremesList);
 app.delete('/api/tracked-extremes/:id',       trackedExtremesDeleteOne);
 app.post('/api/tracked-extremes/delete-many', trackedExtremesDeleteMany);
@@ -714,7 +714,7 @@ app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');
-app.post('/api/saved-rays/bulk',             savedRaysBulk);
+app.post('/api/saved-rays/bulk',             (req, res) => { savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/saved-rays',                   savedRaysList);
 app.delete('/api/saved-rays/:id',            savedRaysDeleteOne);
 app.post('/api/saved-rays/delete-many',      savedRaysDeleteMany);

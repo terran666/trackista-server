@@ -59,29 +59,49 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
     return { skipped: true, items: existing };
   }
 
+  // Snapshot of existing records — used to carry over user state (alertEnabled, tracked)
+  const prevRecords = store.extremes.filter(
+    e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source
+  );
+
+  // Match key: side + first-point timestamp (stable across minor price moves)
+  function lineKey(side, pts) {
+    const p0 = Array.isArray(pts) && pts[0];
+    return p0 ? `${side}:${p0.timestamp}` : null;
+  }
+  const prevByKey = new Map();
+  for (const rec of prevRecords) {
+    const k = lineKey(rec.side, rec.points);
+    if (k) prevByKey.set(k, rec);
+  }
+
   // Remove old snapshot for this combination
   store.extremes = store.extremes.filter(
     e => !(e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source)
   );
 
-  // Insert new records
-  const created = extremes.map(e => ({
-    id:           store.nextId++,
-    symbol:       sym,
-    marketType,
-    tf,
-    source,
-    side:         e.side,
-    type:         e.type         || null,
-    price:        e.price        != null ? parseFloat(e.price) : null,
-    points:       e.points       || null,
-    strength:     e.strength     != null ? parseFloat(e.strength) : null,
-    touches:      e.touches      != null ? parseInt(e.touches, 10) : null,
-    alertEnabled: false,
-    tracked:      false,
-    createdAt:    now,
-    updatedAt:    now,
-  }));
+  // Insert new records — carry over alertEnabled/tracked from matching previous record
+  const created = extremes.map(e => {
+    const k    = lineKey(e.side, e.points);
+    const prev = k ? prevByKey.get(k) : null;
+    return {
+      id:           store.nextId++,
+      symbol:       sym,
+      marketType,
+      tf,
+      source,
+      side:         e.side,
+      type:         e.type         || null,
+      price:        e.price        != null ? parseFloat(e.price) : null,
+      points:       e.points       || null,
+      strength:     e.strength     != null ? parseFloat(e.strength) : null,
+      touches:      e.touches      != null ? parseInt(e.touches, 10) : null,
+      alertEnabled: prev?.alertEnabled ?? false,
+      tracked:      prev?.tracked      ?? false,
+      createdAt:    prev?.createdAt    ?? now,
+      updatedAt:    now,
+    };
+  });
 
   store.extremes.push(...created);
   store.fingerprints[fpKey] = incoming;

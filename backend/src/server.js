@@ -39,6 +39,7 @@ const { runMigrations }             = require('./services/alertMigrations');
 const { runMoveMigrations }         = require('./services/moveMigrations');
 const { ensureBucket }              = require('./services/alertStorageService');
 const { createAuthRouter }          = require('./routes/authRoutes');
+const { authRequired }              = require('./middleware/authRequired');
 const { createPostsRouter }         = require('./routes/postsRoutes');
 const { createMoveDetectionService }    = require('./services/moveDetectionService');
 const { createPreEventService }         = require('./services/preEventService');
@@ -687,12 +688,12 @@ app.post('/api/tracked-levels/patch-many',  trackedLevelsPatchMany);
 
 // ─── Tracked extremes endpoints ──────────────────────────────────
 console.log('[backend] registering /api/tracked-extremes routes');
-app.post('/api/tracked-extremes/bulk',        (req, res) => { trackedExtremesBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.get('/api/tracked-extremes',              trackedExtremesList);
-app.delete('/api/tracked-extremes/:id',       trackedExtremesDeleteOne);
-app.post('/api/tracked-extremes/delete-many', trackedExtremesDeleteMany);
-app.patch('/api/tracked-extremes/:id',        (req, res) => { trackedExtremesPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.post('/api/tracked-extremes/patch-many',  (req, res) => { trackedExtremesPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/tracked-extremes/bulk',        authRequired, (req, res) => { trackedExtremesBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.get('/api/tracked-extremes',              authRequired, trackedExtremesList);
+app.delete('/api/tracked-extremes/:id',       authRequired, trackedExtremesDeleteOne);
+app.post('/api/tracked-extremes/delete-many', authRequired, trackedExtremesDeleteMany);
+app.patch('/api/tracked-extremes/:id',        authRequired, (req, res) => { trackedExtremesPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/tracked-extremes/patch-many',  authRequired, (req, res) => { trackedExtremesPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Tracked rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/tracked-rays routes');
@@ -714,15 +715,15 @@ app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');
-app.post('/api/saved-rays/bulk',             (req, res) => { savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.get('/api/saved-rays',                   savedRaysList);
-app.delete('/api/saved-rays/:id',            savedRaysDeleteOne);
-app.post('/api/saved-rays/delete-many',      savedRaysDeleteMany);
-app.patch('/api/saved-rays/:id/watch',       (req, res) => savedRaysWatchPatch(req, res, levelWatchEngine?.loader));
-app.get('/api/saved-rays/:id/watch',         savedRaysWatchGet);
-app.get('/api/saved-rays/:id/watch-state',   (req, res) => savedRaysWatchState(req, res, redis));
-app.patch('/api/saved-rays/:id',             savedRaysPatchOne);
-app.post('/api/saved-rays/patch-many',       savedRaysPatchMany);
+app.post('/api/saved-rays/bulk',             authRequired, (req, res) => { savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.get('/api/saved-rays',                   authRequired, savedRaysList);
+app.delete('/api/saved-rays/:id',            authRequired, savedRaysDeleteOne);
+app.post('/api/saved-rays/delete-many',      authRequired, savedRaysDeleteMany);
+app.patch('/api/saved-rays/:id/watch',       authRequired, (req, res) => savedRaysWatchPatch(req, res, levelWatchEngine?.loader));
+app.get('/api/saved-rays/:id/watch',         authRequired, savedRaysWatchGet);
+app.get('/api/saved-rays/:id/watch-state',   authRequired, (req, res) => savedRaysWatchState(req, res, redis));
+app.patch('/api/saved-rays/:id',             authRequired, savedRaysPatchOne);
+app.post('/api/saved-rays/patch-many',       authRequired, savedRaysPatchMany);
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');

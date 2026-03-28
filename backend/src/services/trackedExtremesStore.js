@@ -43,25 +43,27 @@ function writeStore(store) {
  * Replace all records for symbol+marketType+tf+source with a fresh set.
  * Returns the created records.
  */
-function bulkSave({ symbol, marketType, tf, source, extremes }) {
+function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
 
   if (!store.fingerprints) store.fingerprints = {};
-  const fpKey    = `${sym}:${marketType}:${tf}:${source}`;
+  const fpKey    = `${userId != null ? userId + ':' : ''}${sym}:${marketType}:${tf}:${source}`;
   const incoming = computeFingerprint(extremes);
 
   if (store.fingerprints[fpKey] === incoming) {
     const existing = store.extremes.filter(
-      e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source
+      e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source &&
+           (!userId || !e.userId || e.userId === userId)
     );
     return { skipped: true, items: existing };
   }
 
   // Snapshot of existing records — used to carry over user state (alertEnabled, tracked)
   const prevRecords = store.extremes.filter(
-    e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source
+    e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source &&
+         (!userId || !e.userId || e.userId === userId)
   );
 
   // Match key: side + first-point timestamp (stable across minor price moves)
@@ -75,9 +77,10 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
     if (k) prevByKey.set(k, rec);
   }
 
-  // Remove old snapshot for this combination
+  // Remove old snapshot for this combination (scoped to userId if present)
   store.extremes = store.extremes.filter(
-    e => !(e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source)
+    e => !(e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source &&
+           (!userId || !e.userId || e.userId === userId))
   );
 
   // Insert new records — carry over alertEnabled/tracked from matching previous record
@@ -86,6 +89,7 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
     const prev = k ? prevByKey.get(k) : null;
     return {
       id:           store.nextId++,
+      userId:       userId ?? (prev?.userId ?? null),
       symbol:       sym,
       marketType,
       tf,
@@ -110,26 +114,31 @@ function bulkSave({ symbol, marketType, tf, source, extremes }) {
 }
 
 /**
- * Return extremes filtered by optional symbol / marketType / tf / source.
+ * Return extremes filtered by optional symbol / marketType / tf / source / userId.
+ * Records with no userId are visible to everyone (backward compat).
  */
-function getAll({ symbol, marketType, tf, source } = {}) {
+function getAll({ userId = null, symbol, marketType, tf, source } = {}) {
   const { extremes } = readStore();
   return extremes.filter(e => {
     if (symbol     && e.symbol     !== symbol.toUpperCase()) return false;
     if (marketType && e.marketType !== marketType)           return false;
     if (tf         && e.tf         !== tf)                   return false;
     if (source     && e.source     !== source)               return false;
+    if (userId     && e.userId     && e.userId !== userId)   return false;
     return true;
   });
 }
 
 /**
  * Delete a single extreme by id.
+ * If userId provided, verifies ownership (records with no userId are deletable by anyone).
  */
-function removeOne(id) {
+function removeOne(id, userId = null) {
   const store = readStore();
   const idx   = store.extremes.findIndex(e => e.id === id);
   if (idx === -1) return null;
+  const record = store.extremes[idx];
+  if (userId && record.userId && record.userId !== userId) return null;
   const [removed] = store.extremes.splice(idx, 1);
   writeStore(store);
   return removed;
@@ -137,13 +146,18 @@ function removeOne(id) {
 
 /**
  * Delete multiple extremes by ids array.
+ * If userId provided, only removes records owned by that user (or without userId).
  * Returns count of removed records.
  */
-function removeMany(ids) {
+function removeMany(ids, userId = null) {
   const idSet = new Set(ids);
   const store = readStore();
   const before = store.extremes.length;
-  store.extremes = store.extremes.filter(e => !idSet.has(e.id));
+  store.extremes = store.extremes.filter(e => {
+    if (!idSet.has(e.id)) return true;
+    if (userId && e.userId && e.userId !== userId) return true; // keep — not owned
+    return false;
+  });
   const count = before - store.extremes.length;
   writeStore(store);
   return count;
@@ -152,12 +166,14 @@ function removeMany(ids) {
 /**
  * Patch a single extreme.
  * Patchable fields: price, points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
+ * If userId provided, verifies ownership.
  */
-function patchOne(id, patch) {
+function patchOne(id, patch, userId = null) {
   const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.extremes.findIndex(e => e.id === id);
   if (idx === -1) return null;
+  if (userId && store.extremes[idx].userId && store.extremes[idx].userId !== userId) return null;
   for (const key of Object.keys(patch)) {
     if (PATCHABLE.has(key)) store.extremes[idx][key] = patch[key];
   }
@@ -169,9 +185,10 @@ function patchOne(id, patch) {
 /**
  * Patch multiple extremes with the same patch object.
  * Patchable fields: price, points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
+ * If userId provided, only patches records owned by that user (or without userId).
  * Returns count of updated records.
  */
-function patchMany(ids, patch) {
+function patchMany(ids, patch, userId = null) {
   const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const idSet     = new Set(ids);
   const store     = readStore();
@@ -179,6 +196,7 @@ function patchMany(ids, patch) {
   let count       = 0;
   for (const e of store.extremes) {
     if (!idSet.has(e.id)) continue;
+    if (userId && e.userId && e.userId !== userId) continue;
     for (const key of Object.keys(patch)) {
       if (PATCHABLE.has(key)) e[key] = patch[key];
     }

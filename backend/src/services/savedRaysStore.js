@@ -72,16 +72,17 @@ function computeRayFingerprint(sym, marketType, ray) {
  *
  * Returns { replaced: Ray[], oldCount: number }.
  */
-function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays }) {
+function bulkSave({ userId = null, symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
 
-  // ── 1. Remove old snapshot for this scope ──────────────────────
+  // ── 1. Remove old snapshot for this scope (scoped to userId if present) ──────────────
   const isOld = r =>
     r.symbol === sym &&
     r.marketType === marketType &&
-    r.createdFrom === (createdFrom || null);
+    r.createdFrom === (createdFrom || null) &&
+    (!userId || !r.userId || r.userId === userId);
 
   const oldRecords = store.rays.filter(isOld);
   const oldIds     = new Set(oldRecords.map(r => r.id));
@@ -98,6 +99,7 @@ function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimefra
     const fp     = computeRayFingerprint(sym, marketType, r);
     const record = {
       id:                   store.nextId++,
+      userId:               userId ?? null,
       symbol:               sym,
       marketType,
       source:               source || 'saved-rays',
@@ -126,27 +128,32 @@ function bulkSave({ symbol, marketType, source, createdFrom, visibleOnAllTimefra
 
 /**
  * Return saved rays filtered by symbol and marketType.
+ * Records with no userId are visible to everyone (backward compat).
  * No tf filter — saved rays are tf-agnostic.
  */
-function getAll({ symbol, marketType, source } = {}) {
+function getAll({ userId = null, symbol, marketType, source } = {}) {
   const store = readStore();
   return store.rays.filter(r => {
     if (symbol     && r.symbol     !== symbol.toUpperCase()) return false;
     if (marketType && r.marketType !== marketType)           return false;
     if (source     && r.source     !== source)               return false;
+    if (userId     && r.userId     && r.userId !== userId)   return false;
     return true;
   });
 }
 
 /**
  * Delete a single saved ray by id.
+ * If userId provided, verifies ownership (records with no userId are deletable by anyone).
  * Also removes its geometry fingerprint so the same ray can be re-saved.
  * Returns the removed record, or null if not found.
  */
-function removeOne(id) {
+function removeOne(id, userId = null) {
   const store = readStore();
   const idx   = store.rays.findIndex(r => r.id === id);
   if (idx === -1) return null;
+  const record = store.rays[idx];
+  if (userId && record.userId && record.userId !== userId) return null;
 
   const [removed] = store.rays.splice(idx, 1);
 
@@ -164,14 +171,15 @@ function removeOne(id) {
 
 /**
  * Delete multiple saved rays by ids array.
+ * If userId provided, only removes records owned by that user (or without userId).
  * Returns count of removed records.
  */
-function removeMany(ids) {
+function removeMany(ids, userId = null) {
   const idSet = new Set(ids);
   const store = readStore();
   const before = store.rays.length;
 
-  const removedIds = new Set(store.rays.filter(r => idSet.has(r.id)).map(r => r.id));
+  const removedIds = new Set(store.rays.filter(r => idSet.has(r.id) && (!userId || !r.userId || r.userId === userId)).map(r => r.id));
   store.rays = store.rays.filter(r => !idSet.has(r.id));
 
   // Clean up fingerprints for removed rays.
@@ -187,19 +195,20 @@ function removeMany(ids) {
 /**
  * Patch a single saved ray.
  * Patchable fields: points, alertEnabled, tracked, watchMode, alertOptions, scenarioMode.
+ * If userId provided, verifies ownership.
  *
  * If points are patched the geometry fingerprint is updated so the old geometry
  * can be re-saved and the new geometry won't be treated as a duplicate.
  *
  * Returns the updated record, or null if not found.
  */
-function patchOne(id, patch) {
+function patchOne(id, patch, userId = null) {
   const PATCHABLE = new Set(['points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.rays.findIndex(r => r.id === id);
   if (idx === -1) return null;
-
   const ray = store.rays[idx];
+  if (userId && ray.userId && ray.userId !== userId) return null;
 
   // If points change, rotate the fingerprint.
   if (patch.points !== undefined) {
@@ -228,9 +237,10 @@ function patchOne(id, patch) {
 /**
  * Patch multiple saved rays with the same patch object.
  * Patchable fields: alertEnabled, tracked, watchMode, alertOptions, scenarioMode (not points for bulk patch).
+ * If userId provided, only patches records owned by that user (or without userId).
  * Returns count of updated records.
  */
-function patchMany(ids, patch) {
+function patchMany(ids, patch, userId = null) {
   const PATCHABLE = new Set(['alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
   const idSet     = new Set(ids);
   const store     = readStore();
@@ -239,6 +249,7 @@ function patchMany(ids, patch) {
 
   for (const r of store.rays) {
     if (!idSet.has(r.id)) continue;
+    if (userId && r.userId && r.userId !== userId) continue;
     for (const key of Object.keys(patch)) {
       if (PATCHABLE.has(key)) r[key] = patch[key];
     }

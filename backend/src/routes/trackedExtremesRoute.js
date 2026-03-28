@@ -94,7 +94,8 @@ function bulkHandler(req, res) {
   }
 
   try {
-    const result = store.bulkSave({ symbol, marketType, tf, source, extremes });
+    const userId = req.user?.id ?? null;
+    const result = store.bulkSave({ userId, symbol, marketType, tf, source, extremes });
     if (result.skipped) {
       console.log(`[tracked-extremes] bulk skipped unchanged snapshot symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${result.items.length}`);
       return res.status(200).json({ success: true, skipped: true, count: result.items.length, extremes: result.items });
@@ -118,7 +119,8 @@ function listHandler(req, res) {
   const { symbol, marketType, tf, source } = req.query;
 
   try {
-    const extremes = store.getAll({ symbol, marketType, tf, source });
+    const userId  = req.user?.id ?? null;
+    const extremes = store.getAll({ userId, symbol, marketType, tf, source });
     console.log(`[tracked-extremes] list symbol=${symbol} marketType=${marketType} tf=${tf} source=${source} count=${extremes.length}`);
     return res.json({ success: true, count: extremes.length, extremes });
   } catch (err) {
@@ -138,7 +140,8 @@ function deleteOneHandler(req, res) {
   }
 
   try {
-    const removed = store.removeOne(id);
+    const userId  = req.user?.id ?? null;
+    const removed = store.removeOne(id, userId);
     if (!removed) {
       return res.status(404).json({ success: false, error: 'Extreme not found' });
     }
@@ -164,7 +167,8 @@ function deleteManyHandler(req, res) {
   }
 
   try {
-    const count = store.removeMany(ids);
+    const userId = req.user?.id ?? null;
+    const count = store.removeMany(ids, userId);
     console.log(`[tracked-extremes] delete-many count=${count}`);
     return res.json({ success: true, count });
   } catch (err) {
@@ -233,7 +237,8 @@ function patchOneHandler(req, res) {
   }
 
   try {
-    const updated = store.patchOne(id, patch);
+    const userId  = req.user?.id ?? null;
+    const updated = store.patchOne(id, patch, userId);
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Extreme not found' });
     }
@@ -271,7 +276,8 @@ function patchManyHandler(req, res) {
   }
 
   try {
-    const count = store.patchMany(ids, patch);
+    const userId = req.user?.id ?? null;
+    const count = store.patchMany(ids, patch, userId);
     console.log(`[tracked-extremes] patch-many count=${count} fields=${Object.keys(patch).join(',')}`);
     return res.json({ success: true, count });
   } catch (err) {

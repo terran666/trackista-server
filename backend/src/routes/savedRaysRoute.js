@@ -122,8 +122,9 @@ function bulkHandler(req, res) {
   }
 
   try {
+    const userId = req.user?.id ?? null;
     const { replaced, oldCount } = store.bulkSave({
-      symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays,
+      userId, symbol, marketType, source, createdFrom, visibleOnAllTimeframes, persistent, rays,
     });
 
     const sym = symbol.toUpperCase();
@@ -168,7 +169,8 @@ function listHandler(req, res) {
   }
 
   try {
-    const rays = store.getAll({ symbol, marketType, source: source || undefined });
+    const userId = req.user?.id ?? null;
+    const rays = store.getAll({ userId, symbol, marketType, source: source || undefined });
     console.log(`[saved-rays] listed symbol=${symbol.toUpperCase()} marketType=${marketType} source=${source || 'any'} count=${rays.length}`);
     for (const r of rays) {
       console.log(`[saved-rays] list id=${r.id} points=${JSON.stringify(r.points)} updatedAt=${r.updatedAt}`);
@@ -191,7 +193,8 @@ function deleteOneHandler(req, res) {
   }
 
   try {
-    const removed = store.removeOne(id);
+    const userId  = req.user?.id ?? null;
+    const removed = store.removeOne(id, userId);
     if (!removed) {
       return res.status(404).json({ success: false, error: 'Saved ray not found' });
     }
@@ -250,7 +253,8 @@ function patchOneHandler(req, res) {
   }
 
   try {
-    const updated = store.patchOne(id, patch);
+    const userId  = req.user?.id ?? null;
+    const updated = store.patchOne(id, patch, userId);
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Saved ray not found' });
     }
@@ -277,7 +281,8 @@ function deleteManyHandler(req, res) {
   }
 
   try {
-    const deletedCount = store.removeMany(ids);
+    const userId       = req.user?.id ?? null;
+    const deletedCount = store.removeMany(ids, userId);
     console.log(`[saved-rays] delete-many ids=[${ids.join(',')}] deletedCount=${deletedCount}`);
     return res.json({ success: true, deletedCount });
   } catch (err) {
@@ -320,7 +325,8 @@ function patchManyHandler(req, res) {
   }
 
   try {
-    const updatedCount = store.patchMany(ids, patch);
+    const userId       = req.user?.id ?? null;
+    const updatedCount = store.patchMany(ids, patch, userId);
     console.log(`[saved-rays] patch-many ids=[${ids.join(',')}] fields=${patchKeys.join(',')} updatedCount=${updatedCount}`);
     return res.json({ success: true, updatedCount });
   } catch (err) {
@@ -342,6 +348,11 @@ function watchPatchHandler(req, res, watchLoader) {
   const ray = store.getById(id);
   if (!ray) return res.status(404).json({ success: false, error: 'Saved ray not found' });
 
+  const userId = req.user?.id ?? null;
+  if (userId && ray.userId && ray.userId !== userId) {
+    return res.status(404).json({ success: false, error: 'Saved ray not found' });
+  }
+
   const { watchEnabled, watchMode, alertOptions, scenarioMode } = req.body || {};
 
   if (watchEnabled !== undefined && typeof watchEnabled !== 'boolean') {
@@ -359,7 +370,7 @@ function watchPatchHandler(req, res, watchLoader) {
     updates.alertOptions = { ...(ray.alertOptions || {}), ...alertOptions };
   }
 
-  const updated = store.patchOne(id, updates);
+  const updated = store.patchOne(id, updates, userId);
   if (watchLoader) watchLoader.invalidate();
 
   const ao = updated.alertOptions || {};

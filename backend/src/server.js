@@ -502,9 +502,9 @@ app.get('/api/autolevels', autoLevelsHandler);
 
 // ─── Manual levels endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/manual-levels routes');
-app.post('/api/manual-levels',       manualLevelsCreate);
-app.get('/api/manual-levels',        manualLevelsList);
-app.delete('/api/manual-levels/:id', manualLevelsDelete);
+app.post('/api/manual-levels',       authRequired, manualLevelsCreate);
+app.get('/api/manual-levels',        authRequired, manualLevelsList);
+app.delete('/api/manual-levels/:id', authRequired, manualLevelsDelete);
 // NOTE: app.patch('/api/manual-levels/:id', ...) is registered AFTER all
 // /watch sub-routes below to avoid Express matching '2/watch' as id='2/watch'
 
@@ -524,15 +524,19 @@ const VALID_SOUND_PRESETS  = new Set([
 ]);
 const VALID_DISPLAY_SCOPES = new Set(['tab', 'all_tabs', 'system', 'telegram']);
 
-app.patch('/api/manual-levels/:id/watch', (req, res) => {
+app.patch('/api/manual-levels/:id/watch', authRequired, (req, res) => {
   if (typeof req.params.id === 'string' && req.params.id.startsWith('local_')) {
     return res.status(404).json({ success: false, error: 'Level not found (local id not yet synced)' });
   }
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
 
+  const userId = req.user?.id ?? null;
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+  if (userId && level.userId && level.userId !== userId) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
 
   const {
     watchEnabled, watchMode, alertOptions, scenarioMode,
@@ -583,7 +587,7 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
     };
   }
 
-  const updated = manualLevelsPatch(id, updates);
+  const updated = manualLevelsPatch(id, updates, userId);
   if (soundPreset !== undefined) {
     console.log(`[watch-config] sound_preset_saved id=${id} preset=${soundPreset}`);
   }
@@ -607,12 +611,16 @@ app.patch('/api/manual-levels/:id/watch', (req, res) => {
   });
 });
 
-app.get('/api/manual-levels/:id/watch', (req, res) => {
+app.get('/api/manual-levels/:id/watch', authRequired, (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
 
+  const userId = req.user?.id ?? null;
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+  if (userId && level.userId && level.userId !== userId) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
 
   const ao = level.alertOptions || {};
   return res.json({
@@ -631,12 +639,16 @@ app.get('/api/manual-levels/:id/watch', (req, res) => {
   });
 });
 
-app.get('/api/manual-levels/:id/watch-state', async (req, res) => {
+app.get('/api/manual-levels/:id/watch-state', authRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
 
+  const userId = req.user?.id ?? null;
   const level = manualLevelsGetById(id);
   if (!level) return res.status(404).json({ success: false, error: 'Level not found' });
+  if (userId && level.userId && level.userId !== userId) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
 
   const debugMode = req.query.debug === '1';
 
@@ -675,7 +687,7 @@ app.get('/api/manual-levels/:id/events', (_req, res) => {
 });
 
 // Registered AFTER /watch sub-routes so Express doesn't match '2/watch' as id='2/watch'
-app.patch('/api/manual-levels/:id',  manualLevelsPatchFactory(levelWatchEngine?.loader));
+app.patch('/api/manual-levels/:id',  authRequired, manualLevelsPatchFactory(levelWatchEngine?.loader));
 
 // ─── Tracked levels endpoints ─────────────────────────────────────
 console.log('[backend] registering /api/tracked-levels routes');
@@ -1001,7 +1013,7 @@ app.use('/api/symbol',                   createSymbolDataRouter(redis));
 
 // ─── Level Watch Engine routes ─────────────────────────────────────────
 console.log('[backend] registering /api/levels/:id/watch routes');
-app.use('/api/levels', createLevelWatchRouter(db, redis, levelWatchEngine.loader));
+app.use('/api/levels', authRequired, createLevelWatchRouter(db, redis, levelWatchEngine.loader));
 console.log('[backend] registering /api/level-events routes');
 app.use('/api/level-events', createLevelEventsRouter(db));
 console.log('[backend] registering /api/alert-sounds route');

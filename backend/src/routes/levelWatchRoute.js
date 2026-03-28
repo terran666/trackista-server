@@ -91,6 +91,7 @@ function createLevelWatchRouter(db, redis, watchLoader) {
     }
 
     const { watchEnabled, watchMode, tactics, alertOptions } = req.body;
+    const userId = req.user?.id ?? null;
 
     try {
       // Verify level exists — fall back to manual-levels.json if not in MySQL
@@ -98,11 +99,14 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       if (!level) {
         const ml = manualLevelsStore.getById(id);
         if (ml) {
+          if (userId && ml.userId && ml.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
           const updates = {};
           if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(ml.alertOptions || {}), ...alertOptions };
-          manualLevelsStore.patch(id, updates);
+          manualLevelsStore.patch(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
@@ -113,29 +117,35 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(tl.alertOptions || {}), ...alertOptions };
-          trackedLevelsStore.patchOne(id, updates);
+          trackedLevelsStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
 
         const sr = savedRaysStore.getById(id);
         if (sr) {
+          if (userId && sr.userId && sr.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
           const updates = {};
           if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(sr.alertOptions || {}), ...alertOptions };
-          savedRaysStore.patchOne(id, updates);
+          savedRaysStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
 
         const ex = trackedExtremesStore.getById(id);
         if (ex) {
+          if (userId && ex.userId && ex.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
           const updates = {};
           if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(ex.alertOptions || {}), ...alertOptions };
-          trackedExtremesStore.patchOne(id, updates);
+          trackedExtremesStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
@@ -298,6 +308,10 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       if (!level) {
         const ml = manualLevelsStore.getById(id);
         if (ml) {
+          const userId = req.user?.id ?? null;
+          if (userId && ml.userId && ml.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
           const ao = ml.alertOptions || {};
           return res.json({
             success:         true,

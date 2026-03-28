@@ -32,7 +32,8 @@ function createHandler(req, res) {
   }
 
   try {
-    const level = store.create({ symbol, marketType, tf, price, side, createdAt });
+    const userId = req.user?.id ?? null;
+    const level = store.create({ symbol, marketType, tf, price, side, createdAt, userId });
     console.log(`[manual-levels] created id=${level.id} symbol=${level.symbol} price=${level.price}`);
     return res.status(201).json({ success: true, level });
   } catch (err) {
@@ -46,7 +47,8 @@ function listHandler(req, res) {
   const { symbol, marketType, tf } = req.query;
 
   try {
-    const levels = store.getAll({ symbol, marketType, tf });
+    const userId = req.user?.id ?? null;
+    const levels = store.getAll({ symbol, marketType, tf, userId });
     console.log(`[manual-levels] list symbol=${symbol} marketType=${marketType} tf=${tf} count=${levels.length}`);
     return res.json({ success: true, count: levels.length, levels });
   } catch (err) {
@@ -63,7 +65,11 @@ function deleteHandler(req, res) {
   }
 
   try {
-    const removed = store.remove(id);
+    const userId  = req.user?.id ?? null;
+    const removed = store.remove(id, userId);
+    if (removed === 'forbidden') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
     if (!removed) {
       return res.status(404).json({ success: false, error: 'Level not found' });
     }
@@ -105,11 +111,15 @@ function patchHandler(watchLoader) {
     }
 
     try {
+      const userId   = req.user?.id ?? null;
       const existing = store.getById(id);
       if (!existing) {
         return res.status(404).json({ success: false, error: 'Level not found' });
       }
-      const updated = store.patch(id, updates);
+      const updated = store.patch(id, updates, userId);
+      if (updated === 'forbidden') {
+        return res.status(403).json({ success: false, error: 'Forbidden' });
+      }
       console.log(`[manual-levels] patched id=${id}`, updates);
       // Reload watch engine so it uses the new price immediately
       if (watchLoader) watchLoader.invalidate();

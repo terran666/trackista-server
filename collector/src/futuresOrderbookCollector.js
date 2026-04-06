@@ -235,16 +235,14 @@ function applyEvent(state, event) {
 
 function buildSnapshot(state) {
   const bids = [...state.bids.entries()]
-    .map(([p, s]) => ({ price: parseFloat(p), size: s }))
+    .map(([p, s]) => { const price = parseFloat(p); return { price, size: s, usdValue: Math.round(price * s * 100) / 100 }; })
     .sort((a, b) => b.price - a.price)
-    .slice(0, FUTURES_TOP_LEVELS)
-    .map(l => ({ price: l.price, size: l.size, usdValue: parseFloat((l.price * l.size).toFixed(2)) }));
+    .slice(0, FUTURES_TOP_LEVELS);
 
   const asks = [...state.asks.entries()]
-    .map(([p, s]) => ({ price: parseFloat(p), size: s }))
+    .map(([p, s]) => { const price = parseFloat(p); return { price, size: s, usdValue: Math.round(price * s * 100) / 100 }; })
     .sort((a, b) => a.price - b.price)
-    .slice(0, FUTURES_TOP_LEVELS)
-    .map(l => ({ price: l.price, size: l.size, usdValue: parseFloat((l.price * l.size).toFixed(2)) }));
+    .slice(0, FUTURES_TOP_LEVELS);
 
   const bestBid  = bids.length > 0 ? bids[0].price : null;
   const bestAsk  = asks.length > 0 ? asks[0].price : null;
@@ -428,6 +426,12 @@ async function syncBook(state) {
     }
 
     if (!snapshot) return false;
+
+    if (!Array.isArray(snapshot.bids) || !Array.isArray(snapshot.asks)) {
+      console.error(`[futures-ob] ${sym}: invalid snapshot structure — missing or non-array bids/asks`);
+      state.syncing = false;
+      return false;
+    }
 
     const snapId = snapshot.lastUpdateId;
     console.log(`[futures-ob] ${sym}: snapshot id=${snapId} bids=${snapshot.bids.length} asks=${snapshot.asks.length}`);

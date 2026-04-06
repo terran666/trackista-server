@@ -60,7 +60,7 @@ function getCoveredTimeframes(symEvents, direction) {
  * @returns {{ action: string, reason: string }}
  */
 function resolveEventIdentity(existingEvent, currentMovePct, nowMs) {
-  if (!existingEvent || existingEvent.status === 'closed') {
+  if (!existingEvent) {
     return { action: 'new', reason: 'no_existing_event' };
   }
 
@@ -73,6 +73,10 @@ function resolveEventIdentity(existingEvent, currentMovePct, nowMs) {
   // Still in cooldown?
   if (existingEvent.status === 'closed' && msSinceClose < REARM_COOLDOWN_MS) {
     return { action: 'skip', reason: 'cooldown_active' };
+  }
+
+  if (existingEvent.status === 'closed') {
+    return { action: 'new', reason: 'cooldown_expired' };
   }
 
   if (retractPct < CONTINUATION_RETRACEMENT_PCT) {

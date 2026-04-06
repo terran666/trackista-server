@@ -30,7 +30,8 @@ function safeReadJson(file) {
   try {
     if (!fs.existsSync(file)) return null;
     return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (_) {
+  } catch (err) {
+    console.error(`[watchLevels] failed to parse ${path.basename(file)}:`, err.message);
     return null;
   }
 }
@@ -74,6 +75,9 @@ function readSavedRays() {
  * into a NormalizedWatchLevel object.
  */
 function normalizeDbLevel(row) {
+  const parsedMeta = row.meta_json
+    ? (typeof row.meta_json === 'string' ? (() => { try { return JSON.parse(row.meta_json); } catch (_) { return null; } })() : row.meta_json)
+    : null;
   return {
     internalId:       `db-${row.id}`,
     levelId:          row.id,
@@ -85,6 +89,8 @@ function normalizeDbLevel(row) {
     geometryType:     row.geometry_type || 'horizontal',
     side:             row.side || null,
     price:            parseFloat(row.price),
+    // Sloped DB levels store their anchor points in meta_json.points
+    points:           (row.geometry_type === 'sloped') ? (parsedMeta?.points ?? null) : undefined,
     watchEnabled:     Boolean(row.watch_enabled),
     watchMode:        row.watch_mode || 'simple',
     tactics: {
@@ -121,11 +127,10 @@ function normalizeDbLevel(row) {
       soundEnabled:                 Boolean(row.sound_enabled),
       soundId:                      row.sound_id    || 'default_alert',
       soundGroup:                   row.sound_group || 'standard',
+      notificationEnabled:          Boolean(row.notification_enabled),
     } : defaultAlertOptions(),
     isActive: Boolean(row.is_active),
-    meta: row.meta_json
-      ? (typeof row.meta_json === 'string' ? (() => { try { return JSON.parse(row.meta_json); } catch (_) { return null; } })() : row.meta_json)
-      : null,
+    meta: parsedMeta,
   };
 }
 
@@ -135,6 +140,8 @@ function normalizeDbLevel(row) {
  * simple-watch levels using default config.
  */
 function normalizeTrackedLevel(tl) {
+  const storedOpts = tl.alertOptions || {};
+  const alertOptions = { ...defaultAlertOptions(), ...storedOpts };
   return {
     internalId:       `tracked-${tl.id}`,
     levelId:          null,
@@ -147,13 +154,13 @@ function normalizeTrackedLevel(tl) {
     side:             tl.side || null,
     price:            parseFloat(tl.price),
     watchEnabled:     true,
-    watchMode:        'simple',
+    watchMode:        tl.watchMode || 'simple',
     tactics: {
       breakout: false, bounce: false, fakeout: false,
       wallBounce: false, wallBreakout: false,
     },
     config:       defaultConfig(),
-    alertOptions: defaultAlertOptions(),
+    alertOptions,
     isActive:     true,
     meta: {
       touches:            tl.touches,
@@ -180,7 +187,7 @@ function normalizeManualLevel(ml) {
     externalLevelId:  String(ml.id),
     symbol:           ml.symbol,
     market:           ml.marketType || 'futures',
-    timeframe:        null,
+    timeframe:        ml.tf || null,
     source:           'manual',
     geometryType:     'horizontal',
     side:             ml.side || null,
@@ -343,6 +350,7 @@ function defaultAlertOptions() {
     soundId:                      'default_alert',
     soundGroup:                   'standard',
     displayScope:                 'tab',
+    notificationEnabled:          false,
   };
 }
 
@@ -388,7 +396,8 @@ function createUnifiedWatchLevelsLoader(db) {
         ao.telegram_priority,
         ao.sound_enabled,
         ao.sound_id,
-        ao.sound_group
+        ao.sound_group,
+        ao.notification_enabled
       FROM levels l
       JOIN level_watch_configs wc
         ON wc.level_id = l.id AND wc.watch_enabled = TRUE
@@ -461,9 +470,11 @@ function createUnifiedWatchLevelsLoader(db) {
     if (cache && now - cacheTime < CACHE_TTL_MS) return cache;
 
     let levels = [];
+    let dbOk   = false;
     try {
       const dbLevels = await loadFromDb();
       levels.push(...dbLevels);
+      dbOk = true;
     } catch (err) {
       // Table may not exist yet on first startup before migrations complete
       if (!(err.code === 'ER_NO_SUCH_TABLE' || err.message.includes('level_watch_configs'))) {
@@ -485,9 +496,13 @@ function createUnifiedWatchLevelsLoader(db) {
       console.error('[watchLevels] file load error:', err.message);
     }
 
-    cache     = levels;
-    cacheTime = now;
-    return levels;
+    // Do not update cache when DB failed — stale cache (with DB levels present) is better
+    // than a partial cache that silently loses all DB-stored watched levels for 5 seconds.
+    if (dbOk || cache === null) {
+      cache     = levels;
+      cacheTime = now;
+    }
+    return cache ?? levels;
   }
 
   /** Invalidate the in-memory cache (call after watch config changes). */

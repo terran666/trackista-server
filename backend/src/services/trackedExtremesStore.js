@@ -29,12 +29,35 @@ function ensureFile() {
 
 function readStore() {
   ensureFile();
-  const raw = fs.readFileSync(DATA_FILE, 'utf8');
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    if (!raw || !raw.trim()) throw new Error('empty file');
+    return JSON.parse(raw);
+  } catch (err) {
+    const bak = DATA_FILE + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf8');
+        const store = JSON.parse(raw);
+        console.error('[tracked-extremes-store] main file corrupted — restored from .bak');
+        writeStore(store);
+        return store;
+      } catch (_) {}
+    }
+    console.error('[tracked-extremes-store] data file corrupted, reinitializing:', err.message);
+    const empty = { nextId: 1, extremes: [], fingerprints: {} };
+    writeStore(empty);
+    return empty;
+  }
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
+  }
+  fs.renameSync(tmp, DATA_FILE);
 }
 
 // ─── Public API ───────────────────────────────────────────────────

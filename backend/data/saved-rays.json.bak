@@ -1,0 +1,275 @@
+{
+  "nextId": 322,
+  "rays": [
+    {
+      "id": 32,
+      "symbol": "PARTIUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "support",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774526700000,
+          "value": 0.08209047913089762
+        },
+        {
+          "timestamp": 1774640100000,
+          "value": 0.09940056269635988
+        }
+      ],
+      "strength": 0,
+      "touches": 3,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774640187726,
+      "updatedAt": 1774640187726
+    },
+    {
+      "id": 33,
+      "symbol": "PARTIUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "resistance",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774562100000,
+          "value": 0.10803819225839106
+        },
+        {
+          "timestamp": 1774640100000,
+          "value": 0.10258788169939237
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774640187726,
+      "updatedAt": 1774640187726
+    },
+    {
+      "id": 146,
+      "userId": 2,
+      "symbol": "BSBUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "support",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774688400000,
+          "value": 0.0018359519999986418
+        },
+        {
+          "timestamp": 1774792500000,
+          "value": 0.00237120713196326
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774792723617,
+      "updatedAt": 1774792723617
+    },
+    {
+      "id": 164,
+      "userId": 2,
+      "symbol": "ONUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "support",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774792860000,
+          "value": 0.09500634080006876
+        },
+        {
+          "timestamp": 1774807860000,
+          "value": 0.10167300746672936
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774807876026,
+      "updatedAt": 1774807876026
+    },
+    {
+      "id": 165,
+      "userId": 2,
+      "symbol": "ONUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "resistance",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774796760000,
+          "value": 0.10610658777142135
+        },
+        {
+          "timestamp": 1774807860000,
+          "value": 0.10371480205714079
+        }
+      ],
+      "strength": 0,
+      "touches": 4,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774807876026,
+      "updatedAt": 1774807876026
+    },
+    {
+      "id": 168,
+      "userId": 2,
+      "symbol": "PLAYUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "support",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774588500000,
+          "value": 0.03644719999999779
+        },
+        {
+          "timestamp": 1774813500000,
+          "value": 0.02742759215685453
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774813648335,
+      "updatedAt": 1774813648335
+    },
+    {
+      "id": 169,
+      "userId": 2,
+      "symbol": "PLAYUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "resistance",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1774588500000,
+          "value": 0.037782800000002226
+        },
+        {
+          "timestamp": 1774813500000,
+          "value": 0.08316741538459382
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1774813648335,
+      "updatedAt": 1774813648335
+    },
+    {
+      "id": 318,
+      "userId": 2,
+      "symbol": "SIRENUSDT",
+      "marketType": "futures",
+      "source": "saved-rays",
+      "createdFrom": "vertical-extremes",
+      "side": "support",
+      "kind": "extreme",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1775307000000,
+          "value": 0.217287679999572
+        },
+        {
+          "timestamp": 1775452800000,
+          "value": 0.5491423657140331
+        }
+      ],
+      "strength": 0,
+      "touches": 2,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1775453064065,
+      "updatedAt": 1775453064065
+    },
+    {
+      "id": 321,
+      "userId": 2,
+      "symbol": "KOMAUSDT",
+      "marketType": "futures",
+      "source": "manual-sloped-level",
+      "createdFrom": "manual-sloped-level-mnn16oov",
+      "side": "support",
+      "kind": "ray",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1775456400000,
+          "value": 0.008856969135802467
+        },
+        {
+          "timestamp": 1775487300000,
+          "value": 0.010144246913580245
+        }
+      ],
+      "strength": 0,
+      "touches": 0,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1775470317412,
+      "updatedAt": 1775470324253
+    }
+  ],
+  "rayFingerprints": {
+    "2c4a1d49d9a5c5218251d93f": 32,
+    "ccd270fbbc27669818dbd87c": 33,
+    "36a10f6121019b6edd363670": 146,
+    "71fc3b840680acc621409c18": 164,
+    "1eaa8f12b6f8bfbd66636c08": 165,
+    "87a9751665eb900ff65b2549": 168,
+    "65749e29a0f9491ee0a2ac88": 169,
+    "aba583aa089eebf981e4a5c5": 318,
+    "b4be1e76e3e7170d5207fb73": 321
+  }
+}

@@ -87,6 +87,8 @@ function createDerivativesContextService(redis) {
 
   async function tick() {
     if (!isRunning) return;
+    if (tick._running) return; // prevent concurrent executions
+    tick._running = true;
     const nowMs  = Date.now();
     const tickTs = nowMs;
     runCount++;
@@ -274,6 +276,8 @@ function createDerivativesContextService(redis) {
         lastErrorMessage: err.message,
         status          : 'warning',
       }), 'EX', 120).catch(() => {});
+    } finally {
+      tick._running = false;
     }
   }
 

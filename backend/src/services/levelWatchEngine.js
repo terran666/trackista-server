@@ -71,8 +71,8 @@ const COOLDOWNS = {
 //   enter = price must come this close to enter a deeper phase
 //   exit  = price must move this far away to return to shallower phase
 // This prevents jitter when price oscillates near a boundary.
-const WATCH_ENTER_APPROACHING_PCT = 0.50;   // enter approaching from watching
-const WATCH_EXIT_APPROACHING_PCT  = 0.65;   // exit approaching back to watching
+const WATCH_ENTER_APPROACHING_PCT = 2.00;   // enter approaching from watching
+const WATCH_EXIT_APPROACHING_PCT  = 2.50;   // exit approaching back to watching
 
 const WATCH_ENTER_PRECONTACT_PCT  = 0.15;   // enter precontact from approaching
 const WATCH_EXIT_PRECONTACT_PCT   = 0.22;   // exit precontact back to approaching
@@ -85,13 +85,14 @@ const WATCH_EXIT_CONTACT_PCT      = 0.10;   // exit contact back to precontact
 const WATCH_CONTACT_HOLD_TICKS    = 1;
 
 // Cross confirmation: price must hold past level N ticks at min distance
-const WATCH_CROSS_HOLD_TICKS      = 2;
+const WATCH_CROSS_HOLD_TICKS      = 1;
 const WATCH_CROSS_CONFIRM_PCT     = 0.03;   // min absDistancePct past level
 
 // ETA smoothing config
-const WATCH_ETA_EMA_ALPHA   = 0.30;  // EMA factor: 0 = fully lagged, 1 = raw
+const WATCH_ETA_EMA_ALPHA   = 0.10;  // EMA factor: 0.10 = smooth (was 0.30 — too reactive, caused ETA jumps)
 const WATCH_MIN_ETA_SPEED   = 0.001; // min smoothed %/tick to compute ETA
-const WATCH_MAX_ETA_SECONDS = 300;   // discard ETAs > 5 minutes (too noisy)
+const WATCH_MAX_ETA_SECONDS = 900;   // discard ETAs > 15 minutes (was 5 min — too short for slow approaches)
+const WATCH_ETA_WINDOW_SIZE = 20;    // rolling median window size for etaSmoothed (20 ticks = 20 s)
 
 // ── Popup lifecycle constants ─────────────────────────────────────
 const BLINK_TTL_MS              =  8_000;   // blink active for 8 s after strong event
@@ -112,8 +113,9 @@ const POPUP_PRIORITY_SCORES = {
 // Allowed transitions (state machine guard)
 // approaching->crossed allowed for fast moves that bypass precontact
 // precontact->crossed allowed for fast moves that skip contact confirmation
+// watching->crossed allowed for very fast moves that skip the approaching zone entirely
 const ALLOWED_TRANSITIONS = {
-  watching:    new Set(['approaching']),
+  watching:    new Set(['approaching', 'crossed']),
   approaching: new Set(['watching', 'precontact', 'crossed']),
   precontact:  new Set(['approaching', 'contact', 'crossed']),
   contact:     new Set(['precontact', 'watching', 'crossed']),
@@ -133,14 +135,28 @@ const SPEED_EPSILON = 1e-10;
 // ─── Geometry helpers ─────────────────────────────────────────────
 
 /**
+ * Hard ceiling on forward extrapolation regardless of drawn span.
+ * Prevents arbitrarily long levels from extrapolating indefinitely.
+ */
+const MAX_SLOPED_FORWARD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days absolute max
+
+/**
  * Linear extrapolation of a sloped level's price at a given timestamp.
- * Points must be sorted so p1.timestamp < p2.timestamp (or at least different).
- * Extrapolates beyond p2 — intentional for live watching.
+ * Forward extrapolation beyond p2 is capped to min(drawnSpan, 7 days).
+ * This mirrors what the chart visually displays at the current bar position
+ * and prevents stale levels from drifting far from their anchor positions.
  */
 function getSlopedLevelValueAtTimestamp(points, nowTs) {
-  const [p1, p2] = points;
-  const slope = (p2.value - p1.value) / (p2.timestamp - p1.timestamp);
-  return p1.value + slope * (nowTs - p1.timestamp);
+  // Sort ascending by timestamp so p1 is always the earlier anchor
+  const [p1, p2] = points[0].timestamp <= points[1].timestamp
+    ? [points[0], points[1]]
+    : [points[1], points[0]];
+  const drawnSpanMs = p2.timestamp - p1.timestamp;
+  // Cap forward extrapolation to the drawn span (mirrored past p2), hard-capped at 7 days
+  const forwardCapMs = Math.min(drawnSpanMs, MAX_SLOPED_FORWARD_MS);
+  const effectiveTs  = Math.min(nowTs, p2.timestamp + forwardCapMs);
+  const slope = (p2.value - p1.value) / drawnSpanMs;
+  return p1.value + slope * (effectiveTs - p1.timestamp);
 }
 
 /**
@@ -220,7 +236,7 @@ function getSeverity(eventType, distancePct, signalCtx) {
 // recentTouchPullback: level was touched within RECENT_TOUCH_PULLBACK_MS but price moved back out.
 function computePopupStatus(phase, rollbackAfterAlert, lastStrongEventAt, nowTs, wickRecent, rawContactDetected, crossDetectedRaw, recentTouchPullback) {
   if (rollbackAfterAlert)                                                             return 'pulling_back';
-  if (phase === 'crossed' || crossDetectedRaw)                                        return 'crossed';
+  if (phase === 'crossed')                                                            return 'crossed';
   if (phase === 'contact' || rawContactDetected || wickRecent || recentTouchPullback)  return 'contact';
   if (phase === 'precontact')                                  return 'very_close';
   if (phase === 'approaching')                                 return 'approaching';
@@ -354,7 +370,9 @@ function resolvePhase(ctx) {
   let newPendingCrossTicks    = 0;
   let newPendingCrossDirection = null;
   // Allow cross detection from approaching too (fast moves that skip precontact)
-  const canCross       = prevPhase === 'contact' || prevPhase === 'precontact' || prevPhase === 'approaching';
+  // Also allow from watching — handles very fast moves that skip the approaching zone entirely
+  // (e.g. sloped level sweeping through price, or sudden large candle)
+  const canCross       = prevPhase === 'contact' || prevPhase === 'precontact' || prevPhase === 'approaching' || prevPhase === 'watching';
   const crossedToSide  = sideNow !== 'at' && lastNonAtSide != null && sideNow !== lastNonAtSide;
   const crossDistance  = absDistancePct >= WATCH_CROSS_CONFIRM_PCT;
 
@@ -416,7 +434,7 @@ function resolvePhase(ctx) {
     eventType,
     reason,
     sideRelativeToLevel: sideNow,
-    crossDetectedRaw:    crossedToSide,  // raw side flip this tick (no hold required)
+    crossDetectedRaw:    canCross && crossedToSide,  // raw side flip this tick (no hold required, gated on canCross)
     pending: {
       contactCandidate: newPendingContactTicks > 0,
       contactTicks:     newPendingContactTicks,
@@ -462,29 +480,29 @@ function computeDisplayContext(sideNow, distancePct, distanceAbs) {
 // ─── ETA to level ─────────────────────────────────────────────────
 function formatEtaLabel(seconds) {
   if (seconds < 60) return `~${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return s > 0 ? `~${m}m ${s}s` : `~${m}m`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return s > 0 ? `~${m}m ${s}s` : `~${m}m`;
+  }
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
 }
 
 /**
  * Compute ETA using EMA-smoothed approach speed.
- * Only valid during approaching / precontact when price is moving toward level.
+ * No phase gate — ETA is computed in any phase as long as speed is sufficient.
+ * movingToward is NO LONGER a hard gate — smoothedSpeed already decays naturally
+ * when price moves away (EMA α=0.30 → drops below WATCH_MIN_ETA_SPEED in ~4 ticks).
  */
 function computeEta(absDistancePct, smoothedSpeed, phase, movingToward) {
-  if (phase !== 'approaching' && phase !== 'precontact') {
-    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_out_of_phase' };
-  }
-  if (!movingToward) {
-    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_moving_away' };
-  }
   if (!smoothedSpeed || smoothedSpeed < WATCH_MIN_ETA_SPEED) {
     return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_speed_too_low' };
   }
   const etaSeconds = Math.round(absDistancePct / smoothedSpeed);
-  if (etaSeconds > WATCH_MAX_ETA_SECONDS) {
-    return { etaSeconds: null, etaLabel: '—', etaReason: 'eta_not_available_unstable_speed' };
-  }
+  // No upper cap — WATCH_MIN_ETA_SPEED already filters out near-stationary levels.
+  // A large ETA (e.g. ~2h) is still useful to show vs a blank "—".
   return { etaSeconds, etaLabel: formatEtaLabel(etaSeconds), etaReason: 'eta_from_approach_speed' };
 }
 
@@ -621,6 +639,25 @@ function computeScenarioScores(ctx) {
   };
 }
 
+// ─── Priority model (low / medium / high / critical) ────────────
+function buildPriority(eventType, signalCtx) {
+  const { signalConfidence = 0, inPlayScore = 0 } = signalCtx || {};
+  switch (eventType) {
+    case 'crossed_up':
+    case 'crossed_down':
+      return signalConfidence >= 80 ? 'critical' : 'high';
+    case 'contact_hit':
+      if (inPlayScore >= 120) return 'high';
+      return signalConfidence >= 80 ? 'medium' : 'low';
+    case 'precontact_entered':
+    case 'nearby_wall_strengthened':
+    case 'early_warning':
+      return 'medium';
+    default:
+      return 'low';
+  }
+}
+
 // ─── Fingerprint for anti-duplicate ─────────────────────────────
 function buildFingerprint(symbol, market, internalId, eventType, nowMs) {
   const minuteBucket = Math.floor(nowMs / 60000);
@@ -644,6 +681,7 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     delivery,
     phase,
     severity,
+    priority,
   } = opts;
 
   const idSuffix = level.levelId !== null ? `L${level.levelId}` : level.externalLevelId || 'ext';
@@ -654,7 +692,9 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     type:                eventType,
     symbol:              level.symbol,
     market:              level.market,
+    timeframe:           level.timeframe || null,
     severity:            severity || getSeverity(eventType, distancePct, signalContext),
+    priority:            priority || buildPriority(eventType, signalContext),
     title:               buildTitle(eventType, level.symbol, levelPrice),
     message:             buildMessage(eventType, level.symbol, levelPrice, distancePct),
     createdAt:           nowMs,
@@ -686,6 +726,8 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     relativePositionLabel:   state.relativePositionLabel  ?? null,
     etaSeconds:              state.etaSeconds             ?? null,
     etaLabel:                state.etaLabel               ?? '—',
+    etaSmoothed:             state.etaSmoothed            ?? null,
+    etaSmoothedLabel:        state.etaSmoothedLabel       ?? '—',
     etaProgressPct:          state.etaProgressPct         ?? null,
     approachVelocityLabel:   state.approachVelocityLabel  ?? 'stable',
     distanceProgressPct:     state.distanceProgressPct    ?? 0,
@@ -694,6 +736,12 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     volumeValue:             state.volumeValue            ?? null,
     volumePct:               state.volumePct              ?? null,
     volumeTrend:             state.volumeTrend            ?? 'stable',
+    // Multi-timeframe volume (null until collector minute buckets warm up)
+    volumeUsdt5m:            state.volumeUsdt5m           ?? null,
+    volumeUsdt15m:           state.volumeUsdt15m          ?? null,
+    volumeUsdt30m:           state.volumeUsdt30m          ?? null,
+    volumeUsdt60m:           state.volumeUsdt60m          ?? null,
+    volumeByPeriod:          state.volumeByPeriod         ?? {},
     tradesDeltaPct:          state.tradesDeltaPct         ?? null,
     tradeSpeedValue:         state.tradeSpeedValue        ?? null,
     tradeSpeedPct:           state.tradeSpeedPct          ?? null,
@@ -762,6 +810,7 @@ function buildDeliveryConfig(eventType, alertOptions, severityOverride) {
     sound:         alertOptions.soundEnabled    ?? true,
     soundId,
     popupPriority,
+    notification:  alertOptions.notificationEnabled ?? false,
   };
 }
 
@@ -886,9 +935,11 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     p.set(`alert:${event.id}`, json, 'EX', ALERT_EVENT_TTL_SEC);
     p.lpush('alerts:recent', json);
     p.ltrim('alerts:recent', 0, ALERT_RECENT_LIMIT - 1);
+    // Sorted set for efficient since-based polling (GET /api/alerts/live?since=<ts>)
+    p.zadd('alerts:live', event.createdAt, json);
+    p.zremrangebyrank('alerts:live', 0, -(ALERT_RECENT_LIMIT + 1));
     await p.exec();
-    // Confirms the event is visible in GET /api/alerts/recent
-    console.log(`[watch-engine] written to alerts:recent id=${event.id} type=${event.type} symbol=${event.symbol}`);
+    console.log(`[alert.published] id=${event.id} type=${event.type} symbol=${event.symbol} priority=${event.priority}`);
   }
 
   // ── Evaluate phase transition events ─────────────────────────────
@@ -909,15 +960,32 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       signalConfidence: state.signalConfidence ?? 0,
     } : null;
 
-    const onCD  = await isCooldownActive(eventType, level.market, level.symbol, level.internalId);
-    const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, eventType, nowMs);
-    if (onCD || !notFP) {
-      const suppressReason = onCD ? 'cooldown' : 'dedup_fingerprint';
+    // Suppress approach/contact transition alerts during rollback (after level was broken).
+    // Still allow crossed_up/crossed_down to fire if price re-crosses.
+    if (state.rollbackAfterAlert && eventType !== 'crossed_up' && eventType !== 'crossed_down') {
+      console.log(`[watch-engine] event suppressed ${level.symbol} ${level.internalId} evt=${eventType} reason=rollback_after_alert`);
+      return events;
+    }
+
+    // Batch cooldown check and fingerprint check into a single pipeline read
+    const cdKey = `watchcooldown:${eventType}:${level.market}:${level.symbol}:${level.internalId}`;
+    const fp    = buildFingerprint(level.symbol, level.market, level.internalId, eventType, nowMs);
+    const fpKey = `watcheventfp:${fp}`;
+    const [[, cdVal]] = await redis.pipeline().get(cdKey).exec();
+    const onCD  = cdVal !== null;
+    if (onCD) {
+      const suppressReason = 'cooldown';
       suppressedStateMap.set(level.internalId, { reason: suppressReason, eventType, suppressedAt: nowMs });
-      console.log(
-        `[watch-engine] event suppressed ${level.symbol} ${level.internalId}` +
-        ` evt=${eventType} reason=${suppressReason}`,
-      );
+      console.log(`[watch-engine] event suppressed ${level.symbol} ${level.internalId} evt=${eventType} reason=${suppressReason}`);
+      return events;
+    }
+    // Atomically claim the fingerprint slot — only one concurrent call can win
+    const fpSet = await redis.set(fpKey, '1', 'EX', 70, 'NX');
+    if (fpSet !== 'OK') {
+      // Another concurrent invocation already set this fingerprint this minute
+      const suppressReason = 'dedup_fingerprint';
+      suppressedStateMap.set(level.internalId, { reason: suppressReason, eventType, suppressedAt: nowMs });
+      console.log(`[watch-engine] event suppressed ${level.symbol} ${level.internalId} evt=${eventType} reason=${suppressReason}`);
       return events;
     }
 
@@ -984,6 +1052,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
     // Only evaluate if price is moving toward the level
     if (!approaching && !state.isNearby) return events;
+    // Suppress all early warnings during rollback (level was already broken)
+    if (state.rollbackAfterAlert) return events;
 
     const signalContext = signal ? {
       impulseScore:     signal.impulseScore     ?? 0,
@@ -1005,7 +1075,14 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       let triggerReason    = null;
 
       if (warnBefore && approachSpeed && Math.abs(approachSpeed) > SPEED_EPSILON) {
-        const rawEta = Math.round(absDistancePct / Math.abs(approachSpeed));
+        // For trigger decision: use the HIGHER of raw speed vs EMA-smoothed speed.
+        // EMA can lag badly after periods of sideways/away movement, making the computed
+        // ETA artificially large → warning fires only when price is already 5s from level
+        // instead of at the configured warnBeforeSeconds.
+        const rawSpeed = Math.abs(approachSpeed);
+        const smoothedSpeed = state.smoothedApproachSpeed ?? rawSpeed;
+        const effectiveSpeed = Math.max(rawSpeed, smoothedSpeed);
+        const rawEta = Math.round(absDistancePct / effectiveSpeed);
         etaSec = (isFinite(rawEta) && rawEta >= 0 && rawEta <= WATCH_MAX_ETA_SECONDS) ? rawEta : null;
         if (etaSec !== null && etaSec <= warnBefore && state.movingToward) {
           triggerByETA  = true;
@@ -1039,6 +1116,31 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
           await setCooldown('early_warning', level.market, level.symbol, level.internalId, COOLDOWNS.early_warning);
           etaWarningFired = true;
         }
+      }
+    }
+
+    // ── Periodic "still-in-zone" reminder ────────────────────────
+    // Fires when price is in the approaching zone but NOT actively moving toward level
+    // (consolidating sideways). Without this, alerts go silent after the initial burst
+    // when movingToward=false and warnBeforeDistancePct=null (the default).
+    if (!etaWarningFired && state.isNearby) {
+      const onCD  = await isCooldownActive('early_warning', level.market, level.symbol, level.internalId);
+      const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'early_warning', nowMs);
+      if (!onCD && notFP) {
+        const delivery = buildDeliveryConfig('early_warning', ao);
+        events.push(buildWatchEvent('early_warning', level, state, {
+          nowMs, distancePct, currentPrice, levelPrice, signalContext,
+          approachSpeed, approachAcceleration,
+          wallContext: state.wallContext, delivery,
+          phase: state.phase, severity: 'low',
+          earlyWarning: {
+            warnBeforeSeconds:           null,
+            estimatedTimeToLevelSec:     null,
+            warnBeforeDistancePct:       null,
+            triggerReason:               'still_in_zone',
+          },
+        }));
+        await setCooldown('early_warning', level.market, level.symbol, level.internalId, COOLDOWNS.early_warning);
       }
     }
 
@@ -1251,12 +1353,12 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       }
     }
 
-    // EMA-smoothed approach speed for stable ETA (decays to 0 when moving away)
+    // EMA-smoothed approach speed for stable ETA (EMA-decays toward 0 when moving away)
     const rawSpeedForEma    = (movingToward && approachSpeed != null) ? Math.abs(approachSpeed) : 0;
     const prevSmoothed      = prevState?.smoothedApproachSpeed ?? rawSpeedForEma;
     const smoothedApproachSpeed = movingToward
       ? parseFloat((WATCH_ETA_EMA_ALPHA * rawSpeedForEma + (1 - WATCH_ETA_EMA_ALPHA) * prevSmoothed).toFixed(8))
-      : 0;
+      : parseFloat(((1 - WATCH_ETA_EMA_ALPHA) * prevSmoothed).toFixed(8)); // EMA decay, not hard-reset
 
     // Volume / trades delta from metrics
     let volumeDeltaPct  = null;
@@ -1293,7 +1395,34 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     const displayCtx = computeDisplayContext(sideNow, distancePct, distanceAbs);
 
     // ── ETA to level ───────────────────────────────────────────────
-    const etaResult = computeEta(absDistancePct, smoothedApproachSpeed, nextPhase, movingToward);
+    // Prefer smoothed EMA speed for stable ETA. However when EMA hasn't built up
+    // yet (e.g. after a period of moving away, EMA decays near 0) but price IS
+    // actively approaching, use raw * 0.5 as a floor so ETA appears immediately.
+    // raw * 0.5 dampens single-tick spikes enough to avoid wild jumps, while
+    // still providing a meaningful estimate before the EMA catches up.
+    const etaSpeedForDisplay = (
+      movingToward &&
+      smoothedApproachSpeed < WATCH_MIN_ETA_SPEED &&
+      rawSpeedForEma >= WATCH_MIN_ETA_SPEED
+    ) ? rawSpeedForEma * 0.5 : smoothedApproachSpeed;
+    const etaResult = computeEta(absDistancePct, etaSpeedForDisplay, nextPhase, movingToward);
+
+    // ── Rolling-median ETA for popup display ──────────────────────
+    // Build a sliding window of the last WATCH_ETA_WINDOW_SIZE valid etaSeconds values.
+    // When ETA is unavailable (—) the window is unchanged — we don't decay it,
+    // since the level might still be approaching but speed is momentarily low.
+    const prevEtaWindow = prevState?.etaWindow ?? [];
+    const etaWindow = etaResult.etaSeconds != null
+      ? [...prevEtaWindow.slice(-(WATCH_ETA_WINDOW_SIZE - 1)), etaResult.etaSeconds]
+      : prevEtaWindow.slice(-WATCH_ETA_WINDOW_SIZE);
+    let etaSmoothed = null;
+    let etaSmoothedLabel = '—';
+    if (etaWindow.length >= 3) {
+      const sorted = [...etaWindow].sort((a, b) => a - b);
+      etaSmoothed = sorted[Math.floor(sorted.length / 2)];
+      etaSmoothedLabel = formatEtaLabel(etaSmoothed);
+    }
+
     if (isDebugLevel(level.symbol, level.internalId) && etaResult.etaReason === 'eta_from_approach_speed') {
       console.log(
         `[watch-engine:eta] ${level.symbol} ${level.internalId}` +
@@ -1358,25 +1487,25 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     } else if (nextPhase === 'crossed' && prevPhase !== 'crossed') {
       // Confirmed held cross (may follow raw cross by 1-2 ticks)
       newStrongEventType = sideNow === 'below' ? 'crossed_down' : 'crossed_up';
-    } else if (rawContactEntered) {
+    } else if (rawContactEntered && prevPhase !== 'crossed') {
       // First tick entering contact zone (raw, no hold required)
+      // Guard: don't overwrite crossed_up/crossed_down with contact_hit while already in crossed phase
       newStrongEventType = 'contact_hit';
-    } else if (nextPhase === 'contact' && prevPhase !== 'contact') {
-      // Confirmed held contact (may follow rawContactEntered by 1 tick)
+    } else if (nextPhase === 'contact' && prevPhase !== 'contact' && prevPhase !== 'crossed') {
+      // Confirmed held contact — don't fire if coming from crossed phase
       newStrongEventType = 'contact_hit';
     }
     const lastStrongEventType = newStrongEventType ?? (prevState?.lastStrongEventType ?? null);
     const lastStrongEventAt   = newStrongEventType   ? nowTs : (prevState?.lastStrongEventAt ?? null);
 
-    // rollbackAfterAlert: crossed phase exited back toward watching/approaching
-    // Cleared when price moves genuinely far from the level (> exit-approaching threshold),
-    // which signals a new approach cycle is starting fresh.
+    // rollbackAfterAlert: crossed phase exited — suppress re-approach alerts until a NEW cross fires.
+    // Only clears when nextPhase === 'crossed' (price actually re-crosses in either direction).
+    // Previously cleared on dist > 2.5%, but that caused re-approach alerts after a break.
     const wasJustCrossed     = prevState?.phase === 'crossed';
     const retractedFromCross = wasJustCrossed && nextPhase !== 'crossed';
-    const priceStillNear     = absDistancePct <= WATCH_EXIT_APPROACHING_PCT;
     const rollbackAfterAlert =
       retractedFromCross ||
-      (prevState?.rollbackAfterAlert === true && priceStillNear && nextPhase !== 'crossed');
+      (prevState?.rollbackAfterAlert === true && nextPhase !== 'crossed');
 
     // ── Touch / wick / probe detection ───────────────────────────────────────
     // contactEntered: first tick in contact zone (raw or confirmed phase)
@@ -1520,7 +1649,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         ` price=${currentPrice} level=${levelPrice} dist=${absDistancePct.toFixed(3)}%`,
       );
     }
-    if (rawContactEntered) {
+    if (rawContactEntered && prevPhase !== 'crossed' && nextPhase !== 'crossed') {
       console.log(
         `[watch-engine] level_raw_contact_detected ${level.symbol} ${level.internalId}` +
         ` price=${currentPrice} level=${levelPrice} dist=${absDistancePct.toFixed(4)}%`,
@@ -1627,6 +1756,9 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       // ── ETA ────────────────────────────────────────────────────────
       etaSeconds:            etaResult.etaSeconds,
       etaLabel:              etaResult.etaLabel,
+      etaSmoothed,
+      etaSmoothedLabel,
+      etaWindow,
       smoothedApproachSpeed,
       approachVelocityLabel,
       // ── Popup lifecycle fields ───────────────────────────────────────────
@@ -1707,9 +1839,31 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     state.volumePct     = normDeltaToPct(state.volumeDeltaPct, 30);
     state.volumeTrend   = deltaTrend(state.volumeDeltaPct, 3);
 
+    // Multi-timeframe volume (from minute buckets in collector — null until warmed up)
+    state.volumeUsdt5m  = metrics?.volumeUsdt5m  ?? null;
+    state.volumeUsdt15m = metrics?.volumeUsdt15m ?? null;
+    state.volumeUsdt30m = metrics?.volumeUsdt30m ?? null;
+    state.volumeUsdt60m = metrics?.volumeUsdt60m ?? null;
+    // volumeByPeriod — ready-made object expected by frontend period switcher
+    state.volumeByPeriod = {
+      '1m':  volumeNow,
+      '5m':  state.volumeUsdt5m,
+      '15m': state.volumeUsdt15m,
+      '30m': state.volumeUsdt30m,
+      '1h':  state.volumeUsdt60m,
+    };
+
     state.tradeSpeedValue = tradesNow;
     state.tradeSpeedPct   = normDeltaToPct(state.tradesDeltaPct, 30);
     state.tradeSpeedTrend = deltaTrend(state.tradesDeltaPct, 3);
+
+    // ── Sloped-level debug fields ─────────────────────────────────
+    // rayPriceAtBar = levelPrice рассчитанный по линейной формуле на текущем тике.
+    // barTimestamp  = nowTs (real-time engine, не привязан к открытию бара).
+    if (level.geometryType === 'sloped') {
+      state.rayPriceAtBar = levelPrice;
+      state.barTimestamp  = nowTs;
+    }
 
     return { state, transition };
   }
@@ -1847,6 +2001,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
             distancePct:           state.distancePct,
             approachSpeed:         state.approachSpeed,
             smoothedApproachSpeed: state.smoothedApproachSpeed,
+            etaWindow:             state.etaWindow,
             wallNearby:            state.wallContext.wallNearby,
             wallStrength:          state.wallContext.wallStrength,
             volumeNow:             state.volumeNow,
@@ -1892,18 +2047,22 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
           const earlyEvts = await evaluateEarlyWarnings(level, state, prevState, signal, metrics, nowMs);
           const allEvents = [...transEvts, ...earlyEvts];
 
+          // Count events suppressed by cooldown or fingerprint dedup
+          if (transition.changed && transition.eventType && transEvts.length === 0) filteredCD++;
+
           simpleEvents += transEvts.length;
           earlyEvents  += earlyEvts.length;
           totalEvents  += allEvents.length;
 
           for (const ev of allEvents) {
-            // Persist to MySQL
-            await persistEvent(ev, level, state);
-            storedDB++;
+            // Persist to MySQL — fire-and-forget (non-blocking) to avoid stalling the tick
+            persistEvent(ev, level, state).then(() => { storedDB++; }).catch(err =>
+              console.error('[watch-engine] persistEvent error (async):', err.message),
+            );
 
             // Update level trigger stats (only for MySQL-sourced levels)
             if (level.levelId && transEvts.includes(ev)) {
-              await updateLevelTriggerStats(level.levelId, nowMs);
+              updateLevelTriggerStats(level.levelId, nowMs).catch(() => {});
             }
 
             // Publish to recent feed
@@ -1913,19 +2072,20 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
               ` id=${ev.id} evt=${ev.type}`,
             );
 
-            // Telegram delivery
-            const ao = level.alertOptions;
-            if (ao && ao.telegramEnabled && deliveryService) {
-              const sendTypes = new Set([
+            // Alert delivery (Telegram + Web Push).
+            // NOT gated on telegramEnabled — handleAlert() checks ev.delivery.telegram
+            // internally and sends web push regardless of telegram flag.
+            if (deliveryService) {
+              const deliveryTypes = new Set([
                 'approaching_entered', 'precontact_entered',
                 'contact_hit', 'crossed_up', 'crossed_down',
                 'early_warning',
               ]);
-              if (sendTypes.has(ev.type)) {
+              if (deliveryTypes.has(ev.type)) {
                 deliveryService.handleAlert(ev).catch(err =>
-                  console.error('[watch-engine] telegram delivery error:', err.message),
+                  console.error('[watch-engine] delivery error:', err.message),
                 );
-                telegramSent++;
+                if (ev.delivery?.telegram) telegramSent++;
               }
             }
           }

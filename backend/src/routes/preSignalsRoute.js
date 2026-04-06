@@ -8,6 +8,8 @@
  * GET /api/pre-signals/:symbol     — pre-signal for a specific symbol
  */
 
+const { getPreMoveScan } = require('../services/screenerAggregationService');
+
 function createPreSignalsRouter(redis, db) {
   const express = require('express');
   const router  = express.Router();
@@ -48,34 +50,15 @@ function createPreSignalsRouter(redis, db) {
   router.get('/', async (req, res) => {
     try {
       const { limit = 50, minReadiness = 0, signalType, directionBias } = req.query;
-      const limitNum       = Math.min(parseInt(limit, 10)      || 50,  200);
-      const minReadinessN  = parseInt(minReadiness, 10) || 0;
 
-      const symbolsRaw = await redis.get('symbols:active:usdt');
-      if (!symbolsRaw) return res.json({ success: true, items: [] });
-      const symbols = tryParse(symbolsRaw) || [];
-
-      const pipeline = redis.pipeline();
-      for (const sym of symbols) pipeline.get(`presignal:${sym}`);
-      const results = await pipeline.exec();
-
-      const items = [];
-      for (let i = 0; i < symbols.length; i++) {
-        const ps = tryParse(results[i][1]);
-        if (!ps) continue;
-        if (ps.readinessScore < minReadinessN) continue;
-        if (signalType    && ps.signalType    !== signalType)    continue;
-        if (directionBias && ps.directionBias !== directionBias) continue;
-        items.push(ps);
-      }
-
-      items.sort((a, b) => b.readinessScore - a.readinessScore);
-
-      return res.json({
-        success : true,
-        count   : items.length,
-        items   : items.slice(0, limitNum),
+      const items = await getPreMoveScan(redis, {
+        limit,
+        minReadiness,
+        signalType,
+        directionBias,
       });
+
+      return res.json({ success: true, count: items.length, items });
     } catch (err) {
       console.error('[preSignalsRoute] / error:', err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

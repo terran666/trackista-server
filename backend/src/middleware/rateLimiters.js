@@ -43,9 +43,9 @@ function createRateLimiter({ max, windowSec, keyPrefix }) {
 //   RATE_LIMIT_COMMENT_MAX=30     RATE_LIMIT_COMMENT_WINDOW_SEC=3600
 //   RATE_LIMIT_VOTE_MAX=200       RATE_LIMIT_VOTE_WINDOW_SEC=3600
 //   RATE_LIMIT_AUTH_MAX=10        RATE_LIMIT_AUTH_WINDOW_SEC=60
-const createPostLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_POST_MAX    || '10',  10), windowSec: parseInt(process.env.RATE_LIMIT_POST_WINDOW_SEC    || '3600', 10), keyPrefix: 'post' });
-const createCommentLimiter = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_COMMENT_MAX || '30',  10), windowSec: parseInt(process.env.RATE_LIMIT_COMMENT_WINDOW_SEC || '3600', 10), keyPrefix: 'comment' });
-const createVoteLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_VOTE_MAX    || '200', 10), windowSec: parseInt(process.env.RATE_LIMIT_VOTE_WINDOW_SEC    || '3600', 10), keyPrefix: 'vote' });
-const createAuthLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_AUTH_MAX    || '10',  10), windowSec: parseInt(process.env.RATE_LIMIT_AUTH_WINDOW_SEC    || '60',   10), keyPrefix: 'auth' });
+const createPostLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_POST_MAX    || '10',  10) || 10,   windowSec: parseInt(process.env.RATE_LIMIT_POST_WINDOW_SEC    || '3600', 10) || 3600, keyPrefix: 'post' });
+const createCommentLimiter = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_COMMENT_MAX || '30',  10) || 30,   windowSec: parseInt(process.env.RATE_LIMIT_COMMENT_WINDOW_SEC || '3600', 10) || 3600, keyPrefix: 'comment' });
+const createVoteLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_VOTE_MAX    || '200', 10) || 200,  windowSec: parseInt(process.env.RATE_LIMIT_VOTE_WINDOW_SEC    || '3600', 10) || 3600, keyPrefix: 'vote' });
+const createAuthLimiter    = createRateLimiter({ max: parseInt(process.env.RATE_LIMIT_AUTH_MAX    || '10',  10) || 10,   windowSec: parseInt(process.env.RATE_LIMIT_AUTH_WINDOW_SEC    || '60',   10) || 60,   keyPrefix: 'auth' });
 
 module.exports = { createPostLimiter, createCommentLimiter, createVoteLimiter, createAuthLimiter };

@@ -14,7 +14,7 @@ function fetchBars(symbol, interval, limit, marketType) {
   const url   = `${base}?symbol=${symbol}&interval=${interval}&limit=${limit}`;
   return binanceFetch(url, undefined, 'autoLevelsRoute', symbol, `klines:${interval}:${limit}`)
     .then(res => {
-      if (!res.ok) throw new Error(`Binance ${res.status}`);
+      if (!res.ok) { const e = new Error(`Binance ${res.status}`); e.status = res.status; throw e; }
       return res.json();
     })
     .then(raw => {

@@ -93,6 +93,9 @@ function bulkHandler(req, res) {
   if (!Array.isArray(rays) || rays.length === 0) {
     return fail('Missing or invalid field: rays (expected non-empty array)', { rays });
   }
+  if (rays.length > 10000) {
+    return fail('rays array too large (max 10000 per request)');
+  }
 
   console.log(`[saved-rays] bulk input symbol=${symbol.toUpperCase()} marketType=${marketType} source=${source || 'saved-rays'} createdFrom=${createdFrom || 'unknown'} count=${rays.length}`);
 

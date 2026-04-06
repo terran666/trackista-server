@@ -29,12 +29,35 @@ function ensureFile() {
 
 function readStore() {
   ensureFile();
-  const raw = fs.readFileSync(DATA_FILE, 'utf8');
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    if (!raw || !raw.trim()) throw new Error('empty file');
+    return JSON.parse(raw);
+  } catch (err) {
+    const bak = DATA_FILE + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf8');
+        const store = JSON.parse(raw);
+        console.error('[tracked-levels-store] main file corrupted — restored from .bak');
+        writeStore(store);
+        return store;
+      } catch (_) {}
+    }
+    console.error('[tracked-levels-store] data file corrupted, reinitializing:', err.message);
+    const empty = { nextId: 1, levels: [], fingerprints: {} };
+    writeStore(empty);
+    return empty;
+  }
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
+  }
+  fs.renameSync(tmp, DATA_FILE);
 }
 
 // Replace all records for symbol+marketType+tf+source with a fresh set.
@@ -122,9 +145,14 @@ function patchOne(id, patch) {
   const store = readStore();
   const idx   = store.levels.findIndex(l => l.id === id);
   if (idx === -1) return null;
-  const PATCHABLE = new Set(['alertEnabled', 'price']);
+  const PATCHABLE = new Set(['alertEnabled', 'price', 'watchMode', 'alertOptions']);
   for (const key of Object.keys(patch)) {
-    if (PATCHABLE.has(key)) store.levels[idx][key] = patch[key];
+    if (!PATCHABLE.has(key)) continue;
+    if (key === 'alertOptions' && patch[key] && typeof patch[key] === 'object') {
+      store.levels[idx].alertOptions = { ...(store.levels[idx].alertOptions || {}), ...patch[key] };
+    } else {
+      store.levels[idx][key] = patch[key];
+    }
   }
   store.levels[idx].updatedAt = Date.now();
   writeStore(store);
@@ -149,9 +177,9 @@ function patchMany(ids, patch) {
   return count;
 }
 
-module.exports = { bulkSave, getAll, getById, removeOne, removeMany, patchOne, patchMany };
-
 function getById(id) {
   const { levels } = readStore();
   return levels.find(l => l.id === id) || null;
 }
+
+module.exports = { bulkSave, getAll, getById, removeOne, removeMany, patchOne, patchMany };

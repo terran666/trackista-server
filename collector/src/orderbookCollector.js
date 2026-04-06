@@ -10,7 +10,7 @@ const BINANCE_REST_BASE  = 'https://api.binance.com';
 const BINANCE_WS_BASE    = 'wss://stream.binance.com:9443';
 const TOP_LEVELS         = 200;         // top N bids / asks stored in Redis per side
 const SNAPSHOT_LIMIT     = 1000;        // REST depth snapshot depth (full book)
-const FLUSH_INTERVAL_MS      = parseInt(process.env.ORDERBOOK_FLUSH_INTERVAL_MS || '1000', 10); // write orderbook snapshots to Redis (default 1s)
+const FLUSH_INTERVAL_MS      = parseInt(process.env.ORDERBOOK_FLUSH_INTERVAL_MS || '300', 10); // write orderbook snapshots to Redis (default 300ms)
 const WALL_SCAN_INTERVAL_MS  = parseInt(process.env.WALL_SCAN_INTERVAL_MS || '10000', 10); // write walls independently (default 10s)
 const RECONNECT_DELAY_MS     = 5000;            // WS reconnect delay after close
 // Spot /api/v3/depth?limit=1000 = 20 weight per call.
@@ -52,6 +52,11 @@ function setGlobalBackoff(durationMs) {
     );
   }
 }
+
+// ─── Module-level Redis reference ───────────────────────────────────────────
+// Set in start() so syncBook can write initial walls key on first sync
+// (eliminates the 10–15 s startup delay where tracked=false blocks orderbook).
+let _redis = null;
 
 // ─── 24h volume cache ─────────────────────────────────────────────
 //
@@ -117,13 +122,14 @@ function startVolumeRefresh(symbols) {
 // ─── Wall lifetime state store ────────────────────────────────────
 //
 // Tracks when each wall was first and last seen so we can compute
-// lifetimeMs per wall.  Identity key: `${symbol}:${side}:${price}`.
+// lifetimeMs per wall.  Identity key: `${side}:${price}` nested under symbol.
 //
-// Map<key, { firstSeenTs, lastSeenTs }>
+// Map<symbol, Map<wallKey, { firstSeenTs, lastSeenTs }>>
+//
+// Nested structure: cleanup is O(walls_for_this_symbol) instead of
+// O(total_walls_across_all_symbols) per tick.
 //
 // After a restart all times reset — this is acceptable for MVP.
-// Entries for walls that have disappeared are kept for one extra cycle
-// (to allow downstream analysis of pulled walls) then pruned.
 //
 const wallLifetimes = new Map();
 
@@ -138,30 +144,32 @@ const wallLifetimes = new Map();
  * @returns {Array<object>}       same array, walls annotated in-place
  */
 function applyWallLifetime(symbol, walls, now) {
+  if (!wallLifetimes.has(symbol)) wallLifetimes.set(symbol, new Map());
+  const symLifetimes = wallLifetimes.get(symbol);
+
   const activeKeys = new Set();
 
   for (const wall of walls) {
-    const key = `${symbol}:${wall.side}:${wall.price}`;
+    const key = `${wall.side}:${wall.price}`;
     activeKeys.add(key);
 
-    if (wallLifetimes.has(key)) {
-      const entry = wallLifetimes.get(key);
+    if (symLifetimes.has(key)) {
+      const entry = symLifetimes.get(key);
       entry.lastSeenTs = now;
-      wall.firstSeenTs  = entry.firstSeenTs;
-      wall.lastSeenTs   = now;
-      wall.lifetimeMs   = now - entry.firstSeenTs;
+      wall.firstSeenTs = entry.firstSeenTs;
+      wall.lastSeenTs  = now;
+      wall.lifetimeMs  = now - entry.firstSeenTs;
     } else {
-      wallLifetimes.set(key, { firstSeenTs: now, lastSeenTs: now });
+      symLifetimes.set(key, { firstSeenTs: now, lastSeenTs: now });
       wall.firstSeenTs = now;
       wall.lastSeenTs  = now;
       wall.lifetimeMs  = 0;
     }
   }
 
-  // Prune stale entries (walls no longer present for this symbol)
-  for (const key of wallLifetimes.keys()) {
-    if (!key.startsWith(`${symbol}:`)) continue;
-    if (!activeKeys.has(key)) wallLifetimes.delete(key);
+  // Prune stale entries — only iterates this symbol's walls, not all symbols'
+  for (const key of symLifetimes.keys()) {
+    if (!activeKeys.has(key)) symLifetimes.delete(key);
   }
 
   return walls;
@@ -231,6 +239,8 @@ function getOrCreateBook(symbol) {
       rateLimitBackoffUntilMs:  0,      // do not attempt REST before this ts
       deactivated:              false,  // set true by symbol watcher to stop reconnect cycle
       ws:                       null,   // live WebSocket ref for forced close
+      _bestBid:                 null,   // cached best bid price; null = invalidated
+      _bestAsk:                 null,   // cached best ask price; null = invalidated
     });
   }
   return bookStates.get(symbol);
@@ -238,23 +248,45 @@ function getOrCreateBook(symbol) {
 
 // ─── Book update helpers ──────────────────────────────────────────
 
-// Apply a Binance diff-update array [[priceStr, sizeStr], ...] to a Map.
-// size = 0  → remove the price level
-// size > 0  → set / overwrite the price level
-function applyLevels(map, levels) {
+// Apply a Binance diff-update array [[priceStr, sizeStr], ...] to the bid Map.
+// size = 0  → remove the price level (invalidate bestBid cache if it was removed)
+// size > 0  → set / overwrite the price level (update bestBid cache if improved)
+function applyBidLevels(state, levels) {
   for (const [priceStr, sizeStr] of levels) {
     const size = parseFloat(sizeStr);
     if (size === 0) {
-      map.delete(priceStr);
+      state.bids.delete(priceStr);
+      if (state._bestBid !== null && parseFloat(priceStr) === state._bestBid) {
+        state._bestBid = null; // best bid removed — next getBestBid() will rescan
+      }
     } else {
-      map.set(priceStr, size);
+      state.bids.set(priceStr, size);
+      const price = parseFloat(priceStr);
+      if (state._bestBid !== null && price > state._bestBid) state._bestBid = price;
+    }
+  }
+}
+
+// Same for asks (best ask = lowest ask price).
+function applyAskLevels(state, levels) {
+  for (const [priceStr, sizeStr] of levels) {
+    const size = parseFloat(sizeStr);
+    if (size === 0) {
+      state.asks.delete(priceStr);
+      if (state._bestAsk !== null && parseFloat(priceStr) === state._bestAsk) {
+        state._bestAsk = null; // best ask removed — next getBestAsk() will rescan
+      }
+    } else {
+      state.asks.set(priceStr, size);
+      const price = parseFloat(priceStr);
+      if (state._bestAsk !== null && price < state._bestAsk) state._bestAsk = price;
     }
   }
 }
 
 function applyEvent(state, event) {
-  applyLevels(state.bids, event.b);
-  applyLevels(state.asks, event.a);
+  applyBidLevels(state, event.b);
+  applyAskLevels(state, event.a);
   state.lastUpdateId = event.u;
   state.updatedAt    = event.E || Date.now();
   state.dirty        = true;
@@ -272,27 +304,23 @@ function applyEvent(state, event) {
 // and /api/density-view — all three must reflect the same raw levels.
 //
 function buildSnapshot(state) {
+  // Single-pass map: compute price + usdValue together, avoiding a second .map() call.
+  // Math.round(x * 100) / 100 avoids string allocation from toFixed(2).
   const bids = [...state.bids.entries()]
-    .map(([p, s]) => ({ price: parseFloat(p), size: s }))
+    .map(([p, s]) => {
+      const price = parseFloat(p);
+      return { price, rawPrice: price, size: s, usdValue: Math.round(price * s * 100) / 100 };
+    })
     .sort((a, b) => b.price - a.price)
-    .slice(0, TOP_LEVELS)
-    .map(l => ({
-      price:    l.price,
-      rawPrice: l.price,
-      size:     l.size,
-      usdValue: parseFloat((l.price * l.size).toFixed(2)),
-    }));
+    .slice(0, TOP_LEVELS);
 
   const asks = [...state.asks.entries()]
-    .map(([p, s]) => ({ price: parseFloat(p), size: s }))
+    .map(([p, s]) => {
+      const price = parseFloat(p);
+      return { price, rawPrice: price, size: s, usdValue: Math.round(price * s * 100) / 100 };
+    })
     .sort((a, b) => a.price - b.price)
-    .slice(0, TOP_LEVELS)
-    .map(l => ({
-      price:    l.price,
-      rawPrice: l.price,
-      size:     l.size,
-      usdValue: parseFloat((l.price * l.size).toFixed(2)),
-    }));
+    .slice(0, TOP_LEVELS);
 
   const bestBid  = bids.length > 0 ? bids[0].price : null;
   const bestAsk  = asks.length > 0 ? asks[0].price : null;
@@ -341,22 +369,28 @@ function startFlushTimer(redis) {
 
 // ─── Wall scan helpers ────────────────────────────────────────────
 
-function getBestBid(bidsMap) {
+// Returns cached best bid from BookState, falling back to a full O(n) scan only
+// when the cache has been invalidated (e.g. the current best level was deleted).
+function getBestBid(state) {
+  if (state._bestBid !== null) return state._bestBid;
   let best = -Infinity;
-  for (const p of bidsMap.keys()) {
+  for (const p of state.bids.keys()) {
     const price = parseFloat(p);
     if (price > best) best = price;
   }
-  return best === -Infinity ? null : best;
+  state._bestBid = best === -Infinity ? null : best;
+  return state._bestBid;
 }
 
-function getBestAsk(asksMap) {
+function getBestAsk(state) {
+  if (state._bestAsk !== null) return state._bestAsk;
   let best = Infinity;
-  for (const p of asksMap.keys()) {
+  for (const p of state.asks.keys()) {
     const price = parseFloat(p);
     if (price < best) best = price;
   }
-  return best === Infinity ? null : best;
+  state._bestAsk = best === Infinity ? null : best;
+  return state._bestAsk;
 }
 
 // ─── Wall scan timer (walls:SYM, decoupled, slower) ──────────────────────────
@@ -380,8 +414,8 @@ function startWallScanTimer(redis) {
     for (const state of bookStates.values()) {
       if (!state.synced) continue;
 
-      const bestBid = getBestBid(state.bids);
-      const bestAsk = getBestAsk(state.asks);
+      const bestBid = getBestBid(state);
+      const bestAsk = getBestAsk(state);
       if (bestBid === null || bestAsk === null) continue;
 
       const midPrice      = parseFloat(((bestBid + bestAsk) / 2).toFixed(8));
@@ -535,6 +569,12 @@ async function syncBook(state) {
 
   if (!snapshot) return false;
 
+  if (!Array.isArray(snapshot.bids) || !Array.isArray(snapshot.asks)) {
+    console.error(`[orderbook] ${sym}: invalid snapshot structure — missing or non-array bids/asks`);
+    state.syncing = false;
+    return false;
+  }
+
   const snapId = snapshot.lastUpdateId;
   console.log(
     `[orderbook] ${sym}: snapshot lastUpdateId=${snapId}` +
@@ -579,9 +619,40 @@ async function syncBook(state) {
     applied++;
   }
 
+  // Invalidate best-price caches: the snapshot cleared bids/asks with direct .set()
+  // calls that bypassed applyBidLevels/applyAskLevels, so the caches are stale.
+  state._bestBid = null;
+  state._bestAsk = null;
+
   state.buffer  = [];
   state.synced  = true;
   state.dirty   = true;
+
+  // Write an initial walls key immediately after the first sync so the frontend
+  // receives tracked:true on its next useWalls poll instead of waiting up to
+  // WALL_SCAN_INTERVAL_MS (10s) + useWalls poll interval (5s) = up to 15s.
+  if (_redis) {
+    const bestBid = getBestBid(state);
+    const bestAsk = getBestAsk(state);
+    if (bestBid !== null && bestAsk !== null) {
+      const midPrice      = parseFloat(((bestBid + bestAsk) / 2).toFixed(8));
+      const volume24h     = volumeCache.get(sym);
+      const wallThreshold = getWallThreshold(volume24h);
+      const walls         = detectWallsFromBook(state.bids, state.asks, midPrice, wallThreshold);
+      applyWallLifetime(sym, walls, Date.now());
+      _redis.set(`walls:${sym}`, JSON.stringify({
+        symbol:        sym,
+        marketType:    'spot',
+        updatedAt:     Date.now(),
+        bestBid,
+        bestAsk,
+        midPrice,
+        wallThreshold,
+        walls,
+      })).catch(err => console.error(`[orderbook] ${sym}: initial walls key write failed:`, err.message));
+      console.log(`[orderbook] ${sym}: wrote initial walls key (${walls.length} walls) to unblock frontend`);
+    }
+  }
 
   // Mirror success to Redis rate-limit state if we were previously in backoff
   if (rateLimitStateStore.getMarketState('spot').backoffUntilTs !== null) {
@@ -824,6 +895,7 @@ async function start(redis) {
   startVolumeRefresh(symbols);
   startStatsLogger();
 
+  _redis = redis;
   startFlushTimer(redis);
   startWallScanTimer(redis);
   startSymbolWatcher(redis);

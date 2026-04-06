@@ -186,6 +186,10 @@ function attachBinanceWsProxy(httpServer) {
 
       // Forward client messages → upstream (subscribe / unsubscribe JSON frames)
       clientWs.on('message', (data, isBinary) => {
+        if (data.length > 1024 * 1024) {
+          clientWs.close(1009, 'message too large');
+          return;
+        }
         const info = activeConnections.get(connId);
         const up   = info?.upstream;
         if (up && up.readyState === WebSocket.OPEN) {

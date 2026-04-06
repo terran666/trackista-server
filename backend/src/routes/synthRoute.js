@@ -319,7 +319,7 @@ function createSynthRouter(synthService) {
       const opts = {};
       if (isFinite(speedMult) && speedMult > 0) {
         opts.speedMultiplier = speedMult;
-      } else if (isFinite(speedMs) && speedMs > 0) {
+      } else if (isFinite(speedMs) && speedMs >= 10 && speedMs <= 60_000) {
         opts.targetDelayMs = speedMs; // service uses this directly as delay per bar
       }
       const state = await synthService.startPlayback(symbol, opts);

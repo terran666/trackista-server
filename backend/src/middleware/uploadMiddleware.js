@@ -2,7 +2,7 @@
 
 const multer = require('multer');
 
-const MAX_FILE_SIZE  = parseInt(process.env.ALERT_MAX_IMAGE_BYTES || String(10 * 1024 * 1024), 10);
+const MAX_FILE_SIZE  = parseInt(process.env.ALERT_MAX_IMAGE_BYTES || String(10 * 1024 * 1024), 10) || (10 * 1024 * 1024);
 const ALLOWED_MIMES  = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 const upload = multer({

@@ -217,10 +217,10 @@ function computePreSignalV2(opts) {
 
   // ── Wall bias contradiction penalty ──────────────────────────────
   const wb = base.wallBias;
-  if (base.directionBias === 'up'   && wb === 'bid-heavy') {
+  if (base.directionBias === 'up'   && wb === 'ask-heavy') {
     noisePenalty += 8;
     debugReasons.push('wall bias contradicts up move -8pts');
-  } else if (base.directionBias === 'down' && wb === 'ask-heavy') {
+  } else if (base.directionBias === 'down' && wb === 'bid-heavy') {
     noisePenalty += 8;
     debugReasons.push('wall bias contradicts down move -8pts');
   }

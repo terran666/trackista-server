@@ -77,6 +77,9 @@ function getSlope(points) {
  */
 function isNearLine(points, timestamp, currentPrice, tolerancePct = 0.1) {
   const lineValue   = getLineValueAtTimestamp(points, timestamp);
+  if (!lineValue) {
+    return { near: currentPrice === 0, lineValue, distancePct: currentPrice === 0 ? 0 : Infinity };
+  }
   const distancePct = Math.abs((currentPrice - lineValue) / lineValue) * 100;
   return {
     near:        distancePct <= tolerancePct,

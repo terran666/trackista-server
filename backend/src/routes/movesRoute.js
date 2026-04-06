@@ -135,10 +135,18 @@ function createMovesRouter(redis, db) {
       if (timeframe)   { where.push('timeframe = ?');      params.push(timeframe); }
       if (eventType)   { where.push('event_type = ?');     params.push(eventType); }
       if (status)      { where.push('status = ?');         params.push(status); }
-      if (since)       { where.push('created_at >= ?');    params.push(new Date(since)); }
-      if (until)       { where.push('created_at <= ?');    params.push(new Date(until)); }
-      if (minMovePct)  { where.push('move_pct_at_alert >= ?'); params.push(parseFloat(minMovePct)); }
-      if (minConfidence) { where.push('confidence_score >= ?'); params.push(parseInt(minConfidence, 10)); }
+      if (since) {
+        const sinceDate = new Date(since);
+        if (isNaN(sinceDate.getTime())) return res.status(400).json({ success: false, error: 'invalid since date' });
+        where.push('created_at >= ?'); params.push(sinceDate);
+      }
+      if (until) {
+        const untilDate = new Date(until);
+        if (isNaN(untilDate.getTime())) return res.status(400).json({ success: false, error: 'invalid until date' });
+        where.push('created_at <= ?'); params.push(untilDate);
+      }
+      if (minMovePct != null && minMovePct !== '')  { where.push('move_pct_at_alert >= ?'); params.push(parseFloat(minMovePct)); }
+      if (minConfidence != null && minConfidence !== '') { where.push('confidence_score >= ?'); params.push(parseInt(minConfidence, 10)); }
 
       const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 

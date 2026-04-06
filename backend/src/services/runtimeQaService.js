@@ -22,9 +22,9 @@ const {
   getRulesFor,
 } = require('../engines/moves/runtimeQaEngine');
 
-const INTERVAL_MS    = parseInt(process.env.RUNTIME_QA_INTERVAL_MS    || '30000', 10);
+const INTERVAL_MS    = Math.max(1000, parseInt(process.env.RUNTIME_QA_INTERVAL_MS    || '30000', 10) || 30000);
 const REPORT_TTL_SEC = parseInt(process.env.RUNTIME_QA_REPORT_TTL_SEC || '120',   10);
-const LOG_EVERY_N    = parseInt(process.env.RUNTIME_QA_LOG_EVERY_N    || '5',     10);
+const LOG_EVERY_N    = Math.max(1, parseInt(process.env.RUNTIME_QA_LOG_EVERY_N    || '5',     10) || 5);
 
 const CORE_SYMBOLS   = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
 const SERVICE_KEYS   = [
@@ -55,8 +55,12 @@ function createRuntimeQaService(redis) {
   // ─────────────────────────────────────────────────────────────
   // Main tick
   // ─────────────────────────────────────────────────────────────
+  let tickRunning = false;
+
   async function tick() {
     if (!active) return;
+    if (tickRunning) return;
+    tickRunning = true;
     const nowMs = Date.now();
     runCount++;
 
@@ -109,6 +113,8 @@ function createRuntimeQaService(redis) {
 
     } catch (err) {
       console.error('[runtime-qa] tick error:', err.message);
+    } finally {
+      tickRunning = false;
     }
   }
 
@@ -252,11 +258,11 @@ function createRuntimeQaService(redis) {
     // Override ts check for list payloads (they have no native ts field)
     for (const r of results) {
       if (Array.isArray(happened) && r.keyName === 'screener:rank:happened') {
-        r.stale = false; r.ageMs = 0; r.notes = r.notes.filter(n => !n.includes('stale'));
+        r.stale = false; r.ageMs = 0; r.notes = (r.notes || []).filter(n => !n.includes('stale'));
         if (r.status === 'warning' && r.notes.length === 0) r.status = 'ok';
       }
       if (Array.isArray(eventsRecent) && r.keyName === 'events:recent') {
-        r.stale = false; r.ageMs = 0; r.notes = r.notes.filter(n => !n.includes('stale'));
+        r.stale = false; r.ageMs = 0; r.notes = (r.notes || []).filter(n => !n.includes('stale'));
         if (r.status === 'warning' && r.notes.length === 0) r.status = 'ok';
       }
     }

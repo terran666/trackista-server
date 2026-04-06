@@ -9,12 +9,14 @@
  * GET   /api/levels/:id/watch          — get watch config + alert options
  * GET   /api/levels/:id/watch-state    — get current runtime state from Redis
  * GET   /api/levels/:id/events         — paginated event history from MySQL
+ * GET   /api/levels/watch-states/active — all currently active watch states (bulk)
  */
 
-const manualLevelsStore   = require('../services/manualLevelsStore');
-const trackedLevelsStore  = require('../services/trackedLevelsStore');
-const savedRaysStore      = require('../services/savedRaysStore');
+const manualLevelsStore    = require('../services/manualLevelsStore');
+const trackedLevelsStore   = require('../services/trackedLevelsStore');
+const savedRaysStore       = require('../services/savedRaysStore');
 const trackedExtremesStore = require('../services/trackedExtremesStore');
+const manualSlopedLevelsStore = require('../services/manualSlopedLevelsStore');
 
 const VALID_WATCH_MODES = new Set(['off', 'simple', 'tactic']);
 const VALID_POPUP_PRIO  = new Set(['low', 'normal', 'high', 'urgent']);
@@ -56,6 +58,9 @@ function parseWatchBody(body) {
     if (ao.soundId !== undefined && !VALID_SOUNDS.has(ao.soundId)) {
       errors.push(`alertOptions.soundId must be one of: ${[...VALID_SOUNDS].join(', ')}`);
     }
+    if (ao.notificationEnabled !== undefined && typeof ao.notificationEnabled !== 'boolean') {
+      errors.push('alertOptions.notificationEnabled must be a boolean');
+    }
     if (ao.warnBeforeSeconds !== undefined && ao.warnBeforeSeconds !== null) {
       if (!Number.isInteger(ao.warnBeforeSeconds) || ao.warnBeforeSeconds <= 0) {
         errors.push('alertOptions.warnBeforeSeconds must be a positive integer');
@@ -77,6 +82,84 @@ function parseWatchBody(body) {
 function createLevelWatchRouter(db, redis, watchLoader) {
   const express = require('express');
   const router  = express.Router();
+
+  // ── GET /api/levels/watch-states/active ─────────────────────
+  // Returns all currently active levelwatchstate entries from Redis.
+  // Uses SCAN so it never blocks (unlike KEYS).
+  // Phases considered "active": approaching, precontact, contact, crossed.
+  // Query params:
+  //   ?symbol=BTCUSDT   — filter by symbol (optional)
+  //   ?phase=contact    — filter by phase  (optional, comma-separated)
+  //   ?includeWatching=1 — also return 'watching' phase (default: off)
+  router.get('/watch-states/active', async (req, res) => {
+    const symbolFilter  = req.query.symbol  ? req.query.symbol.toUpperCase()   : null;
+    const phaseFilter   = req.query.phase   ? new Set(req.query.phase.split(',')) : null;
+    const inclWatching  = req.query.includeWatching === '1';
+
+    // Active phases (exclude 'watching' unless requested)
+    const ACTIVE_PHASES = new Set(['approaching', 'precontact', 'contact', 'crossed']);
+    if (inclWatching) ACTIVE_PHASES.add('watching');
+
+    try {
+      const states    = [];
+      const pattern   = symbolFilter
+        ? `levelwatchstate:*:${symbolFilter}:*`
+        : 'levelwatchstate:*';
+
+      // SCAN in batches of 200 — non-blocking on large keyspaces
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+        cursor = nextCursor;
+        if (keys.length === 0) continue;
+
+        const pipeline = redis.pipeline();
+        for (const k of keys) pipeline.get(k);
+        const results = await pipeline.exec();
+
+        for (const [, raw] of results) {
+          if (!raw) continue;
+          let s;
+          try { s = JSON.parse(raw); } catch (_) { continue; }
+          if (!s || !s.phase) continue;
+          if (!ACTIVE_PHASES.has(s.phase)) continue;
+          if (phaseFilter && !phaseFilter.has(s.phase)) continue;
+
+          // Return a lightweight summary — not the full state object
+          states.push({
+            internalId:   s.internalId,
+            symbol:       s.symbol,
+            market:       s.market,
+            phase:        s.phase,
+            popupStatus:  s.popup?.status ?? null,
+            popupTitle:   s.popupTitleKey ?? null,
+            levelPrice:   s.levelPrice    ?? null,
+            currentPrice: s.currentPrice  ?? null,
+            distancePct:  s.absDistancePct ?? null,
+            etaSeconds:   s.etaSeconds     ?? null,
+            touchDetected:    s.touchDetected    ?? false,
+            crossDetectedRaw: s.crossDetectedRaw ?? false,
+            crossConfirmed:   s.crossConfirmed   ?? false,
+            scenarioLeading:  s.scenarioLeading  ?? null,
+            updatedAt:    s.updatedAt ?? null,
+          });
+        }
+      } while (cursor !== '0');
+
+      // Sort: crossed first, then contact, precontact, approaching
+      const phaseOrder = { crossed: 0, contact: 1, precontact: 2, approaching: 3, watching: 4 };
+      states.sort((a, b) => (phaseOrder[a.phase] ?? 9) - (phaseOrder[b.phase] ?? 9));
+
+      return res.json({
+        success: true,
+        count:   states.length,
+        states,
+      });
+    } catch (err) {
+      console.error('[levelWatch] GET watch-states/active error:', err.message);
+      return res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  });
 
   // ── PATCH /api/levels/:id/watch ─────────────────────────────
   router.patch('/:id/watch', async (req, res) => {
@@ -113,6 +196,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
 
         const tl = trackedLevelsStore.getById(id);
         if (tl) {
+          if (userId && tl.userId && tl.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
           const updates = {};
           if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
@@ -146,6 +232,20 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (watchMode    !== undefined) updates.watchMode    = watchMode;
           if (alertOptions)               updates.alertOptions = { ...(ex.alertOptions || {}), ...alertOptions };
           trackedExtremesStore.patchOne(id, updates, userId);
+          if (watchLoader) watchLoader.invalidate();
+          return res.json({ success: true, levelId: id });
+        }
+
+        const sl = manualSlopedLevelsStore.getById(id);
+        if (sl) {
+          if (userId && sl.userId && sl.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Forbidden' });
+          }
+          const updates = {};
+          if (watchEnabled !== undefined) updates.alertEnabled = watchEnabled;
+          if (watchMode    !== undefined) updates.watchMode    = watchMode;
+          if (alertOptions)               updates.alertOptions = { ...(sl.alertOptions || {}), ...alertOptions };
+          manualSlopedLevelsStore.patch(id, updates);
           if (watchLoader) watchLoader.invalidate();
           return res.json({ success: true, levelId: id });
         }
@@ -250,8 +350,7 @@ function createLevelWatchRouter(db, redis, watchLoader) {
             telegram_priority:              ao.telegramPriority             !== undefined ? ao.telegramPriority                  : undefined,
             sound_enabled:                  ao.soundEnabled                 !== undefined ? (ao.soundEnabled ? 1 : 0)            : undefined,
             sound_id:                       ao.soundId                      !== undefined ? ao.soundId                           : undefined,
-            sound_group:                    ao.soundGroup                   !== undefined ? ao.soundGroup                        : undefined,
-          };
+            sound_group:                    ao.soundGroup                   !== undefined ? ao.soundGroup                        : undefined,            notification_enabled:           ao.notificationEnabled          !== undefined ? (ao.notificationEnabled ? 1 : 0)        : undefined,          };
 
           // Filter out undefined values
           const definedFields = Object.fromEntries(
@@ -410,6 +509,7 @@ function createLevelWatchRouter(db, redis, watchLoader) {
         soundEnabled:                 Boolean(ao.sound_enabled),
         soundId:                      ao.sound_id    || 'default_alert',
         soundGroup:                   ao.sound_group || 'standard',
+        notificationEnabled:          Boolean(ao.notification_enabled),
       } : null;
 
       return res.json({
@@ -515,6 +615,25 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           });
         }
 
+        const sl = manualSlopedLevelsStore.getById(id);
+        if (sl) {
+          const market = sl.marketType || 'futures';
+          const key    = `levelwatchstate:${market}:${sl.symbol}:sloped-${id}`;
+          const raw    = await redis.get(key);
+          let   state  = null;
+          if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+          return res.json({
+            success:         true,
+            levelId:         id,
+            symbol:          sl.symbol,
+            watchEnabled:    Boolean(sl.alertEnabled),
+            watchMode:       sl.watchMode || 'simple',
+            lastTriggeredAt: null,
+            triggerCount:    0,
+            state,
+          });
+        }
+
         return res.status(404).json({ success: false, error: 'Level not found' });
       }
 
@@ -567,7 +686,7 @@ function createLevelWatchRouter(db, redis, watchLoader) {
       return res.status(400).json({ success: false, error: 'Invalid level id' });
     }
 
-    const limit  = Math.min(parseInt(req.query.limit  || '50', 10), 500);
+    const limit  = Math.max(1, Math.min(parseInt(req.query.limit  || '50', 10) || 50, 500));
     const cursor = parseInt(req.query.cursor || '0', 10); // last seen id (pagination)
 
     try {

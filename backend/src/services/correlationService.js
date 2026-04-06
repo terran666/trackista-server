@@ -60,8 +60,12 @@ function createCorrelationService(redis) {
   let startedAt      = null;
   let lastRunMs      = 0;
 
+  let tickRunning = false;
+
   async function tick() {
     if (!isRunning) return;
+    if (tickRunning) return;
+    tickRunning = true;
     runCount++;
     const nowMs  = Date.now();
     const tickTs = nowMs;
@@ -138,7 +142,7 @@ function createCorrelationService(redis) {
             btcSymbol          : BTC_SYMBOL,
             timeframe          : cfg.tf,
             window             : cfg.window,
-            correlationToBtc   : r != null ? parseFloat(Math.abs(r).toFixed(4)) : null,
+            correlationToBtc   : r != null ? parseFloat(r.toFixed(4)) : null,
             sampleSize         : n,
             ...classification,
             updatedAt          : nowMs,
@@ -164,6 +168,8 @@ function createCorrelationService(redis) {
       errorsCount++;
       lastErrorMsg = err.message;
       console.error('[correlationService] tick error:', err.message);
+    } finally {
+      tickRunning = false;
     }
   }
 

@@ -146,15 +146,14 @@ function createLevelMonitorService(redis) {
         }
 
         const prevPrice = previousPrices.get(sym) ?? null;
+        // Always update previous price — prevents stale prevPrice when all levels return null
+        previousPrices.set(sym, currentPrice);
 
         const computedLevels = activeLevels
           .map(level => computeLevel(level, currentPrice, prevPrice, signal))
           .filter(Boolean);
 
         if (computedLevels.length === 0) continue;
-
-        // Обновляем previous price
-        previousPrices.set(sym, currentPrice);
 
         // Статистика
         monitoredSymbols++;
@@ -198,7 +197,12 @@ function createLevelMonitorService(redis) {
 
   function start() {
     console.log('[monitor] Level monitor started (1s interval)');
-    setInterval(tick, MONITOR_INTERVAL_MS);
+    let running = false;
+    setInterval(async () => {
+      if (running) return;
+      running = true;
+      try { await tick(); } finally { running = false; }
+    }, MONITOR_INTERVAL_MS);
   }
 
   return { start };

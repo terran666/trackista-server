@@ -20,6 +20,7 @@ const { createAlertEngineService }   = require('./services/alertEngineService');
 const { createMarketImpulseService } = require('./services/marketImpulseService');
 const { createTelegramService }      = require('./services/telegramService');
 const { createAlertDeliveryService } = require('./services/alertDeliveryService');
+const { createWebPushService }       = require('./services/webPushService');
 const { createOrderbookHandler }      = require('./routes/orderbookRoute');
 const { createOrderbookDebugHandler } = require('./routes/orderbookDebugRoute');
 const { createWallsHandler }          = require('./routes/wallsRoute');
@@ -67,6 +68,19 @@ const { createLevelWatchRouter }        = require('./routes/levelWatchRoute');
 const { createLevelEventsRouter }       = require('./routes/levelEventsRoute');
 const { createAlertSoundsRouter }       = require('./routes/alertSoundsRoute');
 const { SyntheticPlaybackService }      = require('./services/syntheticPlaybackService');
+const { runScreenerAlertMigrations }    = require('./services/screenerAlertMigrations');
+const { createScreenerAlertEngine }     = require('./services/screenerAlertEngine');
+const { createScreenerAlertSettingsRouter } = require('./routes/screenerAlertSettingsRoute');
+const { createScreenerAlertsRouter }    = require('./routes/screenerAlertsRoute');
+const { createScreenerSnapshotRouter }  = require('./routes/screenerSnapshotRoute');
+const { createScreenerLiveRouter }      = require('./routes/screenerLiveRoute');
+const { createScreenerDiagnosticsRouter } = require('./routes/screenerDiagnosticsRoute');
+const { createLiveSnapshotRouter }      = require('./routes/liveSnapshotRoute');
+const { createLiveDeltaRouter }         = require('./routes/liveDeltaRoute');
+const { createLiveHealthRouter }        = require('./routes/liveHealthRoute');
+const livePollingMetrics                = require('./services/livePollingMetrics');
+const { createKlineFlatRouter }         = require('./routes/klineFlatRoute');
+const { createScreenerSpotStatsRouter } = require('./routes/screenerSpotStatsRoute');
 const { createSynthRouter }             = require('./routes/synthRoute');
 
 // ─── Configuration ───────────────────────────────────────────────
@@ -119,6 +133,7 @@ db.getConnection()
     runMoveMigrations2(db).catch(err => console.error('[moveMigrations2] Failed:', err.message));
     runBarAggregatorMigrations(db).catch(err => console.error('[barAggregatorMigrations] Failed:', err.message));
     runWatchLevelsMigrations(db).catch(err => console.error('[watchMigrations] Failed:', err.message));
+    runScreenerAlertMigrations(db).catch(err => console.error('[screenerAlertMigrations] Failed:', err.message));
     ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
   })
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
@@ -131,7 +146,8 @@ const monitor = createLevelMonitorService(redis);
 monitor.start();
 
 const telegram      = createTelegramService();
-const alertDelivery = createAlertDeliveryService(redis, telegram);
+const webPushSvc    = createWebPushService(db, redis);
+const alertDelivery = createAlertDeliveryService(redis, telegram, webPushSvc);
 
 const alertEngine   = createAlertEngineService(redis, alertDelivery);
 alertEngine.start();
@@ -170,6 +186,9 @@ correlationSvc.start();
 // ─── Level Watch Engine ─────────────────────────────────────────────
 const levelWatchEngine = createLevelWatchEngine(redis, db, alertDelivery);
 levelWatchEngine.start();
+
+const screenerAlertEngine = createScreenerAlertEngine(redis, db, alertDelivery);
+screenerAlertEngine.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -719,23 +738,23 @@ app.get('/api/tracked-rays/:id/value',    trackedRaysLineValue);
 
 // ─── Manual sloped levels endpoints ────────────────────────────────
 console.log('[backend] registering /api/manual-sloped-levels routes');
-app.post('/api/manual-sloped-levels',             manualSlopedCreate);
+app.post('/api/manual-sloped-levels',             authRequired, manualSlopedCreate);
 app.get('/api/manual-sloped-levels',              manualSlopedList);
-app.delete('/api/manual-sloped-levels/:id',       manualSlopedDelete);
-app.patch('/api/manual-sloped-levels/:id',        manualSlopedPatch);
+app.delete('/api/manual-sloped-levels/:id',       authRequired, manualSlopedDelete);
+app.patch('/api/manual-sloped-levels/:id',        authRequired, (req, res) => { manualSlopedPatch(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');
 app.post('/api/saved-rays/bulk',             authRequired, (req, res) => { savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/saved-rays',                   authRequired, savedRaysList);
-app.delete('/api/saved-rays/:id',            authRequired, savedRaysDeleteOne);
-app.post('/api/saved-rays/delete-many',      authRequired, savedRaysDeleteMany);
+app.delete('/api/saved-rays/:id',            authRequired, (req, res) => { savedRaysDeleteOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/saved-rays/delete-many',      authRequired, (req, res) => { savedRaysDeleteMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.patch('/api/saved-rays/:id/watch',       authRequired, (req, res) => savedRaysWatchPatch(req, res, levelWatchEngine?.loader));
 app.get('/api/saved-rays/:id/watch',         authRequired, savedRaysWatchGet);
 app.get('/api/saved-rays/:id/watch-state',   authRequired, (req, res) => savedRaysWatchState(req, res, redis));
-app.patch('/api/saved-rays/:id',             authRequired, savedRaysPatchOne);
-app.post('/api/saved-rays/patch-many',       authRequired, savedRaysPatchMany);
+app.patch('/api/saved-rays/:id',             authRequired, (req, res) => { savedRaysPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/saved-rays/patch-many',       authRequired, (req, res) => { savedRaysPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');
@@ -743,6 +762,10 @@ app.post('/api/extremes-rays',        extremesRaysCreate);
 app.get('/api/extremes-rays',         extremesRaysList);
 app.patch('/api/extremes-rays/:id',   extremesRaysPatch);
 app.delete('/api/extremes-rays/:id',  extremesRaysDelete);
+
+// ─── Level Watch Engine routes (must be before /api/levels/:symbol wildcard) ───
+console.log('[backend] registering /api/levels/:id/watch routes');
+app.use('/api/levels', authRequired, createLevelWatchRouter(db, redis, levelWatchEngine.loader));
 
 // GET /api/levels/state/:symbol
 app.get('/api/levels/state/:symbol', async (req, res) => {
@@ -764,39 +787,46 @@ app.get('/api/levels/state/:symbol', async (req, res) => {
 });
 
 // GET /api/levels/watchlist — symbols with approaching/touched/breakout/bounce
+// Reads from levelwatchstate:* (levelWatchEngine) instead of legacy levelstate:{sym}
 app.get('/api/levels/watchlist', async (req, res) => {
   try {
-    const rawSymbols = await redis.get('symbols:active:usdt');
-    if (!rawSymbols) {
-      return res.status(503).json({ success: false, error: 'Symbol list not available yet' });
-    }
-    const symbols = JSON.parse(rawSymbols);
+    const symbolMap = new Map(); // symbol → { approaching, touched, breakoutCandidate, bounceCandidate, updatedAt, levelCount }
 
-    const pipeline = redis.pipeline();
-    for (const sym of symbols) pipeline.get(`levelstate:${sym}`);
-    const results = await pipeline.exec();
+    // SCAN all current watch states — non-blocking
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'levelwatchstate:*', 'COUNT', 200);
+      cursor = nextCursor;
+      if (keys.length === 0) continue;
+
+      const pipeline = redis.pipeline();
+      for (const k of keys) pipeline.get(k);
+      const results = await pipeline.exec();
+
+      for (const [, raw] of results) {
+        if (!raw) continue;
+        let s;
+        try { s = JSON.parse(raw); } catch (_) { continue; }
+        if (!s || !s.symbol || !s.phase) continue;
+
+        const sym  = s.symbol;
+        const prev = symbolMap.get(sym) || { approaching: false, touched: false, breakoutCandidate: false, bounceCandidate: false, updatedAt: 0, levelCount: 0 };
+        prev.levelCount++;
+        if (s.phase === 'approaching' || s.phase === 'precontact') prev.approaching = true;
+        if (s.phase === 'contact' || s.touchDetected)              prev.touched = true;
+        if (s.crossDetectedRaw || s.crossConfirmed || s.phase === 'crossed') prev.breakoutCandidate = true;
+        if (s.rollbackAfterAlert)                                  prev.bounceCandidate = true;
+        if ((s.updatedAt ?? 0) > prev.updatedAt)                   prev.updatedAt = s.updatedAt;
+        symbolMap.set(sym, prev);
+      }
+    } while (cursor !== '0');
 
     const watchlist = [];
-    for (const [err, raw] of results) {
-      if (err || !raw) continue;
-      let state;
-      try { state = JSON.parse(raw); } catch (_) { continue; }
-      const { levels: lvls = [] } = state;
-      const approaching       = lvls.some(l => l.approaching);
-      const touched           = lvls.some(l => l.touched);
-      const breakoutCandidate = lvls.some(l => l.breakoutCandidate);
-      const bounceCandidate   = lvls.some(l => l.bounceCandidate);
-      if (!approaching && !touched && !breakoutCandidate && !bounceCandidate) continue;
-      watchlist.push({
-        symbol:             state.symbol,
-        updatedAt:          state.updatedAt,
-        levelCount:         lvls.length,
-        approaching,
-        touched,
-        breakoutCandidate,
-        bounceCandidate,
-      });
+    for (const [symbol, data] of symbolMap) {
+      if (!data.approaching && !data.touched && !data.breakoutCandidate && !data.bounceCandidate) continue;
+      watchlist.push({ symbol, ...data });
     }
+    watchlist.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
     return res.json({ success: true, count: watchlist.length, watchlist });
   } catch (err) {
@@ -971,6 +1001,155 @@ app.get('/api/alerts/watchlist', async (req, res) => {
   }
 });
 
+// GET /api/push/vapid-public-key
+app.get('/api/push/vapid-public-key', (req, res) => {
+  if (!process.env.VAPID_PUBLIC_KEY) return res.status(503).json({ error: 'Push not configured' });
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
+
+// POST /api/push/subscribe
+app.post('/api/push/subscribe', authRequired, async (req, res) => {
+  const { endpoint, keys, deviceName } = req.body;
+  if (!endpoint || !keys?.p256dh || !keys?.auth) {
+    return res.status(400).json({ error: 'Missing required fields: endpoint, keys.p256dh, keys.auth' });
+  }
+  try {
+    await db.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, device_name, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE p256dh=VALUES(p256dh), auth=VALUES(auth), updated_at=NOW()`,
+      [req.user.id, endpoint, keys.p256dh, keys.auth, deviceName || null, req.headers['user-agent'] || null],
+    );
+    res.status(201).json({ success: true });
+  } catch (err) {
+    console.error('[push.subscribe] error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/push/unsubscribe
+app.delete('/api/push/unsubscribe', authRequired, async (req, res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) return res.status(400).json({ error: 'Missing endpoint' });
+  try {
+    await db.query(
+      'DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?',
+      [req.user.id, endpoint],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[push.unsubscribe] error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/alerts/live?since=<ts>
+// Timestamp-based global alert polling — returns all alerts newer than `since` (ms epoch).
+// Any page can poll this endpoint to receive the same stream of alert events.
+// Response: { ts, items: NormalizedAlertEvent[], nextSince }
+// Frontend: poll every 2-5s with since=nextSince from previous response.
+app.get('/api/alerts/live', async (req, res) => {
+  const since = parseInt(req.query.since || '0', 10);
+  const nowTs = Date.now();
+  try {
+    // Query sorted set (score = createdAt) for events newer than `since`
+    const zsetRaws = await redis.zrangebyscore('alerts:live', since + 1, '+inf');
+    let items;
+    if (zsetRaws.length > 0) {
+      items = zsetRaws
+        .map(r => { try { return JSON.parse(r); } catch (_) { return null; } })
+        .filter(Boolean);
+      // Sorted set range is ascending by score, but verify sort
+      items.sort((a, b) => a.createdAt - b.createdAt);
+    } else {
+      // Fallback: scan alerts:recent list (covers migration period before sorted set populates)
+      const raws = await redis.lrange('alerts:recent', 0, 499);
+      items = [];
+      for (const r of raws) {
+        try { const a = JSON.parse(r); if (a && a.createdAt > since) items.push(a); } catch (_) {}
+      }
+      items.sort((a, b) => a.createdAt - b.createdAt);
+    }
+    const nextSince = items.length > 0 ? items[items.length - 1].createdAt : since;
+    return res.json({ ts: nowTs, items, nextSince });
+  } catch (err) {
+    console.error('[backend] Error reading alerts:live:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// GET /api/alerts/active
+// Returns all currently monitored levels with their live watch state.
+// Source: unifiedWatchLevelsLoader (in-memory cache, 5 s TTL) + Redis levelwatchstate keys.
+// Sort: crossed → contact → precontact → approaching → watching; within same phase by distancePct asc.
+app.get('/api/alerts/active', async (req, res) => {
+  try {
+    const levels = await levelWatchEngine.loader.load();
+    if (levels.length === 0) {
+      return res.json({ success: true, count: 0, items: [] });
+    }
+
+    // Fetch all Redis watch states in one pipeline
+    const pipeline = redis.pipeline();
+    for (const lvl of levels) {
+      pipeline.get(`levelwatchstate:${lvl.market}:${lvl.symbol}:${lvl.internalId}`);
+    }
+    const results = await pipeline.exec();
+
+    const items = [];
+    for (let i = 0; i < levels.length; i++) {
+      const lvl = levels[i];
+      const [, raw] = results[i];
+      let state = null;
+      if (raw) { try { state = JSON.parse(raw); } catch (_) {} }
+
+      items.push({
+        internalId:          lvl.internalId,
+        levelId:             lvl.levelId          ?? null,
+        externalLevelId:     lvl.externalLevelId  ?? null,
+        symbol:              lvl.symbol,
+        market:              lvl.market,
+        source:              lvl.source           ?? null,
+        geometryType:        lvl.geometryType     ?? 'horizontal',
+        side:                lvl.side             ?? null,
+        tf:                  lvl.timeframe        ?? null,
+        price:               lvl.price            ?? null,
+        watchEnabled:        true,
+        alertEnabled:        true,
+        notificationEnabled: lvl.alertOptions?.notificationEnabled ?? false,
+        popupEnabled:        lvl.alertOptions?.popupEnabled        ?? true,
+        telegramEnabled:     lvl.alertOptions?.telegramEnabled      ?? false,
+        // Runtime state — null when engine hasn't ticked for this level yet (Redis TTL 90 s)
+        phase:               state?.phase          ?? null,
+        distancePct:         state?.absDistancePct ?? null,
+        currentPrice:        state?.currentPrice   ?? null,
+        levelPriceRef:       state?.levelPrice     ?? lvl.price ?? null,
+        etaLabel:            state?.etaLabel       ?? null,
+        etaSeconds:          state?.etaSeconds     ?? null,
+        approaching:         state?.approaching    ?? null,
+        movingToward:        state?.movingToward   ?? null,
+        scenarioLeading:     state?.scenarioLeading ?? null,
+        lastEventType:       state?.lastEventType  ?? null,
+        lastEventAt:         state?.lastEventAt    ?? null,
+        updatedAt:           state?.updatedAt      ?? null,
+      });
+    }
+
+    // Sort by phase priority, then distancePct ascending
+    const phaseOrder = { crossed: 0, contact: 1, precontact: 2, approaching: 3, watching: 4 };
+    items.sort((a, b) => {
+      const pd = (phaseOrder[a.phase] ?? 9) - (phaseOrder[b.phase] ?? 9);
+      if (pd !== 0) return pd;
+      return (a.distancePct ?? 999) - (b.distancePct ?? 999);
+    });
+
+    return res.json({ success: true, count: items.length, items });
+  } catch (err) {
+    console.error('[backend] GET /api/alerts/active error:', err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 // GET /api/alerts/:symbol?limit=20
 app.get('/api/alerts/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
@@ -996,6 +1175,25 @@ app.get('/api/alerts/:symbol', async (req, res) => {
 // ─── WS proxy debug endpoint ─────────────────────────────────────────────────
 // ─── Move Intelligence routes ───────────────────────────────────
 console.log('[backend] registering /api/moves, /api/events, /api/pre-signals, /api/screener routes');
+
+// ── Screener domain routes ──────────────────────────────────────────────────
+// Auth-protected sub-routes registered BEFORE the general screenerMovesRouter
+// so Express does not swallow them under the wildcard mount.
+app.use('/api/screener/alert-settings', authRequired, createScreenerAlertSettingsRouter(db, screenerAlertEngine));
+app.use('/api/screener/alerts',         authRequired, createScreenerAlertsRouter(redis));
+
+// New unified snapshot / live-delta / diagnostics routes
+app.use('/api/screener/snapshot',        createScreenerSnapshotRouter(redis));
+app.use('/api/screener/live',            createScreenerLiveRouter(redis));
+app.use('/api/screener/debug',           createScreenerDiagnosticsRouter(redis));
+app.use('/api/screener/kline-flat',      createKlineFlatRouter(redis));
+app.use('/api/screener/spot-stats',      createScreenerSpotStatsRouter(redis));
+
+// Production live-polling endpoints (scope-aware, rate-guarded, with pollingHints)
+app.use('/api/live/snapshot',            createLiveSnapshotRouter(redis, livePollingMetrics));
+app.use('/api/live/delta',               createLiveDeltaRouter(redis, livePollingMetrics));
+
+// Legacy screener routes kept for backwards-compat while frontend migrates
 app.use('/api/moves',                    createMovesRouter(redis, db));
 app.use('/api/events',                   createMovesRouter(redis, db));
 app.use('/api/pre-signals',              createPreSignalsRouter(redis, db));
@@ -1011,9 +1209,7 @@ app.use('/api/correlation',              createCorrelationRouter(redis));
 console.log('[backend] registering /api/symbol routes');
 app.use('/api/symbol',                   createSymbolDataRouter(redis));
 
-// ─── Level Watch Engine routes ─────────────────────────────────────────
-console.log('[backend] registering /api/levels/:id/watch routes');
-app.use('/api/levels', authRequired, createLevelWatchRouter(db, redis, levelWatchEngine.loader));
+// (levelWatchRouter already registered above, before /api/levels/:symbol)
 console.log('[backend] registering /api/level-events routes');
 app.use('/api/level-events', createLevelEventsRouter(db));
 console.log('[backend] registering /api/alert-sounds route');
@@ -1033,6 +1229,10 @@ app.get('/screener', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 
 // ─── Phase 3: Runtime QA routes ─────────────────────────────────
 console.log('[backend] registering /api/runtime-qa routes');
 app.use('/api/runtime-qa', createRuntimeQaRouter(redis, runtimeQaSvc));
+
+// ─── Live polling health ─────────────────────────────────────────
+console.log('[backend] registering /api/runtime/live-health route');
+app.use('/api/runtime/live-health', createLiveHealthRouter(livePollingMetrics));
 
 // ─── Block 1: 1-minute bars routes ───────────────────────────────
 console.log('[backend] registering /api/bars routes');

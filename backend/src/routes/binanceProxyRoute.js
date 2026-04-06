@@ -30,6 +30,7 @@
  */
 
 const { binanceFetch, buildSummary, getBackoffState } = require('../utils/binanceRestLogger');
+const { authRequired } = require('../middleware/authRequired');
 
 const SPOT_BASE    = 'https://api.binance.com/api';
 const FUTURES_BASE = 'https://fapi.binance.com/fapi';
@@ -50,8 +51,8 @@ const CACHE_TTL_MS = {
   '/v1/exchangeInfo': 5 * 60 * 1000,
   '/v3/ticker/24hr':  30 * 1000,       // 30 s — prices update frequently
   '/v1/ticker/24hr':  30 * 1000,
-  '/v3/klines':       15 * 1000,       // 15 s — preview charts for Screener
-  '/v1/klines':       15 * 1000,
+  '/v3/klines':       60 * 1000,       // 60 s — chart history, changes slowly
+  '/v1/klines':       60 * 1000,
 };
 const DEFAULT_CACHE_TTL_MS = 30 * 1000;
 
@@ -517,7 +518,7 @@ function createBinanceProxyRouter() {
   // /api/binance/debug — proxy diagnostics
   // Shows backoff state, cache entries, recent errors, per-endpoint request counts.
   // Enhanced with Screener-specific metrics.
-  router.get('/debug', (_req, res) => {
+  router.get('/debug', authRequired, (_req, res) => {
     const now = Date.now();
     const cacheEntries = [];
     let totalCacheSize = 0;

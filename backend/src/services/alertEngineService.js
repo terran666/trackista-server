@@ -107,8 +107,10 @@ function buildAlertEvent(type, symbol, now, opts = {}) {
   const id = `${symbol}-${type}-${now}-${idSuffix}`;
   const severity = getSeverity(type, signalContext);
   const { title, message } = buildText(type, symbol, levelPrice, levelType, distancePct, signalContext);
+  // Priority model aligned with levelWatchEngine
+  const priority = severity === 'high' ? 'high' : severity === 'medium' ? 'medium' : 'low';
 
-  const event = { id, type, symbol, severity, title, message, createdAt: now };
+  const event = { id, type, symbol, severity, priority, title, message, createdAt: now };
   if (levelId    !== null) event.levelId    = levelId;
   if (levelPrice !== null) event.levelPrice = levelPrice;
   if (levelType  !== null) event.levelType  = levelType;
@@ -143,9 +145,14 @@ function createAlertEngineService(redis, deliveryService = null) {
     pipeline.set(`alert:${event.id}`, json, 'EX', ALERT_EVENT_TTL_SEC);
     pipeline.lpush('alerts:recent', json);
     pipeline.ltrim('alerts:recent', 0, ALERT_RECENT_LIMIT - 1);
+    // market_in_play never triggers push and is not level-based — exclude from global live feed
+    if (event.type !== 'market_in_play') {
+      pipeline.zadd('alerts:live', event.createdAt, json);
+      pipeline.zremrangebyrank('alerts:live', 0, -(ALERT_RECENT_LIMIT + 1));
+    }
     await pipeline.exec();
     totalAlerts++;
-    console.log(`[alerts] created type=${event.type} symbol=${event.symbol} severity=${event.severity}`);
+    console.log(`[alert.published] id=${event.id} type=${event.type} symbol=${event.symbol} priority=${event.priority}`);
 
     // Delivery layer — без блокировки alert engine при ошибке доставки
     if (deliveryService) {

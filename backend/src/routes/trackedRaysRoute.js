@@ -255,6 +255,9 @@ function deleteManyHandler(req, res) {
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
   }
+  if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+    return res.status(400).json({ success: false, error: 'All ids must be positive integers' });
+  }
 
   try {
     const count = store.removeMany(ids);
@@ -278,6 +281,9 @@ function patchManyHandler(req, res) {
   const { ids, patch } = req.body || {};
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+  }
+  if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+    return res.status(400).json({ success: false, error: 'All ids must be positive integers' });
   }
   if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
     return res.status(400).json({ success: false, error: 'patch must be a non-empty object' });

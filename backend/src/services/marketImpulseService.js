@@ -17,6 +17,7 @@ function envFloat(key, def) {
 // ─── Config accessors (read each tick so env changes take effect) ─
 function cfg() {
   return {
+    // --- classic impulse: 2.5% in 5s + 2x volume spike ---
     enabled:             envBool ('MARKET_IMPULSE_ENABLED',              true),
     windowSec:           envInt  ('MARKET_IMPULSE_WINDOW_SEC',           5),
     priceMovePct:        envFloat('MARKET_IMPULSE_PRICE_MOVE_PCT',       2.5),
@@ -25,6 +26,11 @@ function cfg() {
     minBaselineVolume:   envFloat('MARKET_IMPULSE_MIN_BASELINE_VOLUME',  1),
     requireFullBaseline: envBool ('MARKET_IMPULSE_REQUIRE_FULL_BASELINE', true),
     debug:               envBool ('MARKET_IMPULSE_DEBUG',                false),
+    // --- surge: 5%+ in 60s, no volume spike required ---
+    surgeEnabled:        envBool ('PRICE_SURGE_ENABLED',                 true),
+    surgeWindowSec:      envInt  ('PRICE_SURGE_WINDOW_SEC',              60),
+    surgeMovePct:        envFloat('PRICE_SURGE_MOVE_PCT',                5.0),
+    surgeCooldownSec:    envInt  ('PRICE_SURGE_COOLDOWN_SEC',            300),
   };
 }
 
@@ -33,7 +39,7 @@ const ENGINE_INTERVAL_MS   = 1000;
 const COOLDOWN_SEC         = 60;           // alert engine cooldown per symbol
 const ALERT_EVENT_TTL_SEC  = 7 * 24 * 3600;
 const ALERT_RECENT_LIMIT   = 500;
-const PRICE_HISTORY_MAX_MS = 90 * 1000;   // keep last 90s of price points
+const PRICE_HISTORY_MAX_MS = 130 * 1000;  // keep last 130s of price points (covers 60s surge window)
 const SUMMARY_LOG_INTERVAL = 30;          // ticks between summary log lines
 
 // ─── Utility ─────────────────────────────────────────────────────
@@ -93,6 +99,15 @@ function createMarketImpulseService(redis, deliveryService = null) {
     await redis.set(`alertcooldown:market_impulse:${symbol}:generic`, '1', 'EX', COOLDOWN_SEC);
   }
 
+  // ── Surge cooldown (independent from impulse cooldown) ───────
+  async function isSurgeCooldownActive(symbol) {
+    const v = await redis.get(`alertcooldown:price_surge:${symbol}:generic`);
+    return v !== null;
+  }
+  async function setSurgeCooldown(symbol, sec) {
+    await redis.set(`alertcooldown:price_surge:${symbol}:generic`, '1', 'EX', sec);
+  }
+
   // ── Persist alert to Redis ───────────────────────────────────
   async function pushAlert(event) {
     const json = JSON.stringify(event);
@@ -100,12 +115,15 @@ function createMarketImpulseService(redis, deliveryService = null) {
     p.set(`alert:${event.id}`, json, 'EX', ALERT_EVENT_TTL_SEC);
     p.lpush('alerts:recent', json);
     p.ltrim('alerts:recent', 0, ALERT_RECENT_LIMIT - 1);
+    // Sorted set for timestamp-based polling (GET /api/alerts/live?since=<ts>)
+    p.zadd('alerts:live', event.createdAt, json);
+    p.zremrangebyrank('alerts:live', 0, -(ALERT_RECENT_LIMIT + 1));
     await p.exec();
     totalAlerts++;
 
     const sc = event.signalContext;
     console.log(
-      `[impulse] detected symbol=${event.symbol}` +
+      `[alert.published] id=${event.id} type=${event.type} symbol=${event.symbol} priority=${event.priority}` +
       ` dir=${sc.impulseDirection}` +
       ` move5s=${sc.priceMovePct5s.toFixed(2)}%` +
       ` volSpike=${sc.volumeSpikeRatio.toFixed(2)}x` +
@@ -174,6 +192,24 @@ function createMarketImpulseService(redis, deliveryService = null) {
     };
   }
 
+  // ── Surge computation (5%+ in 60s, no volume spike required) ─
+  function computeSurgeMetrics(symbol, currentPrice, nowMs, c) {
+    if (c.requireFullBaseline && !hasFullBaseline(symbol, nowMs, c.baselineSec)) {
+      return null;
+    }
+    const priceNAgo = getPriceNSecondsAgo(symbol, c.surgeWindowSec, nowMs);
+    if (priceNAgo === null || priceNAgo === 0) return null;
+
+    const priceMovePct = ((currentPrice - priceNAgo) / priceNAgo) * 100;
+    if (Math.abs(priceMovePct) < c.surgeMovePct) return null;
+
+    return {
+      direction:   priceMovePct > 0 ? 'UP' : 'DOWN',
+      priceMovePct,
+      windowSec:   c.surgeWindowSec,
+    };
+  }
+
   // ── Main tick ────────────────────────────────────────────────
   async function tick() {
     tickCount++;
@@ -215,45 +251,82 @@ function createMarketImpulseService(redis, deliveryService = null) {
         // Record price point BEFORE computing (so history includes current price)
         addPricePoint(sym, currentPrice, nowMs);
 
+        // ── Classic impulse: 2.5% in 5s + 2× volume spike ────────
         const m = computeImpulseMetrics(sym, currentPrice, metrics, nowMs, c);
 
         if (!m) {
           if (c.requireFullBaseline && !hasFullBaseline(sym, nowMs, c.baselineSec)) {
             warmupCount++;
+            continue; // still warming up — skip surge check too
           }
-          continue;
+        } else {
+          // Per-symbol alert engine cooldown
+          const onCooldown = await isCooldownActive(sym);
+          if (!onCooldown) {
+            const id    = `${sym}-market_impulse-${nowMs}-generic`;
+            const priority = m.severity === 'critical' ? 'critical' : 'high';
+            const event = {
+              id,
+              type:         'market_impulse',
+              symbol:       sym,
+              severity:     m.severity,
+              priority,
+              title:        `${sym} market impulse detected`,
+              message:      `${sym} moved ${m.priceMovePct5s.toFixed(2)}% in ${c.windowSec}s with ${m.volumeSpikeRatio.toFixed(2)}x volume spike`,
+              createdAt:    nowMs,
+              currentPrice,
+              signalContext: {
+                impulseDirection:  m.impulseDirection,
+                impulseScore:      m.impulseScore,
+                signalConfidence:  m.signalConfidence,
+                priceMovePct5s:    parseFloat(m.priceMovePct5s.toFixed(4)),
+                volume5s:          m.volume5s,
+                baselineVolume5s:  parseFloat(m.baselineVolume5s.toFixed(2)),
+                volumeSpikeRatio:  parseFloat(m.volumeSpikeRatio.toFixed(4)),
+                impulseWindowSec:  m.impulseWindowSec,
+              },
+            };
+            await pushAlert(event);
+            await setCooldown(sym);
+            detectedCount++;
+          }
         }
 
-        // Per-symbol alert engine cooldown
-        const onCooldown = await isCooldownActive(sym);
-        if (onCooldown) continue;
-
-        const id    = `${sym}-market_impulse-${nowMs}-generic`;
-        const event = {
-          id,
-          type:         'market_impulse',
-          symbol:       sym,
-          severity:     m.severity,
-          title:        `${sym} market impulse detected`,
-          message:      `${sym} moved ${m.priceMovePct5s.toFixed(2)}% in ${c.windowSec}s with ${m.volumeSpikeRatio.toFixed(2)}x volume spike`,
-          createdAt:    nowMs,
-          currentPrice,
-          signalContext: {
-            impulseDirection:  m.impulseDirection,
-            impulseScore:      m.impulseScore,
-            signalConfidence:  m.signalConfidence,
-            priceMovePct5s:    parseFloat(m.priceMovePct5s.toFixed(4)),
-            volume5s:          m.volume5s,
-            baselineVolume5s:  parseFloat(m.baselineVolume5s.toFixed(2)),
-            volumeSpikeRatio:  parseFloat(m.volumeSpikeRatio.toFixed(4)),
-            impulseWindowSec:  m.impulseWindowSec,
-          },
-        };
-
-        await pushAlert(event);
-        await setCooldown(sym);
-        detectedCount++;
-      }
+        // ── Surge check: 5%+ in 60s, no volume spike required ────
+        if (c.surgeEnabled) {
+          const surge = computeSurgeMetrics(sym, currentPrice, nowMs, c);
+          if (surge) {
+            const surgeOnCooldown = await isSurgeCooldownActive(sym);
+            if (!surgeOnCooldown) {
+              const surgeId  = `${sym}-price_surge-${nowMs}-generic`;
+              const surgeEvent = {
+                id:           surgeId,
+                type:         'price_surge',
+                symbol:       sym,
+                severity:     Math.abs(surge.priceMovePct) >= 10 ? 'critical' : 'high',
+                priority:     Math.abs(surge.priceMovePct) >= 10 ? 'critical' : 'high',
+                title:        `${sym} surge ${surge.direction} ${surge.priceMovePct.toFixed(1)}%`,
+                message:      `${sym} moved ${surge.priceMovePct.toFixed(2)}% in ${surge.windowSec}s`,
+                createdAt:    nowMs,
+                currentPrice,
+                signalContext: {
+                  impulseDirection:  surge.direction,
+                  impulseScore:      clamp(Math.abs(surge.priceMovePct) * 15, 0, 100),
+                  signalConfidence:  clamp((Math.abs(surge.priceMovePct) / c.surgeMovePct) * 100, 0, 100),
+                  priceMovePct5s:    parseFloat(surge.priceMovePct.toFixed(4)),
+                  volume5s:          0,
+                  baselineVolume5s:  0,
+                  volumeSpikeRatio:  0,
+                  impulseWindowSec:  surge.windowSec,
+                },
+              };
+              await pushAlert(surgeEvent);
+              await setSurgeCooldown(sym, c.surgeCooldownSec);
+              detectedCount++;
+            }
+          }
+        }
+      } // end per-symbol loop
 
       if (logSummary) {
         console.log(
@@ -268,7 +341,7 @@ function createMarketImpulseService(redis, deliveryService = null) {
   }
 
   function start() {
-    console.log('[impulse] Market impulse service started — 5s price move + 2x volume spike rule');
+    console.log('[impulse] Market impulse service started — 5s/2.5%+2x-spike + surge 60s/5%+');
     let running = false;
     setInterval(async () => {
       if (running) return; // skip if previous tick still in progress

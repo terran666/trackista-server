@@ -14,6 +14,7 @@ function envInt(key, defaultVal) {
 // ─── Delivery feature flags ───────────────────────────────────────
 const SEND_FLAGS = {
   market_impulse:             () => envBool('TELEGRAM_SEND_MARKET_IMPULSE',                 true),
+  price_surge:                () => envBool('TELEGRAM_SEND_PRICE_SURGE',                    true),
   market_in_play:             () => envBool('TELEGRAM_SEND_MARKET_IN_PLAY',                 true),
   level_breakout_candidate:   () => envBool('TELEGRAM_SEND_LEVEL_BREAKOUT_CANDIDATE',       true),
   level_bounce_candidate:     () => envBool('TELEGRAM_SEND_LEVEL_BOUNCE_CANDIDATE',         true),
@@ -29,12 +30,15 @@ const SEND_FLAGS = {
   early_warning:              () => envBool('TELEGRAM_SEND_EARLY_WARNING',                  false),
   nearby_wall_appeared:       () => envBool('TELEGRAM_SEND_NEARBY_WALL_APPEARED',           false),
   nearby_wall_strengthened:   () => envBool('TELEGRAM_SEND_NEARBY_WALL_STRENGTHENED',       false),
+  growth_alert:               () => envBool('TELEGRAM_SEND_GROWTH_ALERT',                   true),
+  drop_alert:                 () => envBool('TELEGRAM_SEND_DROP_ALERT',                     true),
 };
 
 // ─── Delivery cooldowns (seconds) ────────────────────────────────
 function getCooldownSec(type) {
   switch (type) {
     case 'market_impulse':           return envInt('TELEGRAM_DELIVERY_COOLDOWN_MARKET_IMPULSE',                120);
+    case 'price_surge':              return envInt('TELEGRAM_DELIVERY_COOLDOWN_PRICE_SURGE',                   300);
     case 'market_in_play':           return envInt('TELEGRAM_DELIVERY_COOLDOWN_MARKET_IN_PLAY',               180);
     case 'level_breakout_candidate': return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_BREAKOUT_CANDIDATE',     180);
     case 'level_bounce_candidate':   return envInt('TELEGRAM_DELIVERY_COOLDOWN_LEVEL_BOUNCE_CANDIDATE',       180);
@@ -49,6 +53,8 @@ function getCooldownSec(type) {
     case 'early_warning':            return envInt('TELEGRAM_DELIVERY_COOLDOWN_EARLY_WARNING',       120);
     case 'nearby_wall_appeared':     return 180;
     case 'nearby_wall_strengthened': return 180;
+    case 'growth_alert':             return envInt('TELEGRAM_DELIVERY_COOLDOWN_GROWTH_ALERT', 900);
+    case 'drop_alert':               return envInt('TELEGRAM_DELIVERY_COOLDOWN_DROP_ALERT',   900);
     default:                         return 120;
   }
 }
@@ -56,7 +62,7 @@ function getCooldownSec(type) {
 // ─── Time formatter ───────────────────────────────────────────────
 function fmtTime(ts) {
   const d = ts ? new Date(ts) : new Date();
-  return d.toTimeString().slice(0, 8); // HH:mm:ss
+  return d.toISOString().slice(11, 19); // HH:mm:ss UTC
 }
 
 // ─── Number helpers ───────────────────────────────────────────────
@@ -84,6 +90,19 @@ function formatAlertMessage(alert) {
       if (spike !== null) msg += `\nVolume Spike: <b>${spike.toFixed(2)}x</b>`;
       if (score)         msg += `\nScore: <b>${score}</b>`;
       if (conf)          msg += `\nConfidence: <b>${conf}%</b>`;
+      if (price)         msg += `\nPrice: <b>${price}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'price_surge': {
+      const move  = sc.priceMovePct5s != null ? parseFloat(sc.priceMovePct5s) : null;
+      const win   = sc.impulseWindowSec != null ? sc.impulseWindowSec : 60;
+      const price = fmtNum(alert.currentPrice || alert.price, 4);
+      const emoji = dir === 'UP' ? '📈' : '📉';
+      let msg = `${emoji} <b>PRICE SURGE</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (dir)           msg += `\nDirection: <b>${dir}</b>`;
+      if (move !== null) msg += `\nMove (${win}s): <b>${move >= 0 ? '+' : ''}${move.toFixed(2)}%</b>`;
       if (price)         msg += `\nPrice: <b>${price}</b>`;
       msg += `\nTime: <b>${time}</b>`;
       return msg;
@@ -235,6 +254,40 @@ function formatAlertMessage(alert) {
       return msg;
     }
 
+    case 'growth_alert': {
+      const emoji   = '📈';
+      const change  = alert.changePct  != null ? parseFloat(alert.changePct).toFixed(2)  : null;
+      const thresh  = alert.thresholdPct != null ? parseFloat(alert.thresholdPct).toFixed(1) : null;
+      const tf      = alert.timeframe   || '';
+      const price   = fmtNum(alert.currentPrice, 4);
+      const vol     = alert.volumeUsdt  != null ? Math.round(alert.volumeUsdt).toLocaleString() : null;
+      let msg = `${emoji} <b>GROWTH ALERT</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (tf)       msg += `\nTimeframe: <b>${tf}</b>`;
+      if (change)   msg += `\nChange: <b>+${change}%</b>`;
+      if (thresh)   msg += `\nThreshold: <b>${thresh}%</b>`;
+      if (price)    msg += `\nPrice: <b>${price}</b>`;
+      if (vol)      msg += `\nVolume: <b>$${vol}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
+    case 'drop_alert': {
+      const emoji   = '📉';
+      const change  = alert.changePct  != null ? parseFloat(alert.changePct).toFixed(2)  : null;
+      const thresh  = alert.thresholdPct != null ? parseFloat(alert.thresholdPct).toFixed(1) : null;
+      const tf      = alert.timeframe   || '';
+      const price   = fmtNum(alert.currentPrice, 4);
+      const vol     = alert.volumeUsdt  != null ? Math.round(alert.volumeUsdt).toLocaleString() : null;
+      let msg = `${emoji} <b>DROP ALERT</b>\n\nSymbol: <b>${alert.symbol}</b>`;
+      if (tf)       msg += `\nTimeframe: <b>${tf}</b>`;
+      if (change)   msg += `\nChange: <b>${change}%</b>`;
+      if (thresh)   msg += `\nThreshold: <b>-${thresh}%</b>`;
+      if (price)    msg += `\nPrice: <b>${price}</b>`;
+      if (vol)      msg += `\nVolume: <b>$${vol}</b>`;
+      msg += `\nTime: <b>${time}</b>`;
+      return msg;
+    }
+
     default:
       return null;
   }
@@ -259,8 +312,9 @@ function buildDeliveryKey(alert) {
     case 'contact_hit':
     case 'crossed_up':
     case 'crossed_down': {
-      const lvl = alert.levelPrice != null ? alert.levelPrice : 'unknown';
-      return `telegram:delivery:${alert.type}:${alert.symbol}:${lvl}`;
+      const lvl    = alert.levelPrice != null ? alert.levelPrice : 'unknown';
+      const market = (alert.market || 'unknown').toLowerCase();
+      return `telegram:delivery:${alert.type}:${alert.symbol}:${market}:${lvl}`;
     }
 
     default:
@@ -375,7 +429,7 @@ function logQualitySkip(alert, result) {
 // Глобальный rate limiter — макс N сообщений в минуту в Telegram
 const GLOBAL_RATE_LIMIT_PER_MIN = envInt('TELEGRAM_RATE_LIMIT_PER_MIN', 5);
 
-function createAlertDeliveryService(redis, telegramService) {
+function createAlertDeliveryService(redis, telegramService, webPushService = null) {
   // ── Global rate limiter (in-memory, per minute) ───────────────
   let sentThisMinute = 0;
   let rateLimitResetAt = Date.now() + 60000;
@@ -398,10 +452,12 @@ function createAlertDeliveryService(redis, telegramService) {
     const cfg = getBurstConfig(alert.type);
     if (!cfg) return { pass: true };
     const key = `telegram:burst:${alert.type}`;
-    const current = await redis.get(key);
-    const count = parseInt(current, 10) || 0;
-    if (count >= cfg.max) {
-      return { pass: false, reason: 'burst_limit', count, window: cfg.window };
+    // Use atomic INCR to avoid TOCTOU — multiple concurrent calls could all pass a GET check
+    const newCount = await redis.incr(key);
+    if (newCount === 1) await redis.expire(key, cfg.window); // set TTL on first increment
+    if (newCount > cfg.max) {
+      await redis.decr(key); // rollback — we're over limit
+      return { pass: false, reason: 'burst_limit', count: newCount - 1, window: cfg.window };
     }
     return { pass: true };
   }
@@ -434,6 +490,21 @@ function createAlertDeliveryService(redis, telegramService) {
 
   // ── handleAlert ───────────────────────────────────────────────
   async function handleAlert(alert) {
+    // ── Web Push — independent of Telegram, evaluated first ──────
+    // Uses webPushService's own shouldSendPush filter + dedup + ratelimit.
+    // Does NOT depend on per-level telegramEnabled or Telegram success.
+    if (webPushService && webPushService.shouldSendPush(alert)) {
+      webPushService.sendPushToAll(alert).catch(err =>
+        console.error('[push] delivery error:', err.message),
+      );
+    }
+
+    // ── Telegram — skip if disabled at the per-level level ────────
+    // ev.delivery.telegram = false when level has telegramEnabled:false.
+    if (alert.delivery?.telegram === false) {
+      return { success: false, skipped: true, reason: 'telegram_disabled_for_level' };
+    }
+
     if (!shouldDeliver(alert)) {
       console.log(`[telegram] skipped type=${alert.type} symbol=${alert.symbol} reason=disabled_by_config`);
       return { success: false, skipped: true, reason: 'disabled_by_config' };
@@ -474,7 +545,7 @@ function createAlertDeliveryService(redis, telegramService) {
 
     if (result.success) {
       incrementRate();
-      await incrementBurstCount(alert.type);
+      // burst count already incremented atomically inside passesBurstLimit
       await markDelivered(key, alert.type);
       console.log(`[telegram] delivered type=${alert.type} symbol=${alert.symbol} messageId=${result.telegramMessageId}`);
       return { success: true, telegramMessageId: result.telegramMessageId };

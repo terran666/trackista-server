@@ -27,8 +27,18 @@ function createLevelEventsRouter(db) {
     const eventType = req.query.eventType || null;
     const from      = req.query.from      ? parseInt(req.query.from, 10)     : null;
     const to        = req.query.to        ? parseInt(req.query.to, 10)       : null;
-    const limit     = Math.min(parseInt(req.query.limit || '50', 10), 500);
+    const limit     = Math.max(1, Math.min(parseInt(req.query.limit || '50', 10) || 50, 500));
     const cursor    = req.query.cursor   ? parseInt(req.query.cursor, 10)    : null;
+
+    if (from !== null && (isNaN(from) || from <= 0)) {
+      return res.status(400).json({ success: false, error: 'from must be a positive timestamp (ms)' });
+    }
+    if (to !== null && (isNaN(to) || to <= 0)) {
+      return res.status(400).json({ success: false, error: 'to must be a positive timestamp (ms)' });
+    }
+    if (from !== null && to !== null && from > to) {
+      return res.status(400).json({ success: false, error: 'from must be <= to' });
+    }
 
     if (market && !['futures', 'spot'].includes(market)) {
       return res.status(400).json({ success: false, error: 'market must be futures or spot' });

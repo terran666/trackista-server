@@ -7,7 +7,8 @@ const { Router } = require('express');
 const { createAuthLimiter } = require('../middleware/rateLimiters');
 const { authRequired }      = require('../middleware/authRequired');
 
-const JWT_SECRET    = process.env.JWT_SECRET     || 'trackista-dev-secret-change-in-production';
+if (!process.env.JWT_SECRET) throw new Error('FATAL: JWT_SECRET environment variable must be set');
+const JWT_SECRET    = process.env.JWT_SECRET;
 const JWT_EXPIRY    = process.env.JWT_EXPIRY      || '30d';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '10', 10);
 
@@ -32,7 +33,7 @@ function createAuthRouter(db, redis) {
     try {
       const [[existing]] = await db.query('SELECT id FROM users WHERE username = ?', [username]);
       if (existing) {
-        return res.status(409).json({ success: false, error: 'Username already taken' });
+        return res.status(400).json({ success: false, error: 'Username already taken' });
       }
 
       const hash   = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -69,8 +70,10 @@ function createAuthRouter(db, redis) {
         'SELECT id, username, password_hash, role, avatar_url FROM users WHERE username = ?',
         [username],
       );
-      // Constant-time failure path — compare against a dummy hash to avoid timing attacks
-      const dummyHash = '$2a$10$AAAAAAAAAAAAAAAAAAAAAA..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+      // Constant-time failure path — always run one bcrypt.compare to avoid user-enumeration
+      // timing attacks. The dummy hash is a valid bcrypt hash; .then(() => false) ensures
+      // we never accept a login for a non-existent user regardless of what compare() returns.
+      const dummyHash = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcg7b3XeKeUxWdeS86AGR0Ij/1m';
       const match = user
         ? await bcrypt.compare(password, user.password_hash)
         : await bcrypt.compare(password, dummyHash).then(() => false);

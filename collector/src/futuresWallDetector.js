@@ -179,6 +179,17 @@ function dropCandidate(symbol, wallKey, candidate, reason, now) {
 function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
   if (!midPrice || midPrice <= 0) return;
 
+  // ── Prune expired presence-memory entries for this symbol ────────────────
+  // presenceMemoryMap entries are written on dropCandidate() and consumed when
+  // the same wall reappears.  Without explicit TTL cleanup the map grows without
+  // bound for symbols whose walls disappear and never return.
+  const _pmCleanup = presenceMemoryMap.get(symbol);
+  if (_pmCleanup) {
+    for (const [key, mem] of _pmCleanup) {
+      if (now - mem.droppedAt >= PRESENCE_MEMORY_TTL_MS) _pmCleanup.delete(key);
+    }
+  }
+
   const threshold       = getFuturesWallThreshold(symbol);
 
   // Smooth linear distance scaling:

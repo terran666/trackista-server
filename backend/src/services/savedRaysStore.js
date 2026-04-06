@@ -24,14 +24,38 @@ function ensureFile() {
 
 function readStore() {
   ensureFile();
-  const raw   = fs.readFileSync(DATA_FILE, 'utf8');
-  const store = JSON.parse(raw);
-  if (!store.rayFingerprints) store.rayFingerprints = {};
-  return store;
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    if (!raw || !raw.trim()) throw new Error('empty file');
+    const store = JSON.parse(raw);
+    if (!store.rayFingerprints) store.rayFingerprints = {};
+    return store;
+  } catch (err) {
+    const bak = DATA_FILE + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf8');
+        const store = JSON.parse(raw);
+        if (!store.rayFingerprints) store.rayFingerprints = {};
+        console.error('[saved-rays-store] main file corrupted — restored from .bak');
+        writeStore(store);
+        return store;
+      } catch (_) {}
+    }
+    console.error('[saved-rays-store] data file corrupted, reinitializing:', err.message);
+    const empty = { nextId: 1, rays: [], rayFingerprints: {} };
+    writeStore(empty);
+    return empty;
+  }
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
+  }
+  fs.renameSync(tmp, DATA_FILE);
 }
 
 /**
@@ -180,7 +204,7 @@ function removeMany(ids, userId = null) {
   const before = store.rays.length;
 
   const removedIds = new Set(store.rays.filter(r => idSet.has(r.id) && (!userId || !r.userId || r.userId === userId)).map(r => r.id));
-  store.rays = store.rays.filter(r => !idSet.has(r.id));
+  store.rays = store.rays.filter(r => !removedIds.has(r.id));
 
   // Clean up fingerprints for removed rays.
   for (const [fp, rayId] of Object.entries(store.rayFingerprints)) {

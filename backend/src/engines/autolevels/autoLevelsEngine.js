@@ -299,7 +299,7 @@ function calculateAutoLevels(rawBars, options) {
       const formationIndex = getFormationIndex(cluster);
       const formationTimestamp = Number.isFinite(Number(bars[formationIndex]?.timestamp))
         ? Number(bars[formationIndex].timestamp)
-        : Math.max(...cluster.items.map(p => Number(p.timestamp) || 0));
+        : Math.max(...cluster.items.map(p => p.timestamp != null ? Number(p.timestamp) : 0));
       const side      = cluster.price <= lastClose ? 'support' : 'resistance';
       const fromIndex = Math.min(bars.length - 1, Math.max(0, formationIndex + 1));
       const virgin    = !virginOnly || isVirginLevel(cluster.price, side, bars, fromIndex, tolerance, policy);
@@ -342,7 +342,7 @@ function calculateAutoLevels(rawBars, options) {
 
   const levels = picked.map((c, idx) => {
     const firstTouchIndex     = Math.min(...c.items.map(p => p.index));
-    const firstTouchTimestamp = Math.min(...c.items.map(p => Number(p.timestamp) || Number.MAX_SAFE_INTEGER));
+    const firstTouchTimestamp = Math.min(...c.items.map(p => p.timestamp != null ? Number(p.timestamp) : Number.MAX_SAFE_INTEGER));
     return {
       index:              idx,
       price:              c.price,

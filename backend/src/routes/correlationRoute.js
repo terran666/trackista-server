@@ -93,8 +93,9 @@ function createCorrelationRouter(redis) {
   // Omit symbols → all active futures
   router.get('/btc/list', async (req, res) => {
     try {
-      const tf     = (req.query.tf     || '5m').toLowerCase();
-      const window = parseInt(req.query.window || '20', 10);
+      const tf  = (req.query.tf || '5m').toLowerCase();
+      const windowVal = parseInt(req.query.window, 10);
+      const window = (Number.isFinite(windowVal) && windowVal > 0) ? windowVal : 20;
       const symList = req.query.symbols;
 
       let symbols;
@@ -136,8 +137,9 @@ function createCorrelationRouter(redis) {
   // GET /api/correlation/btc/summary?tf=5m&window=20
   router.get('/btc/summary', async (req, res) => {
     try {
-      const tf     = (req.query.tf     || '5m').toLowerCase();
-      const window = parseInt(req.query.window || '20', 10);
+      const tf  = (req.query.tf || '5m').toLowerCase();
+      const windowVal = parseInt(req.query.window, 10);
+      const window = (Number.isFinite(windowVal) && windowVal > 0) ? windowVal : 20;
 
       const rawSyms = await redis.get('symbols:active:usdt');
       const symbols = tryParse(rawSyms) || [];

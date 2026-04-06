@@ -1,0 +1,95 @@
+{
+  "nextId": 116,
+  "levels": [
+    {
+      "id": 22,
+      "symbol": "SIRENUSDT",
+      "marketType": "futures",
+      "tf": "15m",
+      "price": 1.2581448613899135,
+      "side": "support",
+      "userId": 2,
+      "createdAt": 1774762398213,
+      "updatedAt": 1774762399550,
+      "alertEnabled": false,
+      "watchMode": "simple",
+      "scenarioMode": "auto",
+      "alertOptions": {
+        "earlyWarningEnabled": true,
+        "warnBeforeSeconds": 60,
+        "warnBeforeDistancePct": 0.3,
+        "popupEnabled": true,
+        "telegramEnabled": false,
+        "soundEnabled": true,
+        "soundId": "default_alert",
+        "soundGroup": "standard",
+        "displayScope": "tab",
+        "badgeEnabled": true
+      }
+    },
+    {
+      "id": 32,
+      "symbol": "NIGHTUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "price": 0.048365789905689384,
+      "side": "support",
+      "userId": 2,
+      "createdAt": 1774814218847,
+      "updatedAt": 1774814220282,
+      "alertEnabled": false,
+      "watchMode": "simple",
+      "scenarioMode": "auto",
+      "alertOptions": {
+        "earlyWarningEnabled": true,
+        "warnBeforeSeconds": 60,
+        "warnBeforeDistancePct": 0.3,
+        "popupEnabled": true,
+        "telegramEnabled": false,
+        "soundEnabled": true,
+        "soundId": "default_alert",
+        "soundGroup": "standard",
+        "displayScope": "tab",
+        "badgeEnabled": true
+      }
+    },
+    {
+      "id": 55,
+      "symbol": "HYPEUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "price": 34.68591425470333,
+      "side": "support",
+      "userId": 2,
+      "createdAt": 1775135491812,
+      "updatedAt": 1775135491810
+    },
+    {
+      "id": 115,
+      "symbol": "STOUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "price": 0.15438086545741705,
+      "side": "support",
+      "userId": 2,
+      "createdAt": 1775471733041,
+      "updatedAt": 1775471734632,
+      "alertEnabled": true,
+      "watchMode": "simple",
+      "scenarioMode": "auto",
+      "alertOptions": {
+        "earlyWarningEnabled": true,
+        "warnBeforeSeconds": 60,
+        "warnBeforeDistancePct": 0.3,
+        "popupEnabled": true,
+        "telegramEnabled": false,
+        "soundEnabled": true,
+        "soundId": "default_alert",
+        "soundGroup": "standard",
+        "displayScope": "tab",
+        "badgeEnabled": true,
+        "notificationEnabled": true
+      }
+    }
+  ]
+}

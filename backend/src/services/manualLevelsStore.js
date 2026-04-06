@@ -17,12 +17,37 @@ function ensureFile() {
 
 function readStore() {
   ensureFile();
-  const raw = fs.readFileSync(DATA_FILE, 'utf8');
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    if (!raw || !raw.trim()) throw new Error('empty file');
+    return JSON.parse(raw);
+  } catch (err) {
+    // Try .bak before resetting to empty
+    const bak = DATA_FILE + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf8');
+        const store = JSON.parse(raw);
+        console.error('[manual-levels-store] main file corrupted — restored from .bak');
+        writeStore(store);
+        return store;
+      } catch (_) {}
+    }
+    console.error('[manual-levels-store] data file corrupted, reinitializing:', err.message);
+    const empty = { nextId: 1, levels: [] };
+    writeStore(empty);
+    return empty;
+  }
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  // Rotate: current main → .bak before replacing
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
+  }
+  fs.renameSync(tmp, DATA_FILE); // atomic on POSIX (Docker/Linux)
 }
 
 function getAll({ symbol, marketType, tf, userId = null } = {}) {

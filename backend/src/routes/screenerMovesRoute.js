@@ -8,7 +8,7 @@
  * GET /api/screener/symbols    — Full live symbol list with enriched metrics
  */
 
-const { buildSymbolRows } = require('../services/screenerSymbolsService');
+const { getPreMoveScan } = require('../services/screenerAggregationService');
 
 function createScreenerMovesRouter(redis, db) {
   const express = require('express');
@@ -176,101 +176,20 @@ function createScreenerMovesRouter(redis, db) {
         limit          = 50,
       } = req.query;
 
-      const limitNum      = Math.min(parseInt(limit, 10)      || 50,  200);
-      const minReadinessN = parseInt(minReadiness, 10) || 0;
-      const minConfN      = parseInt(minConfidence, 10) || 0;
-      const maxDistN      = maxDistancePct != null ? parseFloat(maxDistancePct) : null;
-
-      const symbolsRaw = await redis.get('symbols:active:usdt');
-      if (!symbolsRaw) return res.json({ success: true, items: [] });
-      const symbols = tryParse(symbolsRaw) || [];
-
-      const pipeline = redis.pipeline();
-      for (const sym of symbols) pipeline.get(`presignal:${sym}`);
-      const results = await pipeline.exec();
-
-      const items = [];
-
-      for (let i = 0; i < symbols.length; i++) {
-        const ps = tryParse(results[i][1]);
-        if (!ps) continue;
-
-        if (ps.readinessScore < minReadinessN)                       continue;
-        if (ps.confidenceScore < minConfN)                           continue;
-        if (signalType    && ps.signalType    !== signalType)         continue;
-        if (directionBias && ps.directionBias !== directionBias)      continue;
-        if (wallBias      && ps.wallBias      !== wallBias)           continue;
-        if (accelerationState && ps.accelerationState !== accelerationState) continue;
-        if (maxDistN !== null && ps.distanceToConditionPct !== null && ps.distanceToConditionPct > maxDistN) continue;
-
-        items.push(ps);
-      }
-
-      items.sort((a, b) => b.readinessScore - a.readinessScore);
-
-      return res.json({
-        success : true,
-        count   : items.length,
-        items   : items.slice(0, limitNum),
+      const items = await getPreMoveScan(redis, {
+        minReadiness,
+        minConfidence,
+        signalType,
+        directionBias,
+        wallBias,
+        accelerationState,
+        maxDistancePct,
+        limit,
       });
+
+      return res.json({ success: true, count: items.length, items });
     } catch (err) {
       console.error('[screenerMovesRoute] /pre-moves error:', err.message);
-      return res.status(500).json({ success: false, error: 'Internal server error' });
-    }
-  });
-
-  // ── GET /api/screener/symbols ────────────────────────────────────
-  // Full enriched symbol list: live 60s metrics + 24h liquidity + derivatives
-  // + move events + presignal readiness + quality flags.
-  //
-  // All query params optional (AND-logic when combined):
-  //   priceDir         up|down|any
-  //   priceMinPct      number   — min |priceChangePct60s|
-  //   priceMaxPct      number   — max |priceChangePct60s|
-  //   volumeGrowthMin  number   — min volume growth % (e.g. 200 → spike ≥ 3.0×)
-  //   tradesMin        number   — min tradeCount60s
-  //   turnoverMin      number   — min volumeUsdt60s (USDT)
-  //   vol24hMin        number   — min quoteVol24h (USDT)
-  //   sortBy           priceChange|volume|trades|spike|impulse|readiness|vol24h
-  //   sortDir          desc|asc  (default desc)
-  //   limit            number   default 200, max 500
-  router.get('/symbols', async (req, res) => {
-    try {
-      const {
-        priceDir, priceMinPct, priceMaxPct,
-        volumeGrowthMin, tradesMin, turnoverMin, vol24hMin,
-        sortBy  = 'priceChange',
-        sortDir = 'desc',
-        limit   = 200,
-      } = req.query;
-
-      const { rows, totalScanned, totalMatched } = await buildSymbolRows(redis, {
-        priceDir, priceMinPct, priceMaxPct,
-        volumeGrowthMin, tradesMin, turnoverMin, vol24hMin,
-        sortBy, sortDir, limit,
-      });
-
-      const filtersApplied = {};
-      if (priceDir       && priceDir !== 'any') filtersApplied.priceDir = priceDir;
-      if (priceMinPct    != null) filtersApplied.priceMinPct    = parseFloat(priceMinPct);
-      if (priceMaxPct    != null) filtersApplied.priceMaxPct    = parseFloat(priceMaxPct);
-      if (volumeGrowthMin!= null) filtersApplied.volumeGrowthMin= parseFloat(volumeGrowthMin);
-      if (tradesMin      != null) filtersApplied.tradesMin      = parseInt(tradesMin, 10);
-      if (turnoverMin    != null) filtersApplied.turnoverMin    = parseFloat(turnoverMin);
-      if (vol24hMin      != null) filtersApplied.vol24hMin      = parseFloat(vol24hMin);
-
-      return res.json({
-        ts             : Date.now(),
-        market         : 'futures',
-        count          : rows.length,
-        totalScanned,
-        totalMatched,
-        dataWindow     : '60s',
-        filtersApplied,
-        rows,
-      });
-    } catch (err) {
-      console.error('[screenerMovesRoute] /symbols error:', err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });
     }
   });

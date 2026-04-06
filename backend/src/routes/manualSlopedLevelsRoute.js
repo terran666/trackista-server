@@ -6,6 +6,8 @@ const { getLineValueAtTimestamp } = require('../engines/rays/rayGeometry');
 const VALID_MARKET_TYPES = new Set(['spot', 'futures']);
 const VALID_SIDES        = new Set(['support', 'resistance']);
 const VALID_KINDS        = new Set(['ray', 'line']);
+const VALID_WATCH_MODES  = new Set(['off', 'simple', 'tactic']);
+const VALID_SCENARIO_MODES = new Set(['all_in', 'breakout', 'bounce']);
 
 // ─── Shared validation ────────────────────────────────────────────
 
@@ -180,9 +182,28 @@ function patchHandler(req, res) {
     }
     changes.tracked = body.tracked;
   }
+  if (body.watchMode !== undefined) {
+    if (!VALID_WATCH_MODES.has(body.watchMode)) {
+      return res.status(400).json({ success: false, error: `watchMode must be one of: ${[...VALID_WATCH_MODES].join(', ')}` });
+    }
+    changes.watchMode = body.watchMode;
+  }
+  if (body.scenarioMode !== undefined) {
+    if (!VALID_SCENARIO_MODES.has(body.scenarioMode)) {
+      return res.status(400).json({ success: false, error: `scenarioMode must be one of: ${[...VALID_SCENARIO_MODES].join(', ')}` });
+    }
+    changes.scenarioMode = body.scenarioMode;
+  }
+  if (body.alertOptions !== undefined) {
+    if (typeof body.alertOptions !== 'object' || body.alertOptions === null) {
+      return res.status(400).json({ success: false, error: 'alertOptions must be an object' });
+    }
+    const current = store.getById(id);
+    changes.alertOptions = { ...(current?.alertOptions || {}), ...body.alertOptions };
+  }
 
   if (Object.keys(changes).length === 0) {
-    return res.status(400).json({ success: false, error: 'No patchable fields provided (allowed: points, side, alertEnabled, tracked)' });
+    return res.status(400).json({ success: false, error: 'No patchable fields provided (allowed: points, side, alertEnabled, tracked, watchMode, scenarioMode, alertOptions)' });
   }
 
   try {
@@ -217,8 +238,7 @@ function lineValueHandler(req, res) {
   }
 
   try {
-    const all   = store.getAll();
-    const level = all.find(l => l.id === id);
+    const level = store.getById(id);
     if (!level) {
       return res.status(404).json({ success: false, error: 'Level not found' });
     }

@@ -94,7 +94,8 @@ function createFundingRouter(redis) {
   // GET /api/funding/changes?limit=100
   // Returns last N funding change events (sorted newest first)
   router.get('/changes', async (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+    const limitVal = parseInt(req.query.limit, 10);
+    const limit = (Number.isFinite(limitVal) && limitVal > 0) ? Math.min(limitVal, 500) : 100;
     try {
       const raws   = await redis.lrange('funding:changes', 0, limit - 1);
       const changes = raws.map(r => tryParse(r)).filter(Boolean);

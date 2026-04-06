@@ -165,8 +165,8 @@ function computeBuildingRank(presignal, derivatives) {
   const wb  = presignal.wallBias || 'neutral';
   const dir = presignal.directionBias;
   const wallAlignPts =
-    (dir === 'up'   && wb === 'ask-heavy') ||
-    (dir === 'down' && wb === 'bid-heavy') ? 10 :
+    (dir === 'up'   && wb === 'bid-heavy') ||
+    (dir === 'down' && wb === 'ask-heavy') ? 10 :
     wb === 'neutral' ? 4 : 0;
   breakdown.wallBias = wallAlignPts;
   total += wallAlignPts;

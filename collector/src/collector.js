@@ -23,6 +23,7 @@ const SYMBOL_REFRESH_MS     = 60 * 60 * 1000; // re-fetch symbol list every hour
 const FLUSH_INTERVAL_MS     = 1000;       // write metrics to Redis once per second
 const SUMMARY_LOG_INTERVAL  = 30;        // print aggregation summary every N seconds
 const BUCKET_COUNT          = 60;        // rolling window: 60 one-second buckets
+const MINUTE_BUCKET_COUNT   = 60;        // rolling window: 60 one-minute buckets (1h max)
 const SIGNAL_HISTORY_SIZE   = 60;        // keep last 60 metric snapshots for baseline
 
 // ─── Signal stabilization constants ─────────────────────────────
@@ -122,11 +123,13 @@ function getOrCreateSpotState(symbol) {
   if (!spotStates.has(symbol)) {
     spotStates.set(symbol, {
       symbol,
-      lastPrice:     0,
-      lastTradeTime: 0,
-      currentBucket: null,
-      secondBuckets: [],
-      signalHistory: [],
+      lastPrice:          0,
+      lastTradeTime:      0,
+      currentBucket:      null,
+      secondBuckets:      [],
+      currentMinuteBucket: null,
+      minuteBuckets:       [],
+      signalHistory:      [],
     });
   }
   return spotStates.get(symbol);
@@ -148,6 +151,7 @@ function onSpotTrade(msg) {
   state.lastPrice     = price;
   state.lastTradeTime = tradeTime;
 
+  // ── second bucket management (spot) ─────────────────────────────
   if (!state.currentBucket || state.currentBucket.tsSec !== tradeSec) {
     if (state.currentBucket) {
       state.secondBuckets.push(state.currentBucket);
@@ -156,6 +160,7 @@ function onSpotTrade(msg) {
     state.currentBucket = makeBucket(tradeSec);
   }
 
+  // ── second bucket update (spot) ─────────────────────────────
   const b = state.currentBucket;
   b.volumeUsdt   += tradeValueUsdt;
   b.tradeCount   += 1;
@@ -168,6 +173,21 @@ function onSpotTrade(msg) {
   b.closePrice = price;
   if (b.highPrice === null || price > b.highPrice) b.highPrice = price;
   if (b.lowPrice  === null || price < b.lowPrice)  b.lowPrice  = price;
+
+  // ── minute bucket update (spot) ──────────────────────────────
+  const tradeMinSpot = Math.floor(Math.floor(msg.T / 1000) / 60);
+  if (!state.currentMinuteBucket || state.currentMinuteBucket.tsMin !== tradeMinSpot) {
+    if (state.currentMinuteBucket) {
+      state.minuteBuckets.push(state.currentMinuteBucket);
+      if (state.minuteBuckets.length > MINUTE_BUCKET_COUNT) state.minuteBuckets.shift();
+    }
+    state.currentMinuteBucket = makeMinuteBucket(tradeMinSpot);
+  }
+  const mbSpot = state.currentMinuteBucket;
+  mbSpot.volumeUsdt   += tradeValueUsdt;
+  mbSpot.tradeCount   += 1;
+  if (isMakerSell) mbSpot.sellVolumeUsdt += tradeValueUsdt;
+  else             mbSpot.buyVolumeUsdt  += tradeValueUsdt;
 }
 
 function makeBucket(tsSec) {
@@ -184,6 +204,16 @@ function makeBucket(tsSec) {
   };
 }
 
+function makeMinuteBucket(tsMin) {
+  return {
+    tsMin,
+    volumeUsdt:     0,
+    buyVolumeUsdt:  0,
+    sellVolumeUsdt: 0,
+    tradeCount:     0,
+  };
+}
+
 function getOrCreateState(symbol) {
   if (!symbolStates.has(symbol)) {
     symbolStates.set(symbol, {
@@ -192,6 +222,8 @@ function getOrCreateState(symbol) {
       lastTradeTime:      0,
       currentBucket:      null, // will be set on first trade
       secondBuckets:      [],   // completed buckets, newest at end, max BUCKET_COUNT
+      currentMinuteBucket: null, // current in-flight minute bucket
+      minuteBuckets:       [],   // completed minute buckets, max MINUTE_BUCKET_COUNT
       signalHistory:      [],   // last SIGNAL_HISTORY_SIZE snapshots for baseline
     });
   }
@@ -215,20 +247,26 @@ function onTrade(msg) {
   state.lastPrice     = price;
   state.lastTradeTime = tradeTime;
 
-  // ── bucket management ──────────────────────────────────────────
+  // ── second bucket management ──────────────────────────────────
   if (!state.currentBucket || state.currentBucket.tsSec !== tradeSec) {
-    // Seal the old bucket and push it into the history
     if (state.currentBucket) {
       state.secondBuckets.push(state.currentBucket);
-      // Keep only the last BUCKET_COUNT completed buckets
-      if (state.secondBuckets.length > BUCKET_COUNT) {
-        state.secondBuckets.shift();
-      }
+      if (state.secondBuckets.length > BUCKET_COUNT) state.secondBuckets.shift();
     }
     state.currentBucket = makeBucket(tradeSec);
   }
 
-  // ── update current bucket ──────────────────────────────────────
+  // ── minute bucket management ──────────────────────────────────
+  const tradeMin = Math.floor(tradeSec / 60);
+  if (!state.currentMinuteBucket || state.currentMinuteBucket.tsMin !== tradeMin) {
+    if (state.currentMinuteBucket) {
+      state.minuteBuckets.push(state.currentMinuteBucket);
+      if (state.minuteBuckets.length > MINUTE_BUCKET_COUNT) state.minuteBuckets.shift();
+    }
+    state.currentMinuteBucket = makeMinuteBucket(tradeMin);
+  }
+
+  // ── update current second bucket ──────────────────────────────
   const b = state.currentBucket;
   b.volumeUsdt   += tradeValueUsdt;
   b.tradeCount   += 1;
@@ -241,6 +279,13 @@ function onTrade(msg) {
   b.closePrice = price;
   if (b.highPrice === null || price > b.highPrice) b.highPrice = price;
   if (b.lowPrice  === null || price < b.lowPrice)  b.lowPrice  = price;
+
+  // ── update current minute bucket ──────────────────────────────
+  const mb = state.currentMinuteBucket;
+  mb.volumeUsdt   += tradeValueUsdt;
+  mb.tradeCount   += 1;
+  if (isMakerSell) mb.sellVolumeUsdt += tradeValueUsdt;
+  else             mb.buyVolumeUsdt  += tradeValueUsdt;
 }
 
 // ─── Window aggregation helpers ───────────────────────────────────
@@ -395,6 +440,16 @@ function buildSnapshot(state, nowMs) {
   const w15 = sumBuckets(allBuckets.slice(Math.max(0, total - 15)));
   const w60 = sumBuckets(allBuckets);
 
+  // Minute-level windows (5m / 15m / 30m / 60m)
+  const allMinBuckets = state.currentMinuteBucket
+    ? [...state.minuteBuckets, state.currentMinuteBucket]
+    : [...state.minuteBuckets];
+  const mTotal = allMinBuckets.length;
+  const m5  = mTotal >= 1  ? sumBuckets(allMinBuckets.slice(Math.max(0, mTotal - 5)))  : null;
+  const m15 = mTotal >= 1  ? sumBuckets(allMinBuckets.slice(Math.max(0, mTotal - 15))) : null;
+  const m30 = mTotal >= 1  ? sumBuckets(allMinBuckets.slice(Math.max(0, mTotal - 30))) : null;
+  const m60 = mTotal >= 1  ? sumBuckets(allMinBuckets.slice(Math.max(0, mTotal - 60))) : null;
+
   let priceChangePct60 = 0;
   if (w60.openPrice && w60.openPrice !== 0) {
     priceChangePct60 = ((state.lastPrice - w60.openPrice) / w60.openPrice) * 100;
@@ -425,6 +480,19 @@ function buildSnapshot(state, nowMs) {
     sellVolumeUsdt60s: w60.sellVolumeUsdt,
     deltaUsdt60s:      w60.buyVolumeUsdt - w60.sellVolumeUsdt,
     priceChangePct60s: priceChangePct60,
+    // Minute-level volume windows (null until enough minute buckets accumulate)
+    volumeUsdt5m:      m5  ? m5.volumeUsdt  : null,
+    volumeUsdt15m:     m15 ? m15.volumeUsdt : null,
+    volumeUsdt30m:     m30 ? m30.volumeUsdt : null,
+    volumeUsdt60m:     m60 ? m60.volumeUsdt : null,
+    buyVolumeUsdt5m:   m5  ? m5.buyVolumeUsdt  : null,
+    buyVolumeUsdt15m:  m15 ? m15.buyVolumeUsdt : null,
+    buyVolumeUsdt30m:  m30 ? m30.buyVolumeUsdt : null,
+    buyVolumeUsdt60m:  m60 ? m60.buyVolumeUsdt : null,
+    sellVolumeUsdt5m:  m5  ? m5.sellVolumeUsdt  : null,
+    sellVolumeUsdt15m: m15 ? m15.sellVolumeUsdt : null,
+    sellVolumeUsdt30m: m30 ? m30.sellVolumeUsdt : null,
+    sellVolumeUsdt60m: m60 ? m60.sellVolumeUsdt : null,
     activityScore,
     updatedAt:         nowMs,
   };
@@ -762,6 +830,8 @@ function connectFuturesAggTradeBatch(symbols) {
     setTimeout(() => connectFuturesAggTradeBatch(symbols), 5000);
   });
 }
+
+const futuresAggTradeSet = new Set();
 
 async function startFuturesAggTradeCollector(spotSymbolSet) {
   // Retry up to 6 times (30s) — universe builder might not have run yet

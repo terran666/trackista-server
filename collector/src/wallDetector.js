@@ -90,20 +90,6 @@ function cfg() {
 //
 // Returns walls sorted by usdValue descending.
 
-/**
- * Compute the median of an array of numbers.
- * @param {number[]} arr
- * @returns {number|null}
- */
-function median(arr) {
-  if (arr.length === 0) return null;
-  const sorted = [...arr].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[mid - 1] + sorted[mid]) / 2
-    : sorted[mid];
-}
-
 function detectWalls(snapshot, minWallSizeUSD) {
   if (!snapshot || snapshot.midPrice === null || snapshot.midPrice <= 0) {
     return [];
@@ -213,30 +199,31 @@ function detectWallsFromBook(bids, asks, midPrice, minWallSizeUSD) {
   const { maxDistancePct } = cfg();
   const now = Date.now();
 
-  // Build sorted arrays for distance filtering and strength baseline.
-  const bidLevels = [...bids.entries()]
-    .map(([p, s]) => ({
-      price:    parseFloat(p),
-      size:     s,
-      usdValue: parseFloat((parseFloat(p) * s).toFixed(2)),
-    }))
-    .sort((a, b) => b.price - a.price); // highest first
+  // Pre-filter: only consider levels that meet the USD value threshold before sorting.
+  // Books can have 2000–10000+ price levels; walls typically qualify in 0–5% of entries.
+  // This avoids O(n log n) sort of the entire book when only a handful of levels qualify.
+  const askCandidates = [];
+  for (const [p, s] of asks) {
+    const price    = parseFloat(p);
+    const usdValue = Math.round(price * s * 100) / 100;
+    if (usdValue >= threshold) askCandidates.push({ price, size: s, usdValue });
+  }
+  askCandidates.sort((a, b) => a.price - b.price); // lowest first for early-exit
 
-  const askLevels = [...asks.entries()]
-    .map(([p, s]) => ({
-      price:    parseFloat(p),
-      size:     s,
-      usdValue: parseFloat((parseFloat(p) * s).toFixed(2)),
-    }))
-    .sort((a, b) => a.price - b.price); // lowest first
+  const bidCandidates = [];
+  for (const [p, s] of bids) {
+    const price    = parseFloat(p);
+    const usdValue = Math.round(price * s * 100) / 100;
+    if (usdValue >= threshold) bidCandidates.push({ price, size: s, usdValue });
+  }
+  bidCandidates.sort((a, b) => b.price - a.price); // highest first for early-exit
 
   const walls = [];
 
-  for (const level of askLevels) {
-    if (level.usdValue < threshold) continue;
-    const distancePct = parseFloat((((level.price - midPrice) / midPrice) * 100).toFixed(4));
+  for (const level of askCandidates) {
+    const distancePct = Math.round(((level.price - midPrice) / midPrice) * 1_000_000) / 10_000;
     if (distancePct > maxDistancePct) break; // sorted ascending — safe early exit
-    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
+    const strength = Math.round(level.usdValue / threshold * 100) / 100;
     walls.push({
       side:              'ask',
       price:             level.price,
@@ -251,11 +238,10 @@ function detectWallsFromBook(bids, asks, midPrice, minWallSizeUSD) {
     });
   }
 
-  for (const level of bidLevels) {
-    if (level.usdValue < threshold) continue;
-    const distancePct = parseFloat((((midPrice - level.price) / midPrice) * 100).toFixed(4));
+  for (const level of bidCandidates) {
+    const distancePct = Math.round(((midPrice - level.price) / midPrice) * 1_000_000) / 10_000;
     if (distancePct > maxDistancePct) break; // sorted descending — safe early exit
-    const strength = parseFloat((level.usdValue / threshold).toFixed(2));
+    const strength = Math.round(level.usdValue / threshold * 100) / 100;
     walls.push({
       side:              'bid',
       price:             level.price,

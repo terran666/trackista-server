@@ -74,6 +74,9 @@ function bulkHandler(req, res) {
   if (!Array.isArray(extremes)) {
     return fail('Missing or invalid field: extremes (expected array)');
   }
+  if (extremes.length > 10000) {
+    return fail('extremes array too large (max 10000 per request)');
+  }
 
   console.log(`[tracked-extremes] bulk input symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${extremes.length}`);
 
@@ -164,6 +167,9 @@ function deleteManyHandler(req, res) {
   const { ids } = req.body || {};
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+  }
+  if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+    return res.status(400).json({ success: false, error: 'All ids must be positive integers' });
   }
 
   try {
@@ -264,6 +270,9 @@ function patchManyHandler(req, res) {
   const { ids, patch } = req.body || {};
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+  }
+  if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+    return res.status(400).json({ success: false, error: 'All ids must be positive integers' });
   }
   if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).length === 0) {
     return res.status(400).json({ success: false, error: 'patch must be a non-empty object' });

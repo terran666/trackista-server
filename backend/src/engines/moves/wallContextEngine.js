@@ -78,7 +78,7 @@ function computeWallContext(wallsData, currentPrice) {
   // Wall bounce chance: price close to a significant bid wall
   let wallBounceChance = 0;
   if (nearestBid && nearestBidDistPct !== null && nearestBidDistPct >= 0 && nearestBidDistPct < 1.5) {
-    const strength = nearestBid.strength ?? (nearestBid.usdValue / threshold);
+    const strength = nearestBid.strength ?? ((nearestBid.usdValue ?? 0) / threshold);
     const proximity = Math.max(0, 1 - nearestBidDistPct / 1.5);
     wallBounceChance = Math.min(100, proximity * Math.min(strength, 5) * 20);
   }
@@ -86,7 +86,7 @@ function computeWallContext(wallsData, currentPrice) {
   // Wall break risk: price close to a significant ask wall (upside pressure)
   let wallBreakRisk = 0;
   if (nearestAsk && nearestAskDistPct !== null && nearestAskDistPct >= 0 && nearestAskDistPct < 1.5) {
-    const strength = nearestAsk.strength ?? (nearestAsk.usdValue / threshold);
+    const strength = nearestAsk.strength ?? ((nearestAsk.usdValue ?? 0) / threshold);
     const proximity = Math.max(0, 1 - nearestAskDistPct / 1.5);
     wallBreakRisk = Math.min(100, proximity * Math.min(strength, 5) * 15);
   }

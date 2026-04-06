@@ -19,15 +19,47 @@ function ensureFile() {
 
 function readStore() {
   ensureFile();
-  const raw = fs.readFileSync(DATA_FILE, 'utf8');
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    if (!raw || !raw.trim()) throw new Error('empty file');
+    return JSON.parse(raw);
+  } catch (err) {
+    const bak = DATA_FILE + '.bak';
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf8');
+        const store = JSON.parse(raw);
+        console.error('[manual-sloped-levels-store] main file corrupted — restored from .bak');
+        writeStore(store);
+        return store;
+      } catch (_) {}
+    }
+    console.error('[manual-sloped-levels-store] data file corrupted, reinitializing:', err.message);
+    const empty = { nextId: 1, levels: [] };
+    writeStore(empty);
+    return empty;
+  }
 }
 
 function writeStore(store) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), 'utf8');
+  if (fs.existsSync(DATA_FILE)) {
+    try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
+  }
+  fs.renameSync(tmp, DATA_FILE);
 }
 
 // ─── Public API ───────────────────────────────────────────────────
+
+/**
+ * Return a single manual sloped level by id.
+ * Returns null if not found.
+ */
+function getById(id) {
+  const { levels } = readStore();
+  return levels.find(l => l.id === id) ?? null;
+}
 
 /**
  * Return all manual sloped levels, optionally filtered by symbol and marketType.
@@ -99,4 +131,4 @@ function patch(id, changes) {
   return store.levels[idx];
 }
 
-module.exports = { getAll, create, remove, patch };
+module.exports = { getAll, getById, create, remove, patch };

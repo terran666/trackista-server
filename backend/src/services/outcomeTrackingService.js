@@ -16,9 +16,10 @@ const CONVERSION_WIN_MS = parseInt(process.env.OUTCOME_CONVERSION_WIN_MS   || '1
 
 function createOutcomeTrackingService(redis, db) {
   const watching  = new Map();
-  let timer       = null;
-  let active      = false;
-  let startedAt   = null;
+  let timer        = null;
+  let active       = false;
+  let tickRunning  = false;
+  let startedAt    = null;
   let runCount    = 0;
   let errorsCount = 0;
   let lastErrorMsg= null;
@@ -27,7 +28,8 @@ function createOutcomeTrackingService(redis, db) {
   let lastSuccessTs = null;
 
   async function tick() {
-    if (!active) return;
+    if (!active || tickRunning) return;
+    tickRunning = true;
     const tickTs = Date.now();
     runCount++;
     try {
@@ -64,6 +66,8 @@ function createOutcomeTrackingService(redis, db) {
         lastErrorMessage: err.message,
         status          : 'warning',
       }), 'EX', 120).catch(() => {});
+    } finally {
+      tickRunning = false;
     }
   }
 

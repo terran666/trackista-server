@@ -121,9 +121,11 @@ function createBarAggregatorService(redis, db) {
         rPipe.get(`metrics:${sym}`);
         rPipe.get(`signal:${sym}`);
         rPipe.get(`derivatives:${sym}`);
+        rPipe.get(`kline:futures:${sym}:1m:last`); // fallback when aggTrade is blocked
       }
       const pResults = await rPipe.exec();
 
+      const METRICS_STALE_MS = 120_000; // 2 minutes — if older, use kline fallback
       const bars = [];
       let localMissingMetrics      = 0;
       let localMissingSignal       = 0;
@@ -132,10 +134,28 @@ function createBarAggregatorService(redis, db) {
 
       for (let i = 0; i < symbols.length; i++) {
         const sym         = symbols[i];
-        const base        = i * 3;
-        const metrics     = tryParse(pResults[base + 0]?.[1]);
+        const base        = i * 4;
+        let   metrics     = tryParse(pResults[base + 0]?.[1]);
         const signal      = tryParse(pResults[base + 1]?.[1]);
         const derivatives = tryParse(pResults[base + 2]?.[1]);
+        const klineLast   = tryParse(pResults[base + 3]?.[1]);
+
+        // When aggTrade WS is blocked, metrics.updatedAt becomes stale.
+        // Fall back to kline REST data for OHLC so bars stay accurate.
+        if (metrics && klineLast && klineLast.k) {
+          const metricsAge = Date.now() - (metrics.updatedAt || 0);
+          if (metricsAge > METRICS_STALE_MS) {
+            const k = klineLast.k;
+            metrics = {
+              ...metrics,
+              lastPrice : Number(k.c),
+              open60s   : Number(k.o),
+              high60s   : Number(k.h),
+              low60s    : Number(k.l),
+              updatedAt : klineLast.E || Date.now(),
+            };
+          }
+        }
 
         if (!metrics) {
           localMissingMetrics++;

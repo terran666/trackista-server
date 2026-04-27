@@ -26,6 +26,9 @@ const BUCKET_COUNT          = 60;        // rolling window: 60 one-second bucket
 const MINUTE_BUCKET_COUNT   = 60;        // rolling window: 60 one-minute buckets (1h max)
 const SIGNAL_HISTORY_SIZE   = 60;        // keep last 60 metric snapshots for baseline
 
+// Kline intervals subscribed by the collector for chart streaming
+const KLINE_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d'];
+
 // ─── Signal stabilization constants ─────────────────────────────
 const BASELINE_MIN_VOL60    = 1000;   // min USDT baseline for 60s vol ratio
 const BASELINE_MIN_VOL15    = 200;    // min USDT baseline for 15s vol ratio
@@ -724,6 +727,9 @@ async function startSpotCollector() {
     connectSpotBatch(i, batches[i]);
   }
 
+  // Start spot kline collector (publishes to Redis pub/sub for chart streaming)
+  startSpotKlineCollector(spotSymbols);
+
   // Hourly symbol list refresh
   setInterval(async () => {
     try {
@@ -796,7 +802,7 @@ function connectBatch(batchIndex, symbols) {
 
 function connectFuturesAggTradeBatch(symbols) {
   const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
-  const url     = `${FUTURES_STREAM_BASE}/stream?streams=${streams}`;
+  const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
 
   console.log(`[collector] Futures aggTrade: connecting ${symbols.length} streams (${symbols.join(',')})`);
 
@@ -857,6 +863,220 @@ async function startFuturesAggTradeCollector(spotSymbolSet) {
     await new Promise(r => setTimeout(r, 5000));
   }
   console.warn('[collector] Futures aggTrade: tracked:futures:symbols not available — skipping');
+}
+
+// ─── Kline pub/sub — collector subscribes to Binance, publishes to Redis ────────
+// Backend WS gateway reads from Redis pub/sub instead of proxying to Binance.
+// This ensures Binance sees only collector connections regardless of user count.
+
+function connectFuturesKlineBatch(batchIdx, symbols, interval) {
+  const streams = symbols.map(s => `${s.toLowerCase()}@kline_${interval}`).join('/');
+  const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
+  console.log(`[kline-collector] futures/${interval} batch${batchIdx + 1}: connecting (${symbols.length} symbols)`);
+  const ws = new WebSocket(url);
+  ws.on('open', () => console.log(`[kline-collector] futures/${interval} batch${batchIdx + 1}: connected`));
+  ws.on('message', (raw) => {
+    try {
+      const envelope = JSON.parse(raw);
+      const msg = envelope.data;
+      if (!msg || msg.e !== 'kline') return;
+      const channel = `kline:futures:${msg.s.toUpperCase()}:${msg.k.i}`;
+      const payload = JSON.stringify(msg); // single-stream format: { e, k, s } — matches what frontend expects
+      redis.publish(channel, payload).catch(() => {});
+      redis.set(`${channel}:last`, payload, 'EX', 300).catch(() => {});
+    } catch (err) {
+      console.error('[kline-collector] futures parse error:', err.message);
+    }
+  });
+  ws.on('error', (err) => console.error(`[kline-collector] futures/${interval} batch${batchIdx + 1} error:`, err.message));
+  ws.on('close', (code) => {
+    console.warn(`[kline-collector] futures/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in 5s...`);
+    setTimeout(() => connectFuturesKlineBatch(batchIdx, symbols, interval), 5000);
+  });
+}
+
+function startFuturesKlineCollector(symbols) {
+  const batches = chunkArray(symbols, STREAMS_PER_BATCH);
+  for (const interval of KLINE_INTERVALS) {
+    for (let i = 0; i < batches.length; i++) {
+      connectFuturesKlineBatch(i, batches[i], interval);
+    }
+  }
+  console.log(
+    `[kline-collector] Futures kline started: ${KLINE_INTERVALS.length} intervals × ` +
+    `${batches.length} batch(es) = ${KLINE_INTERVALS.length * batches.length} WS connections`,
+  );
+}
+
+function connectSpotKlineBatch(batchIdx, symbols, interval) {
+  const streams = symbols.map(s => `${s.toLowerCase()}@kline_${interval}`).join('/');
+  const url     = `${SPOT_WS_BASE}/stream?streams=${streams}`;
+  console.log(`[kline-collector] spot/${interval} batch${batchIdx + 1}: connecting (${symbols.length} symbols)`);
+  const ws = new WebSocket(url);
+  ws.on('open', () => console.log(`[kline-collector] spot/${interval} batch${batchIdx + 1}: connected`));
+  ws.on('message', (raw) => {
+    try {
+      const envelope = JSON.parse(raw);
+      const msg = envelope.data;
+      if (!msg || msg.e !== 'kline') return;
+      const channel = `kline:spot:${msg.s.toUpperCase()}:${msg.k.i}`;
+      const payload = JSON.stringify(msg);
+      redis.publish(channel, payload).catch(() => {});
+      redis.set(`${channel}:last`, payload, 'EX', 300).catch(() => {});
+    } catch (err) {
+      console.error('[kline-collector] spot parse error:', err.message);
+    }
+  });
+  ws.on('error', (err) => console.error(`[kline-collector] spot/${interval} batch${batchIdx + 1} error:`, err.message));
+  ws.on('close', (code) => {
+    console.warn(`[kline-collector] spot/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in 5s...`);
+    setTimeout(() => connectSpotKlineBatch(batchIdx, symbols, interval), 5000);
+  });
+}
+
+function startSpotKlineCollector(symbols) {
+  const batches = chunkArray(symbols, SPOT_STREAMS_PER_BATCH);
+  for (const interval of KLINE_INTERVALS) {
+    for (let i = 0; i < batches.length; i++) {
+      connectSpotKlineBatch(i, batches[i], interval);
+    }
+  }
+  console.log(
+    `[kline-collector] Spot kline started: ${KLINE_INTERVALS.length} intervals × ` +
+    `${batches.length} batch(es) = ${KLINE_INTERVALS.length * batches.length} WS connections`,
+  );
+}
+
+// ─── REST kline fallback — activates when futures WS kline is stale ────────────
+// Polls fapi.binance.com/fapi/v1/klines when no kline:futures:* data appears in
+// Redis for STALE_THRESHOLD_MS. Publishes in the same WS-event format so the
+// backend proxy and bar-aggregator-service work transparently.
+
+const KLINE_REST_STALE_MS      = 2 * 60 * 1000;   // 2 min without WS data → switch to REST
+const KLINE_REST_POLL_MS       = 5_000;             // check interval; actual polling uses priority tiers
+const KLINE_REST_INTERVALS     = ['1m'];             // only 1m — bar aggregator needs it; others via WS
+const KLINE_REST_CONCURRENCY   = 8;                 // max parallel REST requests per chunk
+const KLINE_REST_CHUNK_DELAY   = 250;               // ms between chunks to spread load
+
+// Top symbols polled every ~5s; all others polled every ~60s (one per cycle)
+const KLINE_REST_HOT_SYMBOLS   = [
+  'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT',
+  'AVAXUSDT','DOTUSDT','TRXUSDT','LINKUSDT','MATICUSDT','LTCUSDT','UNIUSDT',
+  'BCHUSDT','ETCUSDT','XLMUSDT','ATOMUSDT','NEARUSDT','OPUSDT','ARBUSDT',
+  'INJUSDT','SUIUSDT','APTUSDT','SEIUSDT','TIAUSDT','WIFUSDT','PEPEUSDT',
+  'FLOKIUSDT','BONKUSDT',
+];
+
+let _klineRestFallbackActive = false;
+let _klineRestIntervalId     = null;
+
+async function _pollFuturesKlineRestBatch(symbols, interval) {
+  // Process in chunks with delay to stay well within Binance rate limits
+  for (let i = 0; i < symbols.length; i += KLINE_REST_CONCURRENCY) {
+    const chunk = symbols.slice(i, i + KLINE_REST_CONCURRENCY);
+    await Promise.all(chunk.map(async (sym) => {
+      try {
+        const url  = `${BINANCE_REST_BASE}/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=2`;
+        const data = await binanceFetch(url, undefined, 'kline-rest-fallback', sym, 'klinePoll').then(r => r.json());
+        if (!Array.isArray(data) || data.length === 0) return;
+        const row = data[data.length - 1]; // last (possibly open) candle
+        // REST format: [openTime, open, high, low, close, volume, closeTime, quoteVol, trades, takerBuyBase, takerBuyQuote, ignore]
+        const isClosed = Date.now() > Number(row[6]);
+        const msg = {
+          e: 'kline',
+          E: Date.now(),
+          s: sym,
+          k: {
+            t: Number(row[0]),
+            T: Number(row[6]),
+            s: sym,
+            i: interval,
+            f: 0,
+            L: 0,
+            o: row[1],
+            c: row[4],
+            h: row[2],
+            l: row[3],
+            v: row[5],
+            n: Number(row[8]),
+            x: isClosed,
+            q: row[7],
+            V: row[9],
+            Q: row[10],
+            B: '0',
+          },
+        };
+        const payload = JSON.stringify(msg);
+        const channel = `kline:futures:${sym}:${interval}`;
+        await Promise.all([
+          redis.publish(channel, payload).catch(() => {}),
+          redis.set(`${channel}:last`, payload, 'EX', 300).catch(() => {}),
+        ]);
+      } catch (_err) {
+        // silently skip per-symbol errors; stale data is better than crashing
+      }
+    }));
+    // Throttle: wait between chunks to avoid bursting Binance rate limit
+    if (i + KLINE_REST_CONCURRENCY < symbols.length) {
+      await new Promise(r => setTimeout(r, KLINE_REST_CHUNK_DELAY));
+    }
+  }
+}
+
+async function _runFuturesKlineRestPoll(symbols) {
+  for (const interval of KLINE_REST_INTERVALS) {
+    await _pollFuturesKlineRestBatch(symbols, interval);
+  }
+}
+
+function startFuturesKlineRestFallback(getSymbolsFn) {
+  if (_klineRestIntervalId) return; // already running
+  console.log('[kline-rest-fallback] Scheduler started — will activate when WS is stale');
+
+  let _coldCycleIdx = 0; // rotating index into cold symbols for round-robin batch
+
+  // Sentinel: check BTCUSDT 1m key freshness every poll cycle
+  _klineRestIntervalId = setInterval(async () => {
+    try {
+      const lastKey = 'kline:futures:BTCUSDT:1m:last';
+      const raw     = await redis.get(lastKey).catch(() => null);
+      let stale     = true;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          const age    = Date.now() - (parsed.E || 0);
+          stale = age > KLINE_REST_STALE_MS;
+        } catch { /* stale = true */ }
+      }
+
+      if (stale) {
+        if (!_klineRestFallbackActive) {
+          console.warn('[kline-rest-fallback] WS kline stale — REST fallback now ACTIVE');
+          _klineRestFallbackActive = true;
+        }
+        const allSymbols = await getSymbolsFn();
+        if (allSymbols.length === 0) return;
+
+        // Hot symbols: poll every cycle (~5s)
+        const hotSet  = new Set(KLINE_REST_HOT_SYMBOLS);
+        const hot     = allSymbols.filter(s => hotSet.has(s));
+        const cold    = allSymbols.filter(s => !hotSet.has(s));
+
+        // Cold symbols: poll one batch per cycle (round-robin) — full rotation every ~(cold.length/8)*5s
+        const coldBatch = cold.slice(_coldCycleIdx, _coldCycleIdx + KLINE_REST_CONCURRENCY);
+        _coldCycleIdx   = (_coldCycleIdx + KLINE_REST_CONCURRENCY) % Math.max(cold.length, 1);
+
+        await _runFuturesKlineRestPoll([...hot, ...coldBatch]);
+      } else {
+        if (_klineRestFallbackActive) {
+          console.log('[kline-rest-fallback] WS kline fresh again — REST fallback DEACTIVATED');
+          _klineRestFallbackActive = false;
+        }
+      }
+    } catch (err) {
+      console.error('[kline-rest-fallback] poll error:', err.message);
+    }
+  }, KLINE_REST_POLL_MS);
 }
 
 // ─── Main startup ────────────────────────────────────────────────
@@ -923,6 +1143,21 @@ async function start() {
   for (let i = 0; i < batches.length; i++) {
     connectBatch(i, batches[i]);
   }
+
+  // Start futures kline collector (publishes to Redis pub/sub for chart streaming)
+  startFuturesKlineCollector(validSymbols);
+
+  // Start REST kline fallback — activates automatically when WS kline is stale
+  // (e.g. during partial Binance IP ban that blocks kline/aggTrade but allows depth)
+  let _cachedFallbackSymbols = validSymbols.slice();
+  startFuturesKlineRestFallback(async () => {
+    // Try to get fresh symbol list from Redis; fall back to cached list
+    try {
+      const raw = await redis.get('symbols:active:usdt').catch(() => null);
+      if (raw) { _cachedFallbackSymbols = JSON.parse(raw); }
+    } catch { /* use cached */ }
+    return _cachedFallbackSymbols;
+  });
 
   // Periodically refresh the symbol list in Redis (sockets reconnect on next close)
   setInterval(async () => {

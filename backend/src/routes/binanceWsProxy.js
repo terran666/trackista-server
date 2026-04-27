@@ -27,8 +27,216 @@
  */
 
 const { WebSocketServer, WebSocket } = require('ws');
+const Redis = require('ioredis');
 
-const SPOT_WS_BASE    = 'wss://stream.binance.com:9443/ws';
+// ── Redis pub/sub fan-out for kline streams ───────────────────────────────────
+// When a client connects to /ws/fstream/{sym}@kline_{iv} or /ws/stream/{sym}@kline_{iv},
+// we serve data from Redis pub/sub (populated by the collector) instead of opening
+// a new Binance WS connection. This means zero new Binance connections per user.
+
+const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
+const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
+
+// channel → Set<WebSocket> — in-process fan-out map
+const klineListeners = new Map();
+
+let _redisSub = null; // dedicated pub/sub client (cannot issue other commands)
+let _redisGet = null; // used only for GET (last cached bar)
+
+function getRedisKlineClients() {
+  if (!_redisSub) {
+    _redisSub = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
+    _redisGet = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
+    _redisSub.on('error', err => console.error('[kline-ws-redis] sub error:', err.message));
+    _redisGet.on('error', err => console.error('[kline-ws-redis] get error:', err.message));
+    // Route pub/sub messages to subscribed WS clients AND reset stale watchdog
+    _redisSub.on('message', (channel, message) => {
+      _resetKlineWatchdog(channel);
+      const clients = klineListeners.get(channel);
+      if (!clients || clients.size === 0) return;
+      for (const ws of clients) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(message);
+      }
+    });
+  }
+  return { sub: _redisSub, get: _redisGet };
+}
+
+// ── Per-channel stale watchdog + on-demand REST fallback ──────────────────────
+// When a kline channel has active subscribers but no Redis pub/sub messages arrive
+// for KLINE_STALE_TRIGGER_MS, the backend polls Binance REST directly and publishes
+// to the pub/sub channel — keeping the chart alive even when the collector WS batch
+// for this symbol is blocked or stale.
+
+const KLINE_STALE_TRIGGER_MS  =  8_000; // silence → start REST polling
+const KLINE_STALE_TRIGGER_FAST =     0; // immediate start when no cached :last exists
+const KLINE_POLL_INTERVAL_MS  =  1_000; // poll Binance REST every 1 s while stale
+const BINANCE_SPOT_KLINES    = 'https://api.binance.com/api/v3/klines';
+const BINANCE_FAPI_KLINES    = 'https://fapi.binance.com/fapi/v1/klines';
+
+// channel → { staleTimer, pollTimer }
+const _klineWatchdogs = new Map();
+
+function _startKlineWatchdog(channel, immediateMs = KLINE_STALE_TRIGGER_MS) {
+  if (_klineWatchdogs.has(channel)) return; // already watching
+  const entry = { staleTimer: null, pollTimer: null };
+  _klineWatchdogs.set(channel, entry);
+  _armStaleTimer(channel, entry, immediateMs);
+}
+
+function _stopKlineWatchdog(channel) {
+  const entry = _klineWatchdogs.get(channel);
+  if (!entry) return;
+  clearTimeout(entry.staleTimer);
+  clearInterval(entry.pollTimer);
+  _klineWatchdogs.delete(channel);
+}
+
+function _resetKlineWatchdog(channel) {
+  const entry = _klineWatchdogs.get(channel);
+  if (!entry) return;
+  // Data arrived — stop REST polling (if running) and re-arm stale timer
+  if (entry.pollTimer) {
+    clearInterval(entry.pollTimer);
+    entry.pollTimer = null;
+    // Parse channel to log correctly
+    const parts = channel.split(':'); // kline:{market}:{symbol}:{interval}
+    console.log(`[kline-watchdog] ${parts[1]}/${parts[2]}@${parts[3]} WS data resumed — REST fallback stopped`);
+  }
+  clearTimeout(entry.staleTimer);
+  _armStaleTimer(channel, entry);
+}
+
+function _armStaleTimer(channel, entry, delayMs = KLINE_STALE_TRIGGER_MS) {
+  entry.staleTimer = setTimeout(() => {
+    entry.staleTimer = null;
+    _activateRestFallback(channel, entry);
+  }, delayMs);
+}
+
+async function _pollKlineOnce(market, symbol, interval) {
+  const baseUrl = market === 'futures' ? BINANCE_FAPI_KLINES : BINANCE_SPOT_KLINES;
+    const url     = `${baseUrl}?symbol=${symbol}&interval=${interval}&limit=1`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) {
+      console.warn(`[kline-watchdog] REST ${market}/${symbol}@${interval} HTTP ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) return;
+    const row      = data[data.length - 1]; // last (possibly open) candle
+    const isClosed = Date.now() > Number(row[6]);
+    const msg = {
+      e: 'kline',
+      E: Date.now(),
+      s: symbol,
+      k: {
+        t: Number(row[0]), T: Number(row[6]),
+        s: symbol, i: interval,
+        f: 0, L: 0,
+        o: row[1], c: row[4], h: row[2], l: row[3],
+        v: row[5], n: Number(row[8]),
+        x: isClosed,
+        q: row[7], V: row[9], Q: row[10], B: '0',
+      },
+    };
+    const payload  = JSON.stringify(msg);
+    const channel  = `kline:${market}:${symbol}:${interval}`;
+    const { get }  = getRedisKlineClients();
+
+    // Send DIRECTLY to WebSocket clients — do NOT publish to Redis pub/sub.
+    // Publishing to pub/sub would trigger _redisSub.on('message') → _resetKlineWatchdog
+    // which would mistake our own message for "collector WS resumed" and stop the fallback.
+    const clients = klineListeners.get(channel);
+    if (clients) {
+      for (const ws of clients) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+    }
+    // Still update the :last key so new clients get fresh data on connect
+    get.set(`${channel}:last`, payload, 'EX', 300).catch(() => {});
+  } catch (err) {
+    // Ignore individual poll errors — next tick will retry
+  }
+}
+
+function _activateRestFallback(channel, entry) {
+  const parts    = channel.split(':'); // kline:{market}:{symbol}:{interval}
+  const market   = parts[1];
+  const symbol   = parts[2];
+  const interval = parts[3];
+  if (!market || !symbol || !interval) return;
+
+  // Only poll if there are still active subscribers
+  if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) return;
+
+  console.log(`[kline-watchdog] ${market}/${symbol}@${interval} stale — REST fallback activated`);
+
+  // Poll immediately, then on interval
+  _pollKlineOnce(market, symbol, interval);
+  entry.pollTimer = setInterval(() => {
+    if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) {
+      _stopKlineWatchdog(channel);
+      return;
+    }
+    _pollKlineOnce(market, symbol, interval);
+  }, KLINE_POLL_INTERVAL_MS);
+}
+
+function subscribeKlineClient(market, symbol, interval, clientWs) {
+  const channel = `kline:${market}:${symbol}:${interval}`;
+  const label   = `[kline-ws] ${market}/${symbol}@kline_${interval}`;
+  const { sub, get } = getRedisKlineClients();
+
+  console.log(`${label} client connected (Redis pub/sub)`);
+
+  // Register in fan-out; subscribe to Redis channel if this is the first client
+  const isFirstClient = !klineListeners.has(channel);
+  if (isFirstClient) {
+    klineListeners.set(channel, new Set());
+    sub.subscribe(channel).catch(err => console.error(`${label} Redis subscribe error:`, err.message));
+  }
+  klineListeners.get(channel).add(clientWs);
+
+  // Send the last cached bar immediately so the chart updates right away.
+  // Also check if the cached bar is stale to decide how quickly to start the watchdog.
+  if (isFirstClient) {
+    get.get(`${channel}:last`).then(cached => {
+      let cacheAge = Infinity;
+      if (cached) {
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(cached);
+        try { cacheAge = Date.now() - (JSON.parse(cached).E || 0); } catch (_) {}
+      }
+      // No :last or stale > 10 s → start REST immediately; otherwise wait 8 s
+      const initialDelay = (cacheAge > 10_000) ? KLINE_STALE_TRIGGER_FAST : KLINE_STALE_TRIGGER_MS;
+      _startKlineWatchdog(channel, initialDelay);
+    }).catch(() => {
+      _startKlineWatchdog(channel, KLINE_STALE_TRIGGER_FAST);
+    });
+  } else {
+    // Not the first client — just send :last immediately
+    get.get(`${channel}:last`).then(cached => {
+      if (cached && clientWs.readyState === WebSocket.OPEN) clientWs.send(cached);
+    }).catch(() => {});
+  }
+
+  const cleanup = () => {
+    const clients = klineListeners.get(channel);
+    if (!clients) return;
+    clients.delete(clientWs);
+    if (clients.size === 0) {
+      klineListeners.delete(channel);
+      sub.unsubscribe(channel).catch(() => {});
+      // Stop watchdog when no more clients are watching
+      _stopKlineWatchdog(channel);
+    }
+    console.log(`${label} client disconnected (${clients.size} remaining)`);
+  };
+
+  clientWs.on('close', cleanup);
+  clientWs.on('error', cleanup);
+}
 const FUTURES_WS_BASE = 'wss://fstream.binance.com/ws';
 
 // How many times to retry upstream before giving up and closing the client
@@ -163,6 +371,15 @@ function attachBinanceWsProxy(httpServer) {
     wss.handleUpgrade(req, socket, head, (clientWs) => {
       const market       = spotMatch ? 'spot' : 'futures';
       const streamName   = spotMatch ? spotMatch[1] : futuresMatch[1];
+
+      // ── Kline streams → Redis pub/sub (zero new Binance connections) ────────
+      const klineM = streamName.match(/^(.+)@kline_(.+)$/);
+      if (klineM) {
+        subscribeKlineClient(market, klineM[1].toUpperCase(), klineM[2], clientWs);
+        return;
+      }
+
+      // ── All other streams → proxy to Binance ──────────────────────────────
       const upstreamBase = market === 'spot' ? SPOT_WS_BASE : FUTURES_WS_BASE;
       const upstreamUrl  = `${upstreamBase}/${streamName}`;
       const connId       = nextConnId++;
@@ -225,7 +442,7 @@ function attachBinanceWsProxy(httpServer) {
     });
   });
 
-  console.log('[backend] Binance WS proxy attached: /ws/stream/* (spot) /ws/fstream/* (futures)');
+  console.log('[backend] Binance WS proxy attached: kline→Redis pub/sub, other→Binance proxy');
 }
 
 module.exports = { attachBinanceWsProxy, getWsProxyStats };

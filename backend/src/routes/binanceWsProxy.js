@@ -70,7 +70,7 @@ function getRedisKlineClients() {
 
 const KLINE_STALE_TRIGGER_MS  =  8_000; // silence → start REST polling
 const KLINE_STALE_TRIGGER_FAST =     0; // immediate start when no cached :last exists
-const KLINE_POLL_INTERVAL_MS  =  1_000; // poll Binance REST every 1 s while stale
+const KLINE_POLL_INTERVAL_MS  =    200; // poll Binance REST every 200 ms while stale (5 req/s per symbol; fapi limit=2400w/min)
 const BINANCE_SPOT_KLINES    = 'https://api.binance.com/api/v3/klines';
 const BINANCE_FAPI_KLINES    = 'https://fapi.binance.com/fapi/v1/klines';
 

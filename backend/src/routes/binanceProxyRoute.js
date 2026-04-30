@@ -32,8 +32,9 @@
 const { binanceFetch, buildSummary, getBackoffState } = require('../utils/binanceRestLogger');
 const { authRequired } = require('../middleware/authRequired');
 
-const SPOT_BASE    = 'https://api.binance.com/api';
-const FUTURES_BASE = 'https://fapi.binance.com/fapi';
+const SPOT_BASE     = 'https://api.binance.com/api';
+const FUTURES_BASE  = 'https://fapi.binance.com/fapi';
+const DELIVERY_BASE = 'https://dapi.binance.com';  // COIN-M delivery futures
 
 // ── Safe endpoints ────────────────────────────────────────────────────────────
 // Read-only, near-zero weight, critical for Screener bootstrap.
@@ -41,20 +42,31 @@ const FUTURES_BASE = 'https://fapi.binance.com/fapi';
 const SAFE_ENDPOINTS = new Set([
   '/v3/exchangeInfo',
   '/v1/exchangeInfo',
+  '/dapi/v1/exchangeInfo',  // COIN-M delivery futures
   '/v3/ticker/24hr',
   '/v1/ticker/24hr',
 ]);
 
 // Cache TTL per pathKey for safe endpoints
 const CACHE_TTL_MS = {
-  '/v3/exchangeInfo': 5 * 60 * 1000,  // 5 min — large payload, rarely changes
-  '/v1/exchangeInfo': 5 * 60 * 1000,
+  '/v3/exchangeInfo':    5 * 60 * 1000,  // 5 min — large payload, rarely changes
+  '/v1/exchangeInfo':    5 * 60 * 1000,
+  '/dapi/v1/exchangeInfo': 5 * 60 * 1000,  // COIN-M delivery futures
   '/v3/ticker/24hr':  30 * 1000,       // 30 s — prices update frequently
   '/v1/ticker/24hr':  30 * 1000,
   '/v3/klines':       60 * 1000,       // 60 s — chart history, changes slowly
   '/v1/klines':       60 * 1000,
+  '/v1/aggTrades':     1_500,           // 1.5 s — dedup identical fromId polls
+  '/v3/aggTrades':     1_500,
 };
 const DEFAULT_CACHE_TTL_MS = 30 * 1000;
+
+// ── aggTrades per-symbol throttle ────────────────────────────────────────────
+// /fapi/v1/aggTrades costs weight=20 per call. At 2 req/s × 60s = 2400 weight/min
+// which saturates the entire budget. Throttle to 1 real upstream call per
+// AGGTRADES_MIN_INTERVAL_MS per symbol; respond with 429 to fast retries.
+const AGGTRADES_MIN_INTERVAL_MS = 2_000; // 1 req / 2s per symbol = 30 req/min = 600 weight/min
+const aggTradesLastTs = new Map(); // symbol → last upstream call ts
 
 // ── In-memory response cache ──────────────────────────────────────────────────
 // Map<cacheKey, { body, status, headers, cachedAt, expiresAt }>
@@ -111,7 +123,7 @@ function recordRequest(key) {
 // This prevents creating hundreds of identical 828KB cache entries.
 function normalizedCacheKey(market, upstreamUrl, pathKey) {
   // For exchangeInfo, strip ?symbol= parameter from cache key — use full response
-  if (pathKey === '/v3/exchangeInfo' || pathKey === '/v1/exchangeInfo') {
+  if (pathKey === '/v3/exchangeInfo' || pathKey === '/v1/exchangeInfo' || pathKey === '/dapi/v1/exchangeInfo') {
     const base = upstreamUrl.split('?')[0];
     return `${market}:${base}`;
   }
@@ -174,7 +186,7 @@ function makeProxy(targetBase, market) {
     // exchangeInfo with ?symbol= is normalized to full exchangeInfo key.
     // This prevents 400+ identical cache entries.
     const cacheKey = normalizedCacheKey(market, upstreamUrl, pathKey);
-    const isExchangeInfo = (pathKey === '/v3/exchangeInfo' || pathKey === '/v1/exchangeInfo');
+    const isExchangeInfo = (pathKey === '/v3/exchangeInfo' || pathKey === '/v1/exchangeInfo' || pathKey === '/dapi/v1/exchangeInfo');
     const requestedSymbol = isExchangeInfo && req.query.symbol ? req.query.symbol.toString().toUpperCase() : null;
 
     recordRequest(`${market}:${pathKey}`);
@@ -357,26 +369,44 @@ function makeProxy(targetBase, market) {
     // Cache klines for preview charts (short TTL).
     // All non-OK upstream responses are intercepted and returned as structured JSON.
     
-    // Check cache for klines (preview charts optimization)
-    const isKlines = (pathKey === '/v3/klines' || pathKey === '/v1/klines');
-    if (isKlines) {
+    // Check cache for klines and aggTrades (dedup rapid identical polls)
+    const isKlines    = (pathKey === '/v3/klines'    || pathKey === '/v1/klines');
+    const isAggTrades = (pathKey === '/v3/aggTrades' || pathKey === '/v1/aggTrades');
+    if (isKlines || isAggTrades) {
       const cached = getCachedFresh(cacheKey);
       if (cached) {
         proxyStats.cacheHits++;
-        proxyStats.screener.klinesPreviewCacheHits++;
+        if (isKlines) proxyStats.screener.klinesPreviewCacheHits++;
         const ageMs = Date.now() - cached.cachedAt;
-        console.log(`[binance-proxy] ${market} ${pathKey} klines cache-hit (age=${Math.round(ageMs / 1000)}s)`);
+        console.log(`[binance-proxy] ${market} ${pathKey} cache-hit (age=${ageMs}ms)`);
         res.status(cached.status);
         applyHeaders(cached.headers, res);
         res.setHeader('x-proxy-cache', 'hit');
         return res.send(cached.body);
       }
-      
-      // In-flight dedupe for klines
+
+      // Per-symbol throttle for aggTrades — prevent weight exhaustion
+      if (isAggTrades) {
+        const throttleKey = `${market}:${symbol}`;
+        const lastTs = aggTradesLastTs.get(throttleKey) || 0;
+        const elapsed = Date.now() - lastTs;
+        if (elapsed < AGGTRADES_MIN_INTERVAL_MS) {
+          const retryAfter = Math.ceil((AGGTRADES_MIN_INTERVAL_MS - elapsed) / 1000);
+          return res.status(429).json({
+            success: false,
+            error:   'aggTrades throttled — too many requests for this symbol',
+            market,
+            reason:  'aggtrades_throttled',
+            retryAfterMs: AGGTRADES_MIN_INTERVAL_MS - elapsed,
+          });
+        }
+        aggTradesLastTs.set(throttleKey, Date.now());
+      }
+
+      // In-flight dedupe
       const existingPromise = inflightRequests.get(cacheKey);
       if (existingPromise) {
         proxyStats.dedupeHits++;
-        console.log(`[binance-proxy] ${market} ${pathKey} klines in-flight dedupe`);
         try {
           const result = await existingPromise;
           res.status(result.status);
@@ -384,15 +414,14 @@ function makeProxy(targetBase, market) {
           res.setHeader('x-proxy-cache', 'dedupe');
           return res.send(result.body);
         } catch (err) {
-          // Continue to normal fetch path on dedupe error
           console.warn(`[binance-proxy] ${market} ${pathKey} dedupe failed, continuing to fetch`);
         }
       }
     }
     
     try {
-      // Create in-flight promise for klines
-      const fetchPromise = isKlines ? (async () => {
+      // Create in-flight promise for klines / aggTrades
+      const fetchPromise = (isKlines || isAggTrades) ? (async () => {
         try {
           const upstreamRes = await binanceFetch(
             upstreamUrl,
@@ -510,10 +539,12 @@ function createBinanceProxyRouter() {
   const { Router } = require('express');
   const router = Router();
 
-  // /api/binance/spot/v3/...    → https://api.binance.com/api/v3/...
-  // /api/binance/futures/v1/... → https://fapi.binance.com/fapi/v1/...
-  router.get('/spot/*',    makeProxy(SPOT_BASE,    'spot'));
-  router.get('/futures/*', makeProxy(FUTURES_BASE, 'futures'));
+  // /api/binance/spot/v3/...         → https://api.binance.com/api/v3/...
+  // /api/binance/futures/v1/...      → https://fapi.binance.com/fapi/v1/...
+  // /api/binance/delivery/dapi/v1/... → https://dapi.binance.com/dapi/v1/... (COIN-M)
+  router.get('/spot/*',     makeProxy(SPOT_BASE,     'spot'));
+  router.get('/futures/*',  makeProxy(FUTURES_BASE,  'futures'));
+  router.get('/delivery/*', makeProxy(DELIVERY_BASE, 'delivery'));
 
   // /api/binance/debug — proxy diagnostics
   // Shows backoff state, cache entries, recent errors, per-endpoint request counts.

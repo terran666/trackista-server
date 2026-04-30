@@ -116,9 +116,9 @@ const FUTURES_WALL_SIZE_DROP_TOLERANCE_RATIO  = parseFloat(process.env.FUTURES_W
 
 // ─── Snapshot queue / anti-ban ────────────────────────────────────
 // max concurrency is always 1 by design (enforced in code, not configurable)
-const FUTURES_SNAPSHOT_MIN_GAP_MS   = parseInt(process.env.FUTURES_SNAPSHOT_MIN_GAP_MS   || '1500', 10);
+const FUTURES_SNAPSHOT_MIN_GAP_MS   = parseInt(process.env.FUTURES_SNAPSHOT_MIN_GAP_MS   || '3000', 10);
 const FUTURES_STARTUP_STAGGER_MS    = parseInt(process.env.FUTURES_STARTUP_STAGGER_MS    || '3000', 10);
-const FUTURES_RESYNC_COOLDOWN_MS    = parseInt(process.env.FUTURES_RESYNC_COOLDOWN_MS    || '15000', 10);
+const FUTURES_RESYNC_COOLDOWN_MS    = parseInt(process.env.FUTURES_RESYNC_COOLDOWN_MS    || '60000', 10);
 const FUTURES_SNAPSHOT_LIMIT        = 1000;
 
 // ─── Per-symbol backoff (step-wise exponential) ───────────────────

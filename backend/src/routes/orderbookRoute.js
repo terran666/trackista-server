@@ -71,7 +71,29 @@ function createOrderbookHandler(redis) {
       : `orderbook:${symbol}`;
 
     try {
-      const raw = await redis.get(redisKey);
+      let raw = await redis.get(redisKey);
+      let resolvedMarketType = marketType;
+
+      // Spot collector only tracks a handful of symbols; when spot data is absent
+      // OR stale (>10s old), fall back to the futures orderbook so the
+      // density-page стакан always has fresh data to display.
+      if (marketType === 'spot') {
+        let spotIsStale = false;
+        if (raw !== null) {
+          try {
+            const spotAge = Date.now() - Number(JSON.parse(raw).updatedAt ?? 0);
+            if (spotAge > 10_000) spotIsStale = true;
+          } catch (_) { /* corrupt json — will fail later */ }
+        }
+        if (raw === null || spotIsStale) {
+          const futuresRaw = await redis.get(`futures:orderbook:${symbol}`);
+          if (futuresRaw !== null) {
+            raw = futuresRaw;
+            resolvedMarketType = 'futures';
+            console.log(`[orderbook] spot ${spotIsStale ? 'stale' : 'absent'} for ${symbol}, serving futures fallback`);
+          }
+        }
+      }
 
       if (raw === null) {
         return res.status(404).json({
@@ -106,8 +128,8 @@ function createOrderbookHandler(redis) {
         });
       }
 
-      console.log(`[orderbook] GET /api/orderbook symbol=${symbol} marketType=${marketType}`);
-      return res.json({ success: true, symbol, marketType, orderbook });
+      console.log(`[orderbook] GET /api/orderbook symbol=${symbol} marketType=${resolvedMarketType}${resolvedMarketType !== marketType ? ` (requested ${marketType})` : ''}`);
+      return res.json({ success: true, symbol, marketType: resolvedMarketType, orderbook });
     } catch (err) {
       console.error(`[orderbook] GET /api/orderbook error symbol=${symbol}:`, err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });

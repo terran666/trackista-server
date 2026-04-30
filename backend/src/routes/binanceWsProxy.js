@@ -34,6 +34,8 @@ const Redis = require('ioredis');
 // we serve data from Redis pub/sub (populated by the collector) instead of opening
 // a new Binance WS connection. This means zero new Binance connections per user.
 
+const { binanceFetch } = require('../utils/binanceRestLogger');
+
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 
@@ -70,16 +72,53 @@ function getRedisKlineClients() {
 
 const KLINE_STALE_TRIGGER_MS  =  8_000; // silence → start REST polling
 const KLINE_STALE_TRIGGER_FAST =     0; // immediate start when no cached :last exists
-const KLINE_POLL_INTERVAL_MS  =    200; // poll Binance REST every 200 ms while stale (5 req/s per symbol; fapi limit=2400w/min)
+const KLINE_POLL_TICK_MS      =    200; // global round-robin tick (1 symbol per tick)
+// Total Binance load = 1 req per 200ms = 300 req/min — safe regardless of symbol count.
 const BINANCE_SPOT_KLINES    = 'https://api.binance.com/api/v3/klines';
 const BINANCE_FAPI_KLINES    = 'https://fapi.binance.com/fapi/v1/klines';
 
-// channel → { staleTimer, pollTimer }
+// ── Global round-robin poll queue ─────────────────────────────────────────────
+// Instead of a separate setInterval per stale symbol, all symbols share one
+// global 200ms timer. On each tick exactly ONE symbol is polled and rotated to
+// the end of the queue. This caps total Binance REST load at 300 req/min no
+// matter how many symbols become stale simultaneously.
+const _staleChannels  = new Set(); // channels waiting for REST fallback
+let   _globalPollTimer = null;
+
+function _ensureGlobalPoller() {
+  if (_globalPollTimer) return;
+  _globalPollTimer = setInterval(_globalPollTick, KLINE_POLL_TICK_MS);
+}
+
+function _globalPollTick() {
+  if (_staleChannels.size === 0) {
+    clearInterval(_globalPollTimer);
+    _globalPollTimer = null;
+    return;
+  }
+  // Round-robin: take first channel, process it, re-add to end
+  const [channel] = _staleChannels;
+  _staleChannels.delete(channel);
+
+  // Drop if no active listeners
+  if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) {
+    _stopKlineWatchdog(channel);
+    return;
+  }
+
+  const parts = channel.split(':'); // kline:{market}:{symbol}:{interval}
+  _pollKlineOnce(parts[1], parts[2], parts[3]);
+
+  // Re-enqueue at end for next round
+  _staleChannels.add(channel);
+}
+
+// channel → { staleTimer }
 const _klineWatchdogs = new Map();
 
 function _startKlineWatchdog(channel, immediateMs = KLINE_STALE_TRIGGER_MS) {
   if (_klineWatchdogs.has(channel)) return; // already watching
-  const entry = { staleTimer: null, pollTimer: null };
+  const entry = { staleTimer: null };
   _klineWatchdogs.set(channel, entry);
   _armStaleTimer(channel, entry, immediateMs);
 }
@@ -88,18 +127,16 @@ function _stopKlineWatchdog(channel) {
   const entry = _klineWatchdogs.get(channel);
   if (!entry) return;
   clearTimeout(entry.staleTimer);
-  clearInterval(entry.pollTimer);
+  _staleChannels.delete(channel); // remove from global round-robin queue
   _klineWatchdogs.delete(channel);
 }
 
 function _resetKlineWatchdog(channel) {
   const entry = _klineWatchdogs.get(channel);
   if (!entry) return;
-  // Data arrived — stop REST polling (if running) and re-arm stale timer
-  if (entry.pollTimer) {
-    clearInterval(entry.pollTimer);
-    entry.pollTimer = null;
-    // Parse channel to log correctly
+  // Data arrived — remove from round-robin queue and re-arm stale timer
+  if (_staleChannels.has(channel)) {
+    _staleChannels.delete(channel);
     const parts = channel.split(':'); // kline:{market}:{symbol}:{interval}
     console.log(`[kline-watchdog] ${parts[1]}/${parts[2]}@${parts[3]} WS data resumed — REST fallback stopped`);
   }
@@ -116,11 +153,15 @@ function _armStaleTimer(channel, entry, delayMs = KLINE_STALE_TRIGGER_MS) {
 
 async function _pollKlineOnce(market, symbol, interval) {
   const baseUrl = market === 'futures' ? BINANCE_FAPI_KLINES : BINANCE_SPOT_KLINES;
-    const url     = `${baseUrl}?symbol=${symbol}&interval=${interval}&limit=1`;
+  const url     = `${baseUrl}?symbol=${symbol}&interval=${interval}&limit=1`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    const res = await binanceFetch(url, { signal: AbortSignal.timeout(5_000) }, 'klineWatchdog', symbol, interval);
     if (!res.ok) {
       console.warn(`[kline-watchdog] REST ${market}/${symbol}@${interval} HTTP ${res.status}`);
+      if (res.status === 418 || res.status === 429) {
+        console.warn(`[kline-watchdog] ${market}/${symbol}@${interval} rate-limited — stopping REST fallback`);
+        _stopKlineWatchdog(`kline:${market}:${symbol}:${interval}`);
+      }
       return;
     }
     const data = await res.json();
@@ -157,7 +198,12 @@ async function _pollKlineOnce(market, symbol, interval) {
     // Still update the :last key so new clients get fresh data on connect
     get.set(`${channel}:last`, payload, 'EX', 300).catch(() => {});
   } catch (err) {
-    // Ignore individual poll errors — next tick will retry
+    if (err.status === 418) {
+      // binanceFetch threw because IP ban is active — stop watchdog until collector resumes
+      console.warn(`[kline-watchdog] ${market}/${symbol}@${interval} IP ban active — stopping REST fallback`);
+      _stopKlineWatchdog(`kline:${market}:${symbol}:${interval}`);
+    }
+    // Ignore other individual poll errors — next tick will retry
   }
 }
 
@@ -171,17 +217,14 @@ function _activateRestFallback(channel, entry) {
   // Only poll if there are still active subscribers
   if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) return;
 
-  console.log(`[kline-watchdog] ${market}/${symbol}@${interval} stale — REST fallback activated`);
+  console.log(`[kline-watchdog] ${market}/${symbol}@${interval} stale — REST fallback activated (queue size: ${_staleChannels.size + 1})`);
 
-  // Poll immediately, then on interval
+  // Add to global round-robin queue and ensure the shared timer is running
+  _staleChannels.add(channel);
+  _ensureGlobalPoller();
+
+  // Poll immediately for first data point (before first tick fires)
   _pollKlineOnce(market, symbol, interval);
-  entry.pollTimer = setInterval(() => {
-    if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) {
-      _stopKlineWatchdog(channel);
-      return;
-    }
-    _pollKlineOnce(market, symbol, interval);
-  }, KLINE_POLL_INTERVAL_MS);
 }
 
 function subscribeKlineClient(market, symbol, interval, clientWs) {
@@ -237,6 +280,7 @@ function subscribeKlineClient(market, symbol, interval, clientWs) {
   clientWs.on('close', cleanup);
   clientWs.on('error', cleanup);
 }
+const SPOT_WS_BASE    = 'wss://stream.binance.com:9443/ws';
 const FUTURES_WS_BASE = 'wss://fstream.binance.com/ws';
 
 // How many times to retry upstream before giving up and closing the client
@@ -363,8 +407,8 @@ function attachBinanceWsProxy(httpServer) {
     const futuresMatch = url.match(/^\/ws\/fstream\/(.+)$/);
 
     if (!spotMatch && !futuresMatch) {
-      // Not our route — destroy socket so nothing hangs
-      socket.destroy();
+      // Not our route — skip paths already handled by other WS handlers
+      // (liveWsGateway handles /ws/live, heatmapRoute handles /ws/heatmap)
       return;
     }
 

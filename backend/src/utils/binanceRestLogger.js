@@ -20,18 +20,23 @@ const REPORT_INTERVAL_MS = 60_000;
 // Synced from Redis key "debug:binance-rate-limit-state" on startup via
 // syncBackoffFromRedis(redis) called from server.js after Redis is ready.
 //
-const backoff = { until: 0 };
+const backoff = { spot: 0, futures: 0 };
 
-function isGloballyBanned() {
-  return Date.now() < backoff.until;
+function _marketKey(url) {
+  return url.includes('fapi.binance.com') ? 'futures' : 'spot';
 }
 
-function setBackoff(durationMs) {
+function isGloballyBanned(url) {
+  return Date.now() < backoff[_marketKey(url)];
+}
+
+function setBackoff(durationMs, url) {
+  const key      = _marketKey(url);
   const newUntil = Date.now() + durationMs;
-  if (newUntil > backoff.until) {
-    backoff.until = newUntil;
+  if (newUntil > backoff[key]) {
+    backoff[key] = newUntil;
     console.error(
-      `[binance-rest/backend] IP BACKOFF set — klines calls paused for ${Math.ceil(durationMs / 1000)}s` +
+      `[binance-rest/backend] ${key} IP BACKOFF set — calls paused for ${Math.ceil(durationMs / 1000)}s` +
       ` (until ${new Date(newUntil).toISOString()})`,
     );
   }
@@ -44,11 +49,10 @@ async function syncBackoffFromRedis(redis) {
     if (!raw) return;
     const saved = JSON.parse(raw);
     const now   = Date.now();
-    // Check both spot and futures ban timestamps — same IP, either applies
     for (const market of ['spot', 'futures']) {
       const until = saved[market]?.backoffUntilTs;
-      if (until && until > now && until > backoff.until) {
-        backoff.until = until;
+      if (until && until > now && until > backoff[market]) {
+        backoff[market] = until;
         console.log(
           `[binance-rest/backend] restored ${market} IP ban from Redis — ${Math.ceil((until - now) / 1000)}s remaining`,
         );
@@ -111,13 +115,13 @@ function extractEndpoint(url) {
  * @returns {Promise<Response>}
  */
 async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
-  // ── Global IP-level backoff guard ────────────────────────────────────────
-  // Respect the same ban that the collector tracks — prevents the backend from
-  // extending an active IP ban by continuing to make Binance REST calls.
-  if (isGloballyBanned()) {
-    const remainingMs = backoff.until - Date.now();
+  // ── Per-market IP-level backoff guard ────────────────────────────────────────────
+  // Spot and futures track separate bans — a futures IP ban never blocks spot.
+  if (isGloballyBanned(url)) {
+    const key         = _marketKey(url);
+    const remainingMs = backoff[key] - Date.now();
     const err = new Error(
-      `Binance IP ban active — skipping ${service} call for ${Math.ceil(remainingMs / 1000)}s`,
+      `Binance ${key} IP ban active — skipping ${service} call for ${Math.ceil(remainingMs / 1000)}s`,
     );
     err.status = 418;
     err.retryAfterMs = remainingMs;
@@ -134,7 +138,24 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
     if (res.status === 429 || res.status === 418) {
       const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
       const durationMs    = retryAfterSec > 0 ? retryAfterSec * 1000 : 60_000;
-      setBackoff(durationMs);
+      setBackoff(durationMs, url);
+    }
+
+    // ── Track rate-limit weight usage from response headers ────────────────
+    // Preemptively pause backend calls if futures weight >= 83% of 2400 limit.
+    const isFutures = url.includes('fapi.binance.com');
+    const usedWeight = parseInt(res.headers.get('x-mbx-used-weight-1m') || '0', 10);
+    const weightLimit = isFutures ? 2400 : 6000;
+    if (usedWeight >= Math.floor(weightLimit * 0.83)) {
+      setBackoff(15_000, url);
+      console.error(
+        `[binance-rest/backend] ${isFutures ? 'futures' : 'spot'} weight CRITICAL ` +
+        `${usedWeight}/${weightLimit} — preemptive 15s pause`,
+      );
+    } else if (usedWeight >= Math.floor(weightLimit * 0.60)) {
+      console.warn(
+        `[binance-rest/backend] ${isFutures ? 'futures' : 'spot'} weight HIGH ${usedWeight}/${weightLimit}`,
+      );
     }
 
     return res;
@@ -158,9 +179,16 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
 function getBackoffState() {
   const now = Date.now();
   return {
-    active:      now < backoff.until,
-    until:       backoff.until || null,
-    remainingMs: Math.max(0, backoff.until - now),
+    spot: {
+      active:      now < backoff.spot,
+      until:       backoff.spot || null,
+      remainingMs: Math.max(0, backoff.spot - now),
+    },
+    futures: {
+      active:      now < backoff.futures,
+      until:       backoff.futures || null,
+      remainingMs: Math.max(0, backoff.futures - now),
+    },
   };
 }
 

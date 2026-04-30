@@ -66,6 +66,12 @@ const { runWatchLevelsMigrations }      = require('./services/watchLevelsMigrati
 const { createLevelWatchEngine }        = require('./services/levelWatchEngine');
 const { createLevelWatchRouter }        = require('./routes/levelWatchRoute');
 const { createLevelEventsRouter }       = require('./routes/levelEventsRoute');
+const { runRobobotMigrations }          = require('./services/robobotMigrations');
+const { createRobobotEventService }     = require('./services/robobotEventService');
+const { createRobobotTaskService }      = require('./services/robobotTaskService');
+const { createRobobotWatchService }     = require('./services/robobotWatchService');
+const robobotCloudBridge                = require('./services/robobotCloudBridge');
+const { createRobobotRouter }           = require('./routes/robobotRoutes');
 const { createAlertSoundsRouter }       = require('./routes/alertSoundsRoute');
 const { SyntheticPlaybackService }      = require('./services/syntheticPlaybackService');
 const { runScreenerAlertMigrations }    = require('./services/screenerAlertMigrations');
@@ -82,6 +88,12 @@ const livePollingMetrics                = require('./services/livePollingMetrics
 const { createKlineFlatRouter }         = require('./routes/klineFlatRoute');
 const { createScreenerSpotStatsRouter } = require('./routes/screenerSpotStatsRoute');
 const { createSynthRouter }             = require('./routes/synthRoute');
+const { attachLiveWsGateway }           = require('./routes/liveWsGateway');
+const { createHeatmapRouter, attachHeatmapWs } = require('./routes/heatmapRoute');
+const { createDensityDomRouter }        = require('./routes/densityDomRoute');
+const heatmapService                    = require('./services/heatmapService');
+const densityService                    = require('./services/densityService');
+const wsEventBus                        = require('./services/wsEventBus');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -134,6 +146,7 @@ db.getConnection()
     runBarAggregatorMigrations(db).catch(err => console.error('[barAggregatorMigrations] Failed:', err.message));
     runWatchLevelsMigrations(db).catch(err => console.error('[watchMigrations] Failed:', err.message));
     runScreenerAlertMigrations(db).catch(err => console.error('[screenerAlertMigrations] Failed:', err.message));
+    runRobobotMigrations(db).catch(err => console.error('[robobotMigrations] Failed:', err.message));
     ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
   })
   .catch(err => console.error('[backend] MySQL connection error:', err.message));
@@ -189,6 +202,13 @@ levelWatchEngine.start();
 
 const screenerAlertEngine = createScreenerAlertEngine(redis, db, alertDelivery);
 screenerAlertEngine.start();
+
+// ─── Heatmap service ─────────────────────────────────────────────
+heatmapService.start(redis, wsEventBus)
+  .catch(err => console.error('[heatmap] start error:', err.message));
+
+densityService.start(redis, wsEventBus)
+  .catch(err => console.error('[density] start error:', err.message));
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -1243,6 +1263,31 @@ app.get('/api/ws-proxy/debug', (_req, res) => {
   return res.json({ success: true, now: new Date().toISOString(), ...getWsProxyStats() });
 });
 
+// ─── Heatmap routes ───────────────────────────────────────────────
+console.log('[backend] registering /api/heatmap routes');
+app.use('/api/heatmap', createHeatmapRouter(redis, heatmapService));
+
+console.log('[backend] registering /api/density routes');
+app.use('/api/density', createDensityDomRouter(redis, densityService));
+
+// ─── Robobot module ─────────────────────────────────────────────
+console.log('[backend] registering /api/robobot routes');
+const robobotEventService = createRobobotEventService(db);
+const robobotTaskService  = createRobobotTaskService(db, robobotEventService);
+const robobotWatchService = createRobobotWatchService({
+  redis,
+  taskService  : robobotTaskService,
+  eventService : robobotEventService,
+  cloudBridge  : robobotCloudBridge,
+});
+robobotWatchService.start();
+app.use('/api/robobot', createRobobotRouter({
+  redis,
+  taskService  : robobotTaskService,
+  eventService : robobotEventService,
+  watchService : robobotWatchService,
+}));
+
 // Must be registered AFTER all routes so it only fires when nothing matched.
 // Returns JSON instead of Express's default HTML — prevents frontend from
 // silently swallowing errors or misidentifying the response as success.
@@ -1255,6 +1300,12 @@ app.use((req, res) => {
 const httpServer = app.listen(PORT, () => {
   console.log(`[backend] API listening on port ${PORT}`);
 });
+
+// Attach live WS gateway BEFORE Binance proxy so /ws/live is intercepted first
+attachLiveWsGateway(httpServer, redis);
+
+// Attach dedicated heatmap WS at /ws/heatmap?symbol=
+attachHeatmapWs(httpServer, redis, wsEventBus);
 
 // Attach Binance WS proxy: /ws/stream/* → wss://stream.binance.com and /ws/fstream/* → wss://fstream.binance.com
 attachBinanceWsProxy(httpServer);

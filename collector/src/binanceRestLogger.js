@@ -99,9 +99,66 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
   try {
     const res = await fetch(url, opts);
     status = res.status;
+
+    // ── Detect 429 / 418 immediately — set ban and throw so callers stop ────
+    if (res.status === 429 || res.status === 418) {
+      const retryAfterSec = parseInt(res.headers.get('retry-after') || '0', 10);
+      const durationMs    = retryAfterSec > 0 ? retryAfterSec * 1000 : 60_000;
+      const reason        = res.status === 418 ? 'HTTP 418 IP ban' : 'HTTP 429 rate limit';
+      const ts            = Date.now();
+      const ms            = rateLimitStateStore.getMarketState(market);
+      rateLimitStateStore.patchMarketState(market, {
+        backoffUntilTs:        ts + durationMs,
+        backoffDurationMs:     durationMs,
+        lastBackoffSetTs:      ts,
+        lastBackoffReason:     reason,
+        lastRateLimitStatus:   res.status,
+        rateLimitCount:        (ms.rateLimitCount || 0) + 1,
+        last418Ts:             res.status === 418 ? ts : ms.last418Ts,
+        last429Ts:             res.status === 429 ? ts : ms.last429Ts,
+        lastRateLimitedSymbol: symbol,
+        safeModeActive:        true,
+      });
+      rateLimitStateStore.persist().catch(() => {});
+      const err = new Error(`[binanceFetch] ${market} rate limited HTTP ${res.status} — ban set for ${Math.ceil(durationMs / 1000)}s`);
+      err.status = 418;
+      err.retryAfterMs = durationMs;
+      throw err;
+    }
+
+    // ── Track rate-limit weight usage from response headers ────────────────
+    // X-MBX-USED-WEIGHT-1M: how much of the 2400/min weight budget is used.
+    // Preemptively pause if usage is dangerously high (>= 2000/2400 = 83%).
+    const isFutures = url.includes('fapi.binance.com');
+    const weightHeader = isFutures ? 'x-mbx-used-weight-1m' : 'x-mbx-used-weight-1m';
+    const usedWeight = parseInt(res.headers.get(weightHeader) || '0', 10);
+    const weightLimit = isFutures ? 2400 : 6000;
+    if (usedWeight > 0) {
+      if (usedWeight >= Math.floor(weightLimit * 0.83)) {
+        // Preemptive backoff: pause 15s to let the weight window recover
+        const preemptMs = 15_000;
+        const ts        = Date.now();
+        const ms        = rateLimitStateStore.getMarketState(market);
+        if (!ms.backoffUntilTs || ms.backoffUntilTs < ts + preemptMs) {
+          console.error(
+            `[binance-rest] ${market} weight CRITICAL ${usedWeight}/${weightLimit} — preemptive 15s pause`,
+          );
+          rateLimitStateStore.patchMarketState(market, {
+            backoffUntilTs:    ts + preemptMs,
+            backoffDurationMs: preemptMs,
+            lastBackoffSetTs:  ts,
+            lastBackoffReason: `preemptive weight=${usedWeight}/${weightLimit}`,
+          });
+          rateLimitStateStore.persist().catch(() => {});
+        }
+      } else if (usedWeight >= Math.floor(weightLimit * 0.60)) {
+        console.warn(`[binance-rest] ${market} weight HIGH ${usedWeight}/${weightLimit}`);
+      }
+    }
+
     return res;
   } catch (err) {
-    status = -1;
+    status = err.status === 418 ? 418 : -1;
     throw err;
   } finally {
     const endpoint = extractEndpoint(url);

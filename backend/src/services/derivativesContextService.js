@@ -14,6 +14,7 @@
  */
 
 const { computeDerivativesContext } = require('../engines/moves/derivativesContextEngine');
+const { binanceFetch } = require('../utils/binanceRestLogger');
 
 const POLL_INTERVAL_MS  = parseInt(process.env.DERIVATIVES_POLL_INTERVAL_MS || '60000', 10); // 60s
 const ENABLED           = process.env.DERIVATIVES_ENABLED !== 'false';
@@ -51,7 +52,7 @@ function createDerivativesContextService(redis) {
   }
 
   async function fetchJson(url) {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await binanceFetch(url, { signal: AbortSignal.timeout(8000) }, 'derivativesContext', '*', 'poll');
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     return res.json();
   }
@@ -182,16 +183,29 @@ function createDerivativesContextService(redis) {
         }
       }
 
-      // ── Phase 2: OI + derivatives context for tracked symbols (MAX_SYMBOLS) ──
-      for (const sym of symbols) {
-        // Fetch OI individually (no bulk endpoint for all symbols in one call)
-        let oiValue = null;
-        try {
-          const oiData = await fetchJson(`${BINANCE_FAPI}/fapi/v1/openInterest?symbol=${sym}`);
-          oiValue = oiData.openInterest ? parseFloat(oiData.openInterest) * (fundingMap[sym]?.markPrice || 1) : null;
-        } catch {
-          // non-critical
+      // ── Phase 2: OI — fetch in batches of 10 with 200ms delay between batches ──
+      // /fapi/v1/openInterest has no bulk endpoint, weight=1 per call.
+      // 150 symbols / 10 per batch × 200ms = 3s total, 150 req/min — within budget.
+      const OI_BATCH = 10;
+      const OI_BATCH_DELAY_MS = 200;
+      const oiMap = new Map(); // sym → oiValue
+      for (let i = 0; i < symbols.length; i += OI_BATCH) {
+        const batch = symbols.slice(i, i + OI_BATCH);
+        await Promise.all(batch.map(async (sym) => {
+          try {
+            const oiData = await fetchJson(`${BINANCE_FAPI}/fapi/v1/openInterest?symbol=${sym}`);
+            const markP = fundingMap[sym]?.markPrice || 1;
+            if (oiData.openInterest) oiMap.set(sym, parseFloat(oiData.openInterest) * markP);
+          } catch { /* non-critical */ }
+        }));
+        if (i + OI_BATCH < symbols.length) {
+          await new Promise(r => setTimeout(r, OI_BATCH_DELAY_MS));
         }
+      }
+
+      // ── Phase 3: derivatives context for tracked symbols ──
+      for (const sym of symbols) {
+        const oiValue = oiMap.get(sym) ?? null;
 
         // OI history for delta
         if (!oiHistory.has(sym)) oiHistory.set(sym, []);

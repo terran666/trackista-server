@@ -24,6 +24,8 @@
  *   testpage  :  250
  *   alerts    :  500
  *   watch     : 2000
+ *   heatmap   : 1000
+ *   density   : 2000
  */
 
 const { WebSocketServer, WebSocket } = require('ws');
@@ -32,6 +34,7 @@ const { getDelta }                    = require('../services/screenerAggregation
 const registry                        = require('../services/wsSubscriptionRegistry');
 const eventBus                        = require('../services/wsEventBus');
 const metrics                         = require('../services/livePollingMetrics');
+const densityService                  = require('../services/densityService');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -49,6 +52,9 @@ const FLUSH_CADENCE = {
   testpage : 250,
   alerts   : 500,
   watch    : 2000,
+  heatmap  : 1000,
+  density  : 400,
+  robobot  : 5000,
 };
 
 const VALID_SCOPES = new Set(Object.keys(FLUSH_CADENCE));
@@ -180,7 +186,14 @@ function handleMessage(connId, raw) {
 function handleSubscribe(connId, state, msg) {
   const scope          = msg.scope;
   const subscriptionId = msg.subscriptionId;
-  const params         = typeof msg.params === 'object' && msg.params !== null ? msg.params : {};
+  // Support top-level symbol/timeframe fields for heatmap and density scopes
+  const rawParams      = typeof msg.params === 'object' && msg.params !== null ? msg.params : {};
+  const params         =
+    (scope === 'heatmap' && msg.symbol && !rawParams.symbol)
+      ? { ...rawParams, symbol: msg.symbol } :
+    (scope === 'density' && (msg.symbol || msg.timeframe))
+      ? { symbol: rawParams.symbol || msg.symbol || null, timeframe: rawParams.timeframe || msg.timeframe || '1m' } :
+    rawParams;
   const since          = typeof msg.since === 'number' ? msg.since : null;
 
   if (!subscriptionId) {
@@ -209,6 +222,11 @@ function handleSubscribe(connId, state, msg) {
   }
 
   metrics.recordWsSubscribe(scope);
+
+  // Auto-activate symbol for scopes backed by streaming services
+  if ((scope === 'heatmap' || scope === 'density') && params.symbol) {
+    eventBus.emit(`${scope}:activate`, params.symbol);
+  }
 
   safeSend(state.ws, {
     type           : 'subscribed',
@@ -261,6 +279,12 @@ function _runFlush(scope) {
     _flushAlerts().catch(err => console.error('[liveWsGateway] flushAlerts:', err.message));
   } else if (scope === 'watch') {
     _flushWatch().catch(err => console.error('[liveWsGateway] flushWatch:', err.message));
+  } else if (scope === 'heatmap') {
+    _flushHeatmap().catch(err => console.error('[liveWsGateway] flushHeatmap:', err.message));
+  } else if (scope === 'density') {
+    _flushDensity().catch(err => console.error('[liveWsGateway] flushDensity:', err.message));
+  } else if (scope === 'robobot') {
+    _flushRobobot();
   } else {
     _flushScreenerScope(scope).catch(err =>
       console.error(`[liveWsGateway] flushScope(${scope}):`, err.message),
@@ -355,6 +379,153 @@ async function _flushScreenerScope(scope) {
     } catch (err) {
       console.error(`[liveWsGateway] _flushScreenerScope(${scope}) err:`, err.message);
     }
+  }
+}
+
+// ─── Heatmap flush ───────────────────────────────────────────────────────────
+
+async function _flushHeatmap() {
+  const subs = registry.getSubscriptionsByScope('heatmap');
+  if (subs.length === 0) return;
+
+  const now = Date.now();
+
+  for (const sub of subs) {
+    const { connectionId, subscriptionId, params } = sub;
+    const state = connections.get(connectionId);
+    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+
+    const symbol = (params?.symbol || '').toUpperCase();
+    if (!symbol) continue;
+
+    try {
+      const raw = await _redis.get(`heatmap:latest:${symbol}`);
+      if (!raw) {
+        safeSend(state.ws, { type: 'heartbeat', scope: 'heatmap', subscriptionId, cursor: now, serverTime: now });
+        metrics.recordWsHeartbeat();
+        continue;
+      }
+
+      const snapshot = JSON.parse(raw);
+      // Only push if snapshot is newer than cursor already delivered
+      const snapshotTs = snapshot.ts ?? now;
+      if (typeof sub.lastDeliveredCursor === 'number' && snapshotTs <= sub.lastDeliveredCursor) {
+        safeSend(state.ws, { type: 'heartbeat', scope: 'heatmap', subscriptionId, cursor: sub.lastDeliveredCursor, serverTime: now });
+        metrics.recordWsHeartbeat();
+        continue;
+      }
+
+      registry.updateCursor(connectionId, subscriptionId, snapshotTs);
+      safeSend(state.ws, {
+        type           : 'heatmap:update',
+        subscriptionId,
+        symbol,
+        cursor         : snapshotTs,
+        snapshot,
+        serverTime     : now,
+      });
+    } catch (err) {
+      console.error('[liveWsGateway] _flushHeatmap err:', err.message);
+    }
+  }
+}
+
+// ─── Density flush (unified snapshot per subscription) ────────────────────────
+//
+// Builds the unified DOM+cluster+POC snapshot for each active density
+// subscription and sends it as `density:snapshot`. Skips delivery if the
+// snapshot signature has not changed since the last flush for that subscription.
+
+async function _flushDensity() {
+  const subs = registry.getSubscriptionsByScope('density');
+  if (subs.length === 0) return;
+  const now = Date.now();
+
+  // Group subs by symbol+tf+window so we build each snapshot once per tick.
+  const groups = new Map(); // key → { symbol, tf, above, below, subs:[] }
+  for (const sub of subs) {
+    const symbol = (sub.params?.symbol || '').toUpperCase();
+    if (!symbol) {
+      // No symbol bound yet → heartbeat only
+      const state = connections.get(sub.connectionId);
+      if (state && state.ws.readyState === WebSocket.OPEN) {
+        safeSend(state.ws, {
+          type: 'heartbeat', scope: 'density',
+          subscriptionId: sub.subscriptionId, cursor: now, serverTime: now,
+        });
+        metrics.recordWsHeartbeat();
+      }
+      continue;
+    }
+    const tf    = sub.params?.timeframe || '1m';
+    const above = Math.min(Math.max(parseInt(sub.params?.above ?? 40, 10) || 40, 1), 200);
+    const below = Math.min(Math.max(parseInt(sub.params?.below ?? 40, 10) || 40, 1), 200);
+    const key   = `${symbol}|${tf}|${above}|${below}`;
+    if (!groups.has(key)) groups.set(key, { symbol, tf, above, below, subs: [] });
+    groups.get(key).subs.push(sub);
+  }
+
+  for (const { symbol, tf, above, below, subs: gsubs } of groups.values()) {
+    let snap;
+    try {
+      if (!densityService.isSymbolActive(symbol)) densityService.activateSymbol(symbol);
+      snap = await densityService.getUnifiedSnapshot(symbol, tf, above, below);
+    } catch (err) {
+      console.error(`[liveWsGateway] density snapshot ${symbol}/${tf}:`, err.message);
+      snap = null;
+    }
+
+    for (const sub of gsubs) {
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+
+      if (!snap) {
+        safeSend(state.ws, {
+          type: 'heartbeat', scope: 'density',
+          subscriptionId: sub.subscriptionId, cursor: now, serverTime: now,
+        });
+        metrics.recordWsHeartbeat();
+        continue;
+      }
+
+      // Cheap dedupe: send only when DOM updatedAt advanced or trades stale flag flipped.
+      const sig = `${snap.updatedAt}|${snap.poc}|${snap.stale.dom?1:0}|${snap.stale.trades?1:0}`;
+      if (sub.lastDensitySig === sig) {
+        // Still emit heartbeat so client knows the link is alive
+        safeSend(state.ws, {
+          type: 'heartbeat', scope: 'density',
+          subscriptionId: sub.subscriptionId, cursor: now, serverTime: now,
+        });
+        metrics.recordWsHeartbeat();
+        continue;
+      }
+      sub.lastDensitySig = sig;
+
+      safeSend(state.ws, {
+        type           : 'density:snapshot',
+        subscriptionId : sub.subscriptionId,
+        cursor         : now,
+        serverTime     : now,
+        ...snap,
+      });
+    }
+  }
+}
+
+// ─── Robobot flush (heartbeat only — real updates pushed via eventBus) ───────
+
+function _flushRobobot() {
+  const subs = registry.getSubscriptionsByScope('robobot');
+  if (subs.length === 0) return;
+  const now = Date.now();
+  for (const sub of subs) {
+    const state = connections.get(sub.connectionId);
+    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+    safeSend(state.ws, {
+      type: 'heartbeat', scope: 'robobot',
+      subscriptionId: sub.subscriptionId, cursor: now, serverTime: now,
+    });
+    metrics.recordWsHeartbeat();
   }
 }
 
@@ -505,6 +676,133 @@ async function _flushWatch() {
 // ─── Event bus listeners (near-instant alert push) ───────────────────────────
 
 function _attachEventBusListeners() {
+  // Near-instant heatmap snapshot push (complements the 1s flush loop)
+  eventBus.on('heatmap:update', ({ symbol, snapshot }) => {
+    const subs = registry.getSubscriptionsByScope('heatmap');
+    const now  = Date.now();
+    for (const sub of subs) {
+      if ((sub.params?.symbol || '').toUpperCase() !== symbol) continue;
+      const snapshotTs = snapshot.ts ?? now;
+      if (
+        typeof sub.lastDeliveredCursor === 'number' &&
+        snapshotTs <= sub.lastDeliveredCursor
+      ) continue;
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'heatmap:update',
+        subscriptionId : sub.subscriptionId,
+        symbol,
+        cursor         : snapshotTs,
+        snapshot,
+        serverTime     : now,
+      });
+      registry.updateCursor(sub.connectionId, sub.subscriptionId, snapshotTs);
+    }
+  });
+
+  // ── Density DOM update — orderbook changed (≤200ms cadence from densityService)
+  eventBus.on('density:dom', ({ symbol, bids, asks, updatedAt }) => {
+    const subs = registry.getSubscriptionsByScope('density');
+    const now  = Date.now();
+    for (const sub of subs) {
+      if ((sub.params?.symbol || '').toUpperCase() !== symbol) continue;
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'density:orderbook',
+        subscriptionId : sub.subscriptionId,
+        symbol,
+        bids,
+        asks,
+        updatedAt,
+        serverTime     : now,
+      });
+    }
+  });
+
+  // ── Density last trade — per aggTrade
+  eventBus.on('density:lastTrade', ({ symbol, trade }) => {
+    const subs = registry.getSubscriptionsByScope('density');
+    const now  = Date.now();
+    for (const sub of subs) {
+      if ((sub.params?.symbol || '').toUpperCase() !== symbol) continue;
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'density:lastTrade',
+        subscriptionId : sub.subscriptionId,
+        symbol         : trade.symbol,
+        price          : trade.price,
+        qty            : trade.qty,
+        side           : trade.side,
+        timestamp      : trade.timestamp,
+        serverTime     : now,
+      });
+    }
+  });
+
+  // ── Density footprint cell update — per aggTrade (1m only)
+  eventBus.on('density:footprint', (update) => {
+    const subs = registry.getSubscriptionsByScope('density');
+    const now  = Date.now();
+    for (const sub of subs) {
+      if ((sub.params?.symbol || '').toUpperCase() !== update.symbol) continue;
+      // Filter by subscriber's timeframe (default 1m matches all 1m events)
+      const subTf = sub.params?.timeframe ?? '1m';
+      if (subTf !== update.tf) continue;
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'density:footprint',
+        subscriptionId : sub.subscriptionId,
+        symbol         : update.symbol,
+        timeframe      : update.tf,
+        barTime        : update.barTime,
+        price          : update.price,
+        buyQty         : update.buyQty,
+        sellQty        : update.sellQty,
+        deltaQty       : update.deltaQty,
+        serverTime     : now,
+      });
+    }
+  });
+
+  // ── Robobot task lifecycle update — broadcast to all robobot subscribers
+  eventBus.on('robobot:task:update', (update) => {
+    const subs = registry.getSubscriptionsByScope('robobot');
+    const now  = Date.now();
+    for (const sub of subs) {
+      // Optional symbol filter
+      if (sub.params?.symbol && String(sub.params.symbol).toUpperCase() !== String(update.symbol || '').toUpperCase()) continue;
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'robobot:task:update',
+        subscriptionId : sub.subscriptionId,
+        cursor         : update.updatedAt ?? now,
+        serverTime     : now,
+        ...update,
+      });
+    }
+  });
+
+  eventBus.on('robobot:event', (ev) => {
+    const subs = registry.getSubscriptionsByScope('robobot');
+    const now  = Date.now();
+    for (const sub of subs) {
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, {
+        type           : 'robobot:event',
+        subscriptionId : sub.subscriptionId,
+        cursor         : ev.createdAt ?? now,
+        serverTime     : now,
+        event          : ev,
+      });
+    }
+  });
+
   // Immediate alert push to scope='alerts' subscribers (complements the flush loop)
   eventBus.on('alert', (alert) => {
     const subs = registry.getSubscriptionsByScope('alerts');

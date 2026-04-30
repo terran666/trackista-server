@@ -561,7 +561,13 @@ function connectOrderbook(symbol) {
 
     if (!msg || msg.e !== 'depthUpdate') return;
 
-    if (!state.synced) { state.buffer.push(msg); return; }
+    if (!state.synced) {
+      state.buffer.push(msg);
+      // Apply speculatively while waiting for resync so Redis stays fresh (flush every 2s).
+      // The authoritative snapshot in syncBook will reconcile any drift afterwards.
+      if (!state.syncing) applyEvent(state, msg);
+      return;
+    }
     if (msg.u <= state.lastUpdateId) return;
 
     if (msg.U > state.lastUpdateId + 1) {
@@ -570,7 +576,10 @@ function connectOrderbook(symbol) {
 
       if (msSinceLast < FUTURES_RESYNC_COOLDOWN_MS && state.lastResyncAt !== 0) {
         state.resyncSkippedCooldown = (state.resyncSkippedCooldown || 0) + 1;
-        console.warn(`[futures-ob] ${symbol}: live gap skipped — cooldown (${Math.round(msSinceLast)}ms < ${FUTURES_RESYNC_COOLDOWN_MS}ms) skipped=${state.resyncSkippedCooldown}`);
+        // Apply the event speculatively despite the gap: this advances lastUpdateId
+        // so that subsequent events are sequential and the orderbook stays live.
+        // A periodic full resync (after cooldown expires) reconciles any drift.
+        applyEvent(state, msg);
         return;
       }
 

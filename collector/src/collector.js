@@ -3,6 +3,7 @@
 const WebSocket = require('ws');
 const Redis     = require('ioredis');
 const { binanceFetch } = require('./binanceRestLogger');
+const rateLimitStateStore = require('./shared/binanceRateLimitStateStore');
 
 // ─── Configuration ───────────────────────────────────────────────
 const REDIS_HOST            = process.env.REDIS_HOST || 'localhost';
@@ -556,6 +557,16 @@ function startFlushTimer() {
       const snapshot = buildSnapshot(state, nowMs);
       pipeline.set(`spot:metrics:${state.symbol}`, JSON.stringify(snapshot));
       pipeline.set(`spot:price:${state.symbol}`, String(state.lastPrice));
+      // Fallback: write spot data to shared metrics/price keys ONLY when the
+      // futures aggTrade state for this symbol is stale (> 2 min without a trade).
+      // This keeps ETH/SOL etc. on futures data when the futures WS is healthy,
+      // while ensuring BTC and other dead-futures symbols always have fresh prices.
+      const futuresState = symbolStates.get(state.symbol);
+      const futuresAge   = futuresState ? (nowMs - (futuresState.lastTradeTime || 0)) : Infinity;
+      if (futuresAge > 2 * 60 * 1000) {
+        pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot));
+        pipeline.set(`price:${state.symbol}`, String(state.lastPrice));
+      }
 
       const signal = buildSignal(snapshot, state.signalHistory, nowMs);
       pipeline.set(`spot:signal:${state.symbol}`, JSON.stringify(signal));
@@ -756,19 +767,35 @@ async function startSpotCollector() {
   }, SYMBOL_REFRESH_MS);
 }
 
+// Silence watchdog: if a batch is connected but receives no messages for this
+// long, force-close it so the 'close' handler reconnects it automatically.
+const BATCH_SILENCE_TIMEOUT_MS = 30_000;
+
 function connectBatch(batchIndex, symbols) {
-  const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
+  const streams = symbols.map(s => `${s.toLowerCase()}@trade`).join('/');
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
 
   console.log(`[collector] Batch ${batchIndex + 1}: connecting (${symbols.length} streams)`);
 
   const ws = new WebSocket(url);
 
+  // Watchdog: terminates the socket if no message arrives within timeout.
+  let silenceTimer = null;
+  function resetSilenceTimer() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      console.warn(`[collector] Batch ${batchIndex + 1}: silence timeout — forcing reconnect`);
+      ws.terminate();
+    }, BATCH_SILENCE_TIMEOUT_MS);
+  }
+
   ws.on('open', () => {
     console.log(`[collector] Batch ${batchIndex + 1}: connected`);
+    resetSilenceTimer();
   });
 
   ws.on('message', (raw) => {
+    resetSilenceTimer();
     try {
       // Combined stream envelope: { stream: "btcusdt@aggTrade", data: { ... } }
       const envelope = JSON.parse(raw);
@@ -793,6 +820,7 @@ function connectBatch(batchIndex, symbols) {
   });
 
   ws.on('close', (code) => {
+    if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
     console.warn(`[collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in 5s...`);
     setTimeout(() => connectBatch(batchIndex, symbols), 5000);
   });
@@ -801,18 +829,29 @@ function connectBatch(batchIndex, symbols) {
 }
 
 function connectFuturesAggTradeBatch(symbols) {
-  const streams = symbols.map(s => `${s.toLowerCase()}@aggTrade`).join('/');
+  const streams = symbols.map(s => `${s.toLowerCase()}@trade`).join('/');
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
 
-  console.log(`[collector] Futures aggTrade: connecting ${symbols.length} streams (${symbols.join(',')})`);
+  console.log(`[collector] Futures trade: connecting ${symbols.length} streams (${symbols.join(',')})`);
 
   const ws = new WebSocket(url);
 
+  let silenceTimer = null;
+  function resetSilenceTimer() {
+    if (silenceTimer) clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      console.warn(`[collector] Futures trade: silence timeout — forcing reconnect`);
+      ws.terminate();
+    }, BATCH_SILENCE_TIMEOUT_MS);
+  }
+
   ws.on('open', () => {
-    console.log(`[collector] Futures aggTrade: connected (${symbols.length} symbols)`);
+    console.log(`[collector] Futures trade: connected (${symbols.length} symbols)`);
+    resetSilenceTimer();
   });
 
   ws.on('message', (raw) => {
+    resetSilenceTimer();
     try {
       // Futures combined stream: { stream: "...", data: { ... } }
       const envelope = JSON.parse(raw);
@@ -832,7 +871,8 @@ function connectFuturesAggTradeBatch(symbols) {
   });
 
   ws.on('close', (code) => {
-    console.warn(`[collector] Futures aggTrade WS closed (code=${code}). Reconnecting in 5s...`);
+    if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+    console.warn(`[collector] Futures trade WS closed (code=${code}). Reconnecting in 5s...`);
     setTimeout(() => connectFuturesAggTradeBatch(symbols), 5000);
   });
 }
@@ -953,10 +993,10 @@ function startSpotKlineCollector(symbols) {
 // backend proxy and bar-aggregator-service work transparently.
 
 const KLINE_REST_STALE_MS      = 2 * 60 * 1000;   // 2 min without WS data → switch to REST
-const KLINE_REST_POLL_MS       = 5_000;             // check interval; actual polling uses priority tiers
+const KLINE_REST_POLL_MS       = 10_000;            // check interval — 10s reduces req rate vs 5s
 const KLINE_REST_INTERVALS     = ['1m'];             // only 1m — bar aggregator needs it; others via WS
-const KLINE_REST_CONCURRENCY   = 8;                 // max parallel REST requests per chunk
-const KLINE_REST_CHUNK_DELAY   = 250;               // ms between chunks to spread load
+const KLINE_REST_CONCURRENCY   = 4;                 // max parallel REST requests per chunk (was 8)
+const KLINE_REST_CHUNK_DELAY   = 400;               // ms between chunks (was 250 — more spread)
 
 // Top symbols polled every ~5s; all others polled every ~60s (one per cycle)
 const KLINE_REST_HOT_SYMBOLS   = [
@@ -965,6 +1005,8 @@ const KLINE_REST_HOT_SYMBOLS   = [
   'BCHUSDT','ETCUSDT','XLMUSDT','ATOMUSDT','NEARUSDT','OPUSDT','ARBUSDT',
   'INJUSDT','SUIUSDT','APTUSDT','SEIUSDT','TIAUSDT','WIFUSDT','PEPEUSDT',
   'FLOKIUSDT','BONKUSDT',
+  // Symbols tracked by watch engine that may have silent aggTrade WS batches
+  'BSBUSDT','AIOTUSDT',
 ];
 
 let _klineRestFallbackActive = false;
@@ -973,6 +1015,13 @@ let _klineRestIntervalId     = null;
 async function _pollFuturesKlineRestBatch(symbols, interval) {
   // Process in chunks with delay to stay well within Binance rate limits
   for (let i = 0; i < symbols.length; i += KLINE_REST_CONCURRENCY) {
+    // Re-check ban state before each chunk — stops immediately if 429/418 was just received
+    const banState = rateLimitStateStore.getMarketState('futures');
+    if (banState.backoffUntilTs !== null && Date.now() < banState.backoffUntilTs) {
+      const remaining = Math.ceil((banState.backoffUntilTs - Date.now()) / 1000);
+      console.warn(`[kline-rest-fallback] futures ban active (${remaining}s) — aborting batch`);
+      return;
+    }
     const chunk = symbols.slice(i, i + KLINE_REST_CONCURRENCY);
     await Promise.all(chunk.map(async (sym) => {
       try {
@@ -1013,6 +1062,8 @@ async function _pollFuturesKlineRestBatch(symbols, interval) {
           redis.set(`${channel}:last`, payload, 'EX', 300).catch(() => {}),
         ]);
       } catch (_err) {
+        // Propagate rate-limit errors immediately — stop the entire batch
+        if (_err.status === 418) throw _err;
         // silently skip per-symbol errors; stale data is better than crashing
       }
     }));

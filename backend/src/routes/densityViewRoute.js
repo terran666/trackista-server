@@ -32,8 +32,9 @@ const { buildDensityView } = require('../services/density/densityViewBuilder');
 //
 function createDensityViewHandler(redis) {
   return async function densityViewHandler(req, res) {
-    const symbol = (req.query.symbol || '').toUpperCase().trim();
-    const scale  = (req.query.scale  || '').trim();
+    const symbol     = (req.query.symbol     || '').toUpperCase().trim();
+    const scale      = (req.query.scale      || '').trim();
+    const marketType = (req.query.marketType || 'futures').toLowerCase().trim();
 
     if (!symbol) {
       return res.status(400).json({
@@ -43,7 +44,7 @@ function createDensityViewHandler(redis) {
     }
 
     try {
-      const payload = await buildDensityView(redis, symbol, scale || undefined);
+      const payload = await buildDensityView(redis, symbol, scale || undefined, marketType);
 
       if (payload === null) {
         console.log(`[density-view] GET /api/density-view symbol=${symbol} scale=${scale || 'x5'} → not tracked, returning empty 200`);

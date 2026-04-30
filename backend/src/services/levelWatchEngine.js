@@ -708,7 +708,7 @@ function buildWatchEvent(eventType, level, state, opts = {}) {
     sideRelativeToLevel: opts.sideRelativeToLevel || null,
     levelPrice:          levelPrice,
     currentPrice:    currentPrice,
-    distancePct:     distancePct != null ? parseFloat(distancePct.toFixed(4)) : null,
+    distancePct:     distancePct != null ? parseFloat(Math.abs(distancePct).toFixed(4)) : null,
     approachSpeed:   approachSpeed != null ? parseFloat(approachSpeed.toFixed(8)) : null,
     approachAcceleration: approachAcceleration != null ? parseFloat(approachAcceleration.toFixed(8)) : null,
     signalContext:   signalContext || null,
@@ -1960,10 +1960,40 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         const lvlArr = groups.get(gk);
         const [market, symbol] = gk.split(':');
 
-        const [, rawPrice]   = results[gi * 3];
+        let [, rawPrice]     = results[gi * 3];
         const [, rawSignal]  = results[gi * 3 + 1];
         const [, rawMetrics] = results[gi * 3 + 2];
 
+        if (!rawPrice && market !== 'spot') {
+          // Fallback 1: use spot price when futures price key is missing
+          rawPrice = await redis.get(`spot:price:${symbol}`);
+        }
+        if (!rawPrice && market !== 'spot') {
+          // Fallback 2: use 1m kline close price (populated by REST fallback poller)
+          try {
+            const rawK = await redis.get(`kline:futures:${symbol}:1m:last`);
+            if (rawK) {
+              const kd = JSON.parse(rawK);
+              const age = Date.now() - (kd.E || 0);
+              if (age < 240_000 && kd.k?.c) {
+                rawPrice = String(kd.k.c);
+              }
+            }
+          } catch (_) {}
+        }
+        if (!rawPrice && market !== 'spot') {
+          // Fallback 3: use futures orderbook mid-price (accepts up to 5min stale)
+          try {
+            const rawOb = await redis.get(`futures:orderbook:${symbol}`);
+            if (rawOb) {
+              const ob = JSON.parse(rawOb);
+              const age = Date.now() - (ob.updatedAt || 0);
+              if (age < 300_000 && ob.midPrice > 0) {
+                rawPrice = String(ob.midPrice);
+              }
+            }
+          } catch (_) {}
+        }
         if (!rawPrice) {
           previousPrices.delete(gk);
           continue;

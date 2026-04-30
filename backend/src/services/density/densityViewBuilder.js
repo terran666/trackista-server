@@ -71,14 +71,19 @@ function buildDepth(bids, asks, rangeLow, rangeHigh) {
  * Build the full density-view payload for a single symbol + scale.
  *
  * @param {import('ioredis').Redis} redis
- * @param {string} symbol   e.g. "BTCUSDT"
- * @param {string} scaleRaw e.g. "x5" | "5"
+ * @param {string} symbol      e.g. "BTCUSDT"
+ * @param {string} scaleRaw    e.g. "x5" | "5"
+ * @param {string} [marketType] 'futures' | 'spot' (default: 'futures')
  * @returns {Promise<object|null>}  null when orderbook data is missing
  */
-async function buildDensityView(redis, symbol, scaleRaw) {
+async function buildDensityView(redis, symbol, scaleRaw, marketType = 'futures') {
+  const isFutures = marketType === 'futures';
+  const obKey    = isFutures ? `futures:orderbook:${symbol}` : `orderbook:${symbol}`;
+  const wallsKey = isFutures ? `futures:walls:${symbol}`    : `walls:${symbol}`;
+
   const [rawOrderbook, rawWalls] = await Promise.all([
-    redis.get(`orderbook:${symbol}`),
-    redis.get(`walls:${symbol}`),
+    redis.get(obKey),
+    redis.get(wallsKey),
   ]);
 
   if (rawOrderbook === null) return null;

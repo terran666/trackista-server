@@ -393,6 +393,57 @@ function getBestAsk(state) {
   return state._bestAsk;
 }
 
+// ─── Spot wall-event state (previous walls per symbol for diffing) ────────────
+// Map<symbol, Map<wallKey, { price, side, sizeUsdt }>>
+const _prevSpotWalls = new Map();
+
+/**
+ * Diff current vs previous spot walls and return lifecycle events.
+ * Events: new | dropped | increased | decreased
+ */
+function _diffSpotWalls(symbol, walls, threshold, now) {
+  const prev = _prevSpotWalls.get(symbol) || new Map();
+  const curr = new Map();
+  for (const w of walls) {
+    curr.set(`${w.side}:${w.price}`, w);
+  }
+
+  const events = [];
+
+  for (const [key, w] of curr) {
+    const sizeUsdt = w.usdValue ?? 0;
+    if (prev.has(key)) {
+      const pSizeUsdt = prev.get(key).sizeUsdt;
+      if (pSizeUsdt > 0) {
+        const chg = (sizeUsdt - pSizeUsdt) / pSizeUsdt;
+        if (chg > 0.20) {
+          events.push({ id: `${symbol}:${key}:${now}`, ts: now, marketType: 'spot', symbol, side: w.side, price: w.price, sizeUsdt, type: 'limit', status: 'increased', strength: parseFloat((sizeUsdt / Math.max(threshold, 1)).toFixed(2)), distancePct: parseFloat((w.distancePct ?? 0).toFixed(4)), lifetimeMs: w.lifetimeMs ?? 0 });
+        } else if (chg < -0.20) {
+          events.push({ id: `${symbol}:${key}:${now}`, ts: now, marketType: 'spot', symbol, side: w.side, price: w.price, sizeUsdt, type: 'limit', status: 'decreased', strength: parseFloat((sizeUsdt / Math.max(threshold, 1)).toFixed(2)), distancePct: parseFloat((w.distancePct ?? 0).toFixed(4)), lifetimeMs: w.lifetimeMs ?? 0 });
+        }
+      }
+    } else {
+      events.push({ id: `${symbol}:${key}:${now}`, ts: now, marketType: 'spot', symbol, side: w.side, price: w.price, sizeUsdt, type: 'limit', status: 'new', strength: parseFloat((sizeUsdt / Math.max(threshold, 1)).toFixed(2)), distancePct: parseFloat((w.distancePct ?? 0).toFixed(4)), lifetimeMs: w.lifetimeMs ?? 0 });
+    }
+  }
+
+  for (const [key, p] of prev) {
+    if (!curr.has(key)) {
+      const [side, price] = key.split(':');
+      events.push({ id: `${symbol}:${key}:${now}`, ts: now, marketType: 'spot', symbol, side, price: parseFloat(price), sizeUsdt: p.sizeUsdt, type: 'limit', status: 'dropped', strength: parseFloat((p.sizeUsdt / Math.max(threshold, 1)).toFixed(2)), distancePct: p.distancePct ?? 0, lifetimeMs: 0 });
+    }
+  }
+
+  // Update previous snapshot
+  const nextPrev = new Map();
+  for (const [key, w] of curr) {
+    nextPrev.set(key, { sizeUsdt: w.usdValue ?? 0, distancePct: w.distancePct ?? 0 });
+  }
+  _prevSpotWalls.set(symbol, nextPrev);
+
+  return events;
+}
+
 // ─── Wall scan timer (walls:SYM, decoupled, slower) ──────────────────────────
 //
 // Runs every WALL_SCAN_INTERVAL_MS (default 10s). Detects walls across ALL
@@ -435,6 +486,19 @@ function startWallScanTimer(redis) {
         wallThreshold,
         walls,
       }));
+
+      // ── Spot wall lifecycle events → Redis sorted set ─────────────────────
+      const events = _diffSpotWalls(state.symbol, walls, wallThreshold, now);
+      if (events.length > 0) {
+        const evKey  = `density:wall-events:spot:${state.symbol}`;
+        const cutoff = now - 24 * 60 * 60 * 1000;
+        const zaddArgs = [evKey];
+        for (const ev of events) zaddArgs.push(ev.ts, JSON.stringify(ev));
+        pipeline.zadd(...zaddArgs);
+        pipeline.zremrangebyscore(evKey, '-inf', cutoff);
+        pipeline.expire(evKey, 2 * 24 * 60 * 60);
+      }
+
       count++;
     }
 
@@ -845,6 +909,9 @@ function startSymbolWatcher(redis) {
           state.deactivated = true;
           state.ws?.terminate();
           bookStates.delete(sym);
+          // Free wall-lifetime memory \u2014 otherwise we keep accumulating per-price
+          // buckets for symbols we no longer track.
+          wallLifetimes.delete(sym);
           console.log(`[orderbook] symbol watcher: disconnecting ${sym} (removed from tracked list)`);
         }
       }

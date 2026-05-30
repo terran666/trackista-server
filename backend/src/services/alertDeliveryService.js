@@ -516,12 +516,6 @@ function createAlertDeliveryService(redis, telegramService, webPushService = nul
       return { success: false, skipped: true, reason: quality.reason };
     }
 
-    const burst = await passesBurstLimit(alert);
-    if (!burst.pass) {
-      console.log(`[telegram] skipped type=${alert.type} symbol=${alert.symbol} reason=burst_limit count=${burst.count} window=${burst.window}`);
-      return { success: false, skipped: true, reason: 'burst_limit' };
-    }
-
     const key = buildDeliveryKey(alert);
     const onCooldown = await isInCooldown(key);
     if (onCooldown) {
@@ -537,20 +531,39 @@ function createAlertDeliveryService(redis, telegramService, webPushService = nul
       return { success: false, skipped: true, reason: 'empty_message' };
     }
 
-    const result = await telegramService.sendMessage(message, { disableWebPagePreview: true });
+    // Burst gate is the LAST check before send. The INCR/DECR must straddle the
+    // network call so a failed send refunds the counter; otherwise a few
+    // upstream errors would lock the alert type at the cap until the window
+    // expires.
+    const burst = await passesBurstLimit(alert);
+    if (!burst.pass) {
+      console.log(`[telegram] skipped type=${alert.type} symbol=${alert.symbol} reason=burst_limit count=${burst.count} window=${burst.window}`);
+      return { success: false, skipped: true, reason: 'burst_limit' };
+    }
+
+    let result;
+    try {
+      result = await telegramService.sendMessage(message, { disableWebPagePreview: true });
+    } catch (err) {
+      // Refund the burst counter on transport failure so retries aren't locked out.
+      try { await redis.decr(`telegram:burst:${alert.type}`); } catch (_) {}
+      throw err;
+    }
 
     if (result.skipped) {
+      try { await redis.decr(`telegram:burst:${alert.type}`); } catch (_) {}
       return { success: false, skipped: true, reason: result.reason };
     }
 
     if (result.success) {
       incrementRate();
-      // burst count already incremented atomically inside passesBurstLimit
       await markDelivered(key, alert.type);
       console.log(`[telegram] delivered type=${alert.type} symbol=${alert.symbol} messageId=${result.telegramMessageId}`);
       return { success: true, telegramMessageId: result.telegramMessageId };
     }
 
+    // Send returned a structured error \u2014 refund and surface.
+    try { await redis.decr(`telegram:burst:${alert.type}`); } catch (_) {}
     const statusCode = result.statusCode ?? 'network';
     console.error(`[telegram] failed type=${alert.type} symbol=${alert.symbol} status=${statusCode} error=${result.error}`);
     return { success: false, error: result.error };

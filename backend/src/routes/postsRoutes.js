@@ -84,7 +84,7 @@ function createPostsRouter(db, redis) {
   // ── GET /api/posts ───────────────────────────────────────────────
   // Feed with cursor-based pagination and optional filters.
   router.get('/', optionalAuth, async (req, res) => {
-    const limit     = Math.min(parseInt(req.query.limit    || '20', 10), 50);
+    const limit     = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 20, 50));
     const cursor    = req.query.cursor    || null;
     const symbol    = req.query.symbol    ? String(req.query.symbol).toUpperCase() : undefined;
     const authorId  = req.query.authorId  || undefined;
@@ -120,7 +120,7 @@ function createPostsRouter(db, redis) {
         if (!isMod) return res.status(404).json({ success: false, error: 'Post not found' });
       }
 
-      postsRepo.incrementViews(db, id).catch(() => {}); // fire-and-forget
+      postsRepo.incrementViews(db, id).catch(err => console.warn('[posts] incrementViews failed:', err.message));
       return res.json({ success: true, post: postsRepo.toPostDTO(row, req.user?.id) });
     } catch (err) {
       console.error('[posts] getPost error:', err.message);
@@ -189,7 +189,7 @@ function createPostsRouter(db, redis) {
       return res.status(400).json({ success: false, error: 'Invalid post id' });
     }
 
-    const limit  = Math.min(parseInt(req.query.limit || '50', 10), 100);
+    const limit  = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 50, 100));
     const cursor = req.query.cursor || null;
 
     try {

@@ -64,9 +64,32 @@ const DEFAULT_CACHE_TTL_MS = 30 * 1000;
 // ── aggTrades per-symbol throttle ────────────────────────────────────────────
 // /fapi/v1/aggTrades costs weight=20 per call. At 2 req/s × 60s = 2400 weight/min
 // which saturates the entire budget. Throttle to 1 real upstream call per
-// AGGTRADES_MIN_INTERVAL_MS per symbol; respond with 429 to fast retries.
-const AGGTRADES_MIN_INTERVAL_MS = 2_000; // 1 req / 2s per symbol = 30 req/min = 600 weight/min
-const aggTradesLastTs = new Map(); // symbol → last upstream call ts
+// AGGTRADES_MIN_INTERVAL_MS per (market:symbol:flow); respond with 429 to fast retries.
+//
+// Flow split: collector polls with fromId, UI polls with startTime/endTime windows.
+// They must NOT share a throttle slot, otherwise the collector starves the UI.
+const AGGTRADES_MIN_INTERVAL_MS = {
+  collector: 2_000, // collector — keep weight budget safe
+  ui:          800, // UI tab-switches change window faster; weight budget has room
+  misc:      2_000,
+};
+const aggTradesLastTs = new Map();    // throttleKey → last upstream call ts
+
+// Last successful aggTrades response per throttleKey — used as fallback when the
+// UI flow gets throttled, so the chart never blanks out on rapid tab switches.
+const lastSuccessByKey = new Map();   // throttleKey → { ts, status, body, headers }
+const LAST_SUCCESS_FALLBACK_MAX_AGE_MS = 5_000;
+const LAST_SUCCESS_RETENTION_MS        = 60_000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, ts] of aggTradesLastTs) {
+    if (now - ts > LAST_SUCCESS_RETENTION_MS) aggTradesLastTs.delete(k);
+  }
+  for (const [k, v] of lastSuccessByKey) {
+    if (now - v.ts > LAST_SUCCESS_RETENTION_MS) lastSuccessByKey.delete(k);
+  }
+}, 30_000).unref();
 
 // ── In-memory response cache ──────────────────────────────────────────────────
 // Map<cacheKey, { body, status, headers, cachedAt, expiresAt }>
@@ -385,19 +408,43 @@ function makeProxy(targetBase, market) {
         return res.send(cached.body);
       }
 
-      // Per-symbol throttle for aggTrades — prevent weight exhaustion
+      // Per-symbol throttle for aggTrades — prevent weight exhaustion.
+      // Split by flow so the collector (fromId) and the UI (window query) don't
+      // share the same 2s slot.
+      var aggThrottleKey = null;
+      var aggThrottleFlow = null;
       if (isAggTrades) {
-        const throttleKey = `${market}:${symbol}`;
-        const lastTs = aggTradesLastTs.get(throttleKey) || 0;
-        const elapsed = Date.now() - lastTs;
-        if (elapsed < AGGTRADES_MIN_INTERVAL_MS) {
-          const retryAfter = Math.ceil((AGGTRADES_MIN_INTERVAL_MS - elapsed) / 1000);
+        const isWindowQuery = req.query.startTime != null && req.query.endTime != null;
+        const isFromIdQuery = req.query.fromId != null;
+        const flow =
+          isFromIdQuery   ? 'collector' :
+          isWindowQuery   ? 'ui'        :
+                            'misc';
+        const minIntervalMs = AGGTRADES_MIN_INTERVAL_MS[flow] ?? 2_000;
+        const throttleKey = `${market}:${symbol}:${flow}`;
+        aggThrottleKey  = throttleKey;
+        aggThrottleFlow = flow;
+        const lastTs   = aggTradesLastTs.get(throttleKey) || 0;
+        const elapsed  = Date.now() - lastTs;
+        if (elapsed < minIntervalMs) {
+          // For UI: serve a recent successful response if available, so the chart
+          // doesn't blank out on rapid tab switches. Collector sees real 429s.
+          if (flow === 'ui') {
+            const cached = lastSuccessByKey.get(throttleKey);
+            if (cached && Date.now() - cached.ts < LAST_SUCCESS_FALLBACK_MAX_AGE_MS) {
+              res.status(cached.status);
+              applyHeaders(cached.headers, res);
+              res.setHeader('x-proxy-cache', 'throttle-fallback');
+              return res.send(cached.body);
+            }
+          }
           return res.status(429).json({
             success: false,
             error:   'aggTrades throttled — too many requests for this symbol',
             market,
             reason:  'aggtrades_throttled',
-            retryAfterMs: AGGTRADES_MIN_INTERVAL_MS - elapsed,
+            flow,
+            retryAfterMs: minIntervalMs - elapsed,
           });
         }
         aggTradesLastTs.set(throttleKey, Date.now());
@@ -441,6 +488,15 @@ function makeProxy(targetBase, market) {
           if (upstreamRes.ok) {
             const ttlMs = CACHE_TTL_MS[pathKey] ?? DEFAULT_CACHE_TTL_MS;
             setCached(cacheKey, body, upstreamRes.status, headers, ttlMs);
+            // Remember last successful aggTrades response for UI throttle fallback
+            if (isAggTrades && aggThrottleKey) {
+              lastSuccessByKey.set(aggThrottleKey, {
+                ts: Date.now(),
+                status: upstreamRes.status,
+                body,
+                headers,
+              });
+            }
           }
           
           return { body, status: upstreamRes.status, headers, res: upstreamRes };
@@ -507,6 +563,19 @@ function makeProxy(targetBase, market) {
       if (err.status === 418) {
         const remainingMs = Math.round(err.retryAfterMs || 60_000);
         recordError(market, pathKey, 'market_backoff_active', 418);
+        // Serve stale cache instead of a hard 503 — keeps charts alive during bans
+        const stale = responseCache.get(cacheKey);
+        if (stale) {
+          console.warn(
+            `[binance-proxy] ${market} ${pathKey} blocked by IP ban guard` +
+            ` remainingMs=${remainingMs} — serving stale cache (age=${Math.round((Date.now() - stale.cachedAt) / 1000)}s)`,
+          );
+          res.status(200);
+          applyHeaders(stale.headers, res);
+          res.setHeader('x-proxy-cache', 'stale');
+          res.setHeader('x-proxy-rate-limit-remaining-ms', String(remainingMs));
+          return res.send(stale.body);
+        }
         console.warn(
           `[binance-proxy] ${market} ${pathKey} blocked by IP ban guard` +
           ` remainingMs=${remainingMs} reason=market_backoff_active`,

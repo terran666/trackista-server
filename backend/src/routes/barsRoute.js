@@ -18,6 +18,7 @@
  */
 
 const express = require('express');
+const { safeSymbol } = require('../utils/parseClamp');
 
 // ── QA: validate ts consistency, log warnings ─────────────────────
 function validateBars(bars, symbol) {
@@ -161,7 +162,10 @@ function createBarsRouter(redis, db) {
 
   // GET /api/bars/:symbol
   router.get('/:symbol', async (req, res) => {
-    const symbol   = req.params.symbol.toUpperCase();
+    const symbol   = safeSymbol(req.params.symbol);
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: "Invalid 'symbol' parameter" });
+    }
     const interval = (req.query.interval || '1m').toLowerCase();
 
     // ── Validate & coerce params ──────────────────────────────────
@@ -247,11 +251,13 @@ function createBarsRouter(redis, db) {
 
     } catch (mysqlErr) {
       console.error(`[barsRoute] mysql fallback failed`, ctx, mysqlErr.message);
+      // Don't leak DB error text to clients \u2014 it can expose schema details
+      // and connection state. Operators see the full message in the log above.
       return res.status(500).json({
         success: false,
         error  : 'bars_route_failed',
         stage  : 'mysql_fallback',
-        message: mysqlErr.message,
+        message: 'Internal server error',
       });
     }
   });

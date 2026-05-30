@@ -94,17 +94,30 @@ function createScreenerAlertEngine(redis, db, deliveryService = null) {
     // bar at exactly `now - tf_minutes * 60000` is reliably included.
     const fromTs = nowTs - (maxMinutes + 5) * 60_000;
 
-    const pipeline = redis.pipeline();
-    for (const sym of symbols) {
-      pipeline.zrangebyscore(`bars:1m:${sym}`, fromTs, nowTs);
-      pipeline.get(`price:${sym}`);
+    // Chunk the pipeline: a single ioredis pipeline with thousands of commands
+    // can stall the event loop and balloon Redis output buffers. 200 symbols
+    // (=400 commands) per chunk keeps each round-trip well under 100ms.
+    const CHUNK = 200;
+    const results = [];
+    for (let off = 0; off < symbols.length; off += CHUNK) {
+      const slice = symbols.slice(off, off + CHUNK);
+      const pipeline = redis.pipeline();
+      for (const sym of slice) {
+        pipeline.zrangebyscore(`bars:1m:${sym}`, fromTs, nowTs);
+        pipeline.get(`price:${sym}`);
+      }
+      const partial = await pipeline.exec();
+      if (!partial) {
+        console.error('[screenerAlertEngine] read pipeline returned no result (connection lost?)');
+        return;
+      }
+      for (const r of partial) results.push(r);
     }
-    const results = await pipeline.exec();
 
     const cache = new Map();
     for (let i = 0; i < symbols.length; i++) {
-      const barsRaw   = results[i * 2][1]     || [];
-      const priceRaw  = results[i * 2 + 1][1];
+      const barsRaw   = results[i * 2]?.[1]     || [];
+      const priceRaw  = results[i * 2 + 1]?.[1];
 
       const bars = barsRaw
         .map(r => tryParseBar(r))

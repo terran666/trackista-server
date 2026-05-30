@@ -22,6 +22,14 @@ const REPORT_INTERVAL_MS = 60_000;
 //
 const backoff = { spot: 0, futures: 0 };
 
+// Redis reference stored on first syncBackoffFromRedis call —
+// used for persisting backend-detected bans to Redis and for periodic re-sync.
+let _redis = null;
+let _periodicSyncStarted = false;
+
+const REDIS_BAN_KEY      = 'debug:binance-rate-limit-state';
+const PERIODIC_SYNC_MS   = 5_000; // re-read Redis every 5 s to pick up collector bans
+
 function _marketKey(url) {
   return url.includes('fapi.binance.com') ? 'futures' : 'spot';
 }
@@ -39,11 +47,60 @@ function setBackoff(durationMs, url) {
       `[binance-rest/backend] ${key} IP BACKOFF set — calls paused for ${Math.ceil(durationMs / 1000)}s` +
       ` (until ${new Date(newUntil).toISOString()})`,
     );
+    // Persist to Redis so the collector process (separate container, same IP)
+    // also respects this ban and stops hammering Binance.
+    if (_redis) {
+      _redis.get(REDIS_BAN_KEY).then(raw => {
+        const existing = raw ? JSON.parse(raw) : {};
+        const mkt = existing[key] || {};
+        if (!mkt.backoffUntilTs || mkt.backoffUntilTs < newUntil) {
+          existing[key] = {
+            ...mkt,
+            backoffUntilTs:    newUntil,
+            backoffDurationMs: durationMs,
+            lastBackoffSetTs:  Date.now(),
+            lastBackoffReason: 'backend_guard',
+          };
+          return _redis.set(REDIS_BAN_KEY, JSON.stringify(existing), 'EX', 3600);
+        }
+      }).catch(err => {
+        console.warn('[binance-rest/backend] setBackoff Redis persist failed:', err.message);
+      });
+    }
   }
 }
 
 // Call once after Redis is ready so backoff survives server restarts.
 async function syncBackoffFromRedis(redis) {
+  _redis = redis;
+
+  // Start periodic re-sync (once per process lifetime).
+  // Critical: collector runs in a separate Docker container on the same IP.
+  // Without this, a ban set by the collector during runtime is invisible to
+  // the backend → backend keeps hitting Binance → extends the real IP ban.
+  if (!_periodicSyncStarted) {
+    _periodicSyncStarted = true;
+    const timer = setInterval(async () => {
+      try {
+        const raw = await redis.get(REDIS_BAN_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        const now   = Date.now();
+        for (const market of ['spot', 'futures']) {
+          const until = saved[market]?.backoffUntilTs;
+          if (until && until > now && until > backoff[market]) {
+            backoff[market] = until;
+            console.warn(
+              `[binance-rest/backend] ${market} ban synced from Redis (collector ban) — ` +
+              `${Math.ceil((until - now) / 1000)}s remaining`,
+            );
+          }
+        }
+      } catch (_) { /* Redis down — fail open, next tick will retry */ }
+    }, PERIODIC_SYNC_MS);
+    if (timer.unref) timer.unref();
+  }
+
   try {
     const raw = await redis.get('debug:binance-rate-limit-state');
     if (!raw) return;

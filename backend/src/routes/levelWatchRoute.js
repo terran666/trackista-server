@@ -191,6 +191,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (alertOptions)               updates.alertOptions = { ...(ml.alertOptions || {}), ...alertOptions };
           manualLevelsStore.patch(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
+          if (watchEnabled === false) {
+            redis.del(`levelwatchstate:${ml.marketType || 'futures'}:${ml.symbol}:manual-${id}`).catch(() => {});
+          }
           return res.json({ success: true, levelId: id });
         }
 
@@ -205,6 +208,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (alertOptions)               updates.alertOptions = { ...(tl.alertOptions || {}), ...alertOptions };
           trackedLevelsStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
+          if (watchEnabled === false) {
+            redis.del(`levelwatchstate:${tl.marketType || 'futures'}:${tl.symbol}:tracked-${id}`).catch(() => {});
+          }
           return res.json({ success: true, levelId: id });
         }
 
@@ -219,6 +225,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (alertOptions)               updates.alertOptions = { ...(sr.alertOptions || {}), ...alertOptions };
           savedRaysStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
+          if (watchEnabled === false) {
+            redis.del(`levelwatchstate:${sr.marketType || 'futures'}:${sr.symbol}:sray-${id}`).catch(() => {});
+          }
           return res.json({ success: true, levelId: id });
         }
 
@@ -233,6 +242,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (alertOptions)               updates.alertOptions = { ...(ex.alertOptions || {}), ...alertOptions };
           trackedExtremesStore.patchOne(id, updates, userId);
           if (watchLoader) watchLoader.invalidate();
+          if (watchEnabled === false) {
+            redis.del(`levelwatchstate:${ex.marketType || 'futures'}:${ex.symbol}:extreme-${id}`).catch(() => {});
+          }
           return res.json({ success: true, levelId: id });
         }
 
@@ -247,6 +259,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
           if (alertOptions)               updates.alertOptions = { ...(sl.alertOptions || {}), ...alertOptions };
           manualSlopedLevelsStore.patch(id, updates);
           if (watchLoader) watchLoader.invalidate();
+          if (watchEnabled === false) {
+            redis.del(`levelwatchstate:${sl.marketType || 'futures'}:${sl.symbol}:sloped-${id}`).catch(() => {});
+          }
           return res.json({ success: true, levelId: id });
         }
 
@@ -384,6 +399,9 @@ function createLevelWatchRouter(db, redis, watchLoader) {
 
       // Flush loader cache so watch engine sees changes on next tick
       if (watchLoader) watchLoader.invalidate();
+      if (watchEnabled === false) {
+        redis.del(`levelwatchstate:${level.market || 'futures'}:${level.symbol}:db-${id}`).catch(() => {});
+      }
 
       return res.json({ success: true, levelId: id });
     } catch (err) {

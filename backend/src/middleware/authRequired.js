@@ -21,7 +21,7 @@ function authRequired(req, res, next) {
   }
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
     if (!payload.sub || !payload.username) {
       return res.status(401).json({ success: false, error: 'Invalid token: missing required claims' });
     }
@@ -46,7 +46,7 @@ function optionalAuth(req, _res, next) {
 
   if (token) {
     try {
-      const payload = jwt.verify(token, JWT_SECRET);
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
       if (payload.sub && payload.username) {
         req.user = {
           id:       Number(payload.sub),

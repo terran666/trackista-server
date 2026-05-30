@@ -87,6 +87,10 @@ function createCorrelationService(redis) {
         readPipe.zrange(`bars:1m:${sym}`, -MAX_BARS_NEEDED, -1);
       }
       const readResults = await readPipe.exec();
+      if (!readResults) {
+        console.error('[correlationService] read pipeline returned no result (connection lost?)');
+        return;
+      }
 
       // 3. Parse & sort BTC bars
       const btcRaw  = readResults[0]?.[1];
@@ -159,7 +163,14 @@ function createCorrelationService(redis) {
         }
       }
 
-      await writePipe.exec();
+      const _writeExec = await writePipe.exec();
+      if (!_writeExec) {
+        console.error('[correlationService] write pipeline returned no result (connection lost?)');
+      } else {
+        for (const [pErr] of _writeExec) {
+          if (pErr) { console.error('[correlationService] write pipeline cmd error:', pErr.message); break; }
+        }
+      }
 
       lastRunMs = Date.now() - tickTs;
       console.log(`[correlationService] tick #${runCount}: ${symbols.length} symbols, ${computed} records, ${lastRunMs}ms`);

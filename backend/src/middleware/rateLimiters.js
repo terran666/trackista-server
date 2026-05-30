@@ -10,7 +10,10 @@ function createRateLimiter({ max, windowSec, keyPrefix }) {
   return function makeMiddleware(redis) {
     return async function rateLimiter(req, res, next) {
       const userId = req.user?.id || 'anon';
-      const ip     = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'unknown';
+      // Trust `req.ip` only — Express resolves it from the configured trusted
+      // proxy (`app.set('trust proxy', …)`). Reading `X-Forwarded-For` directly
+      // is spoofable per request and bypasses the limiter.
+      const ip     = req.ip || 'unknown';
       const key    = `rl:${keyPrefix}:${ip}:${userId}`;
 
       try {

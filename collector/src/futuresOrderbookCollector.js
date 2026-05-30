@@ -329,6 +329,37 @@ function startFlushTimer(redis) {
 
         const intPayload = wallDetector.buildInternalWallsPayload(state.symbol, snapshot.midPrice, now);
         pipeline.set(wallsIntKey(state.symbol), JSON.stringify(intPayload), 'EX', 300);
+
+        // ── v3 density analytics keys ───────────────────────────────
+        // density:wallStats:{symbol}  — per-side orderbook statistics + adaptive threshold
+        const statsPayload = wallDetector.buildWallStatsPayload(state.symbol);
+        if (statsPayload) {
+          pipeline.set(`density:wallStats:${state.symbol}`, JSON.stringify(statsPayload), 'EX', 300);
+        }
+        // density:bestWall:{symbol}  — best (highest wallPower) confirmed wall
+        const bestWallPayload = wallDetector.buildBestWallPayload(state.symbol, snapshot.midPrice, now);
+        if (bestWallPayload) {
+          pipeline.set(`density:bestWall:${state.symbol}`, JSON.stringify(bestWallPayload), 'EX', 300);
+        } else {
+          pipeline.del(`density:bestWall:${state.symbol}`);
+        }
+
+        // ── Wall lifecycle events → Redis sorted set ────────────────
+        // density:wall-events:futures:{symbol}  score=ts  member=JSON
+        // Trimmed to last 24 h so the set stays bounded.
+        const events = wallDetector.getAndClearPendingEvents(state.symbol);
+        if (events.length > 0) {
+          const evKey = `density:wall-events:futures:${state.symbol}`;
+          const cutoff = now - 24 * 60 * 60 * 1000;
+          // zadd score member [score member …]
+          const zaddArgs = [evKey];
+          for (const ev of events) zaddArgs.push(ev.ts, JSON.stringify(ev));
+          pipeline.zadd(...zaddArgs);
+          // Remove events older than 24 h
+          pipeline.zremrangebyscore(evKey, '-inf', cutoff);
+          // Soft TTL so the key expires if no events arrive for 2 days
+          pipeline.expire(evKey, 2 * 24 * 60 * 60);
+        }
       }
     }
 
@@ -616,10 +647,25 @@ function connectOrderbook(symbol) {
 // is always fresh. Runs immediately on startup (after tickers are available).
 
 function startUniverseBuilder(redis) {
-  // Build immediately, then on TRACKED_UNIVERSE_REFRESH_MS interval
-  const run = () => buildAndPersistUniverse(redis).catch(err =>
-    console.error('[futures-ob] universe build error (non-fatal):', err.message),
-  );
+  // Build immediately, then on TRACKED_UNIVERSE_REFRESH_MS interval. The
+  // builder fetches Binance REST + Redis pipelines and can outlive the next
+  // tick under load \u2014 the `_building` guard prevents overlapping runs from
+  // doubling the REST burst rate.
+  let _building = false;
+  const run = async () => {
+    if (_building) {
+      console.warn('[futures-ob] universe build still in flight \u2014 skipping this tick');
+      return;
+    }
+    _building = true;
+    try {
+      await buildAndPersistUniverse(redis);
+    } catch (err) {
+      console.error('[futures-ob] universe build error (non-fatal):', err.message);
+    } finally {
+      _building = false;
+    }
+  };
   run();
   setInterval(run, TRACKED_UNIVERSE_REFRESH_MS);
 }

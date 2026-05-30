@@ -112,6 +112,10 @@ function createLevelMonitorService(redis) {
         pipeline.get(`signal:${sym}`);
       }
       const results = await pipeline.exec();
+      if (!results) {
+        console.error('[levelMonitor] read pipeline returned no result (connection lost?)');
+        return;
+      }
 
       let monitoredSymbols = 0;
       let monitoredLevels  = 0;
@@ -124,9 +128,9 @@ function createLevelMonitorService(redis) {
 
       for (let i = 0; i < symbols.length; i++) {
         const sym = symbols[i];
-        const [, rawLevels] = results[i * 3];
-        const [, rawPrice]  = results[i * 3 + 1];
-        const [, rawSignal] = results[i * 3 + 2];
+        const [, rawLevels] = results[i * 3]     || [null, null];
+        const [, rawPrice]  = results[i * 3 + 1] || [null, null];
+        const [, rawSignal] = results[i * 3 + 2] || [null, null];
 
         // Пропускаем символы без уровней
         if (!rawLevels) continue;
@@ -142,7 +146,7 @@ function createLevelMonitorService(redis) {
         // Signal (может отсутствовать)
         let signal = null;
         if (rawSignal) {
-          try { signal = JSON.parse(rawSignal); } catch (_) {}
+          try { signal = JSON.parse(rawSignal); } catch (e) { console.warn('[levelMonitor] parse signal:', e.message); }
         }
 
         const prevPrice = previousPrices.get(sym) ?? null;

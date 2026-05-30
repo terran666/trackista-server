@@ -1,0 +1,10 @@
+const W = require('ws');
+const url = process.argv[2];
+const dur = parseInt(process.argv[3] || '15000', 10);
+const w = new W(url);
+let n = 0, first = 0;
+w.on('open', () => console.log('OPEN', url, 'ts=' + Date.now()));
+w.on('message', d => { n++; if (!first) first = Date.now(); if (n <= 2) console.log('MSG', String(d).slice(0, 160)); });
+w.on('error', e => console.log('ERR', e.message));
+w.on('close', (c, r) => console.log('CLOSE', c, String(r)));
+setTimeout(() => { console.log('TOTAL', n, 'firstAt=' + first); process.exit(0); }, dur);

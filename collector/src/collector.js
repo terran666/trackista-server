@@ -483,6 +483,7 @@ function buildSnapshot(state, nowMs) {
     buyVolumeUsdt60s:  w60.buyVolumeUsdt,
     sellVolumeUsdt60s: w60.sellVolumeUsdt,
     deltaUsdt60s:      w60.buyVolumeUsdt - w60.sellVolumeUsdt,
+    deltaUsdt1s:       w1.buyVolumeUsdt  - w1.sellVolumeUsdt,
     priceChangePct60s: priceChangePct60,
     // Minute-level volume windows (null until enough minute buckets accumulate)
     volumeUsdt5m:      m5  ? m5.volumeUsdt  : null,
@@ -661,6 +662,7 @@ function connectSpotBatch(batchIndex, symbols) {
   const ws = new WebSocket(url);
 
   ws.on('open', () => {
+    _resetReconnect(`spot:batch:${batchIndex}`);
     console.log(`[spot-collector] Batch ${batchIndex + 1}: connected`);
   });
 
@@ -680,8 +682,10 @@ function connectSpotBatch(batchIndex, symbols) {
   });
 
   ws.on('close', (code) => {
-    console.warn(`[spot-collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in 5s...`);
-    setTimeout(() => connectSpotBatch(batchIndex, symbols), 5000);
+    const key   = `spot:batch:${batchIndex}`;
+    const delay = _reconnectDelayMs(key);
+    console.warn(`[spot-collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in ${Math.round(delay)}ms...`);
+    setTimeout(() => connectSpotBatch(batchIndex, symbols), delay);
   });
 
   spotBatchSockets[batchIndex] = ws;
@@ -771,6 +775,20 @@ async function startSpotCollector() {
 // long, force-close it so the 'close' handler reconnects it automatically.
 const BATCH_SILENCE_TIMEOUT_MS = 30_000;
 
+// Reconnect backoff with jitter. Tracks attempt count per logical reconnector
+// key. A flat 5s reconnect on every WS close caused thundering-herd reconnects
+// against Binance after a network blip.
+const _reconnectAttempts = new Map();
+function _reconnectDelayMs(key) {
+  const n = (_reconnectAttempts.get(key) || 0) + 1;
+  _reconnectAttempts.set(key, n);
+  // 5s, 10s, 20s, 40s, capped at 60s; ±2s jitter to avoid synchronised reconnects.
+  const base   = Math.min(60_000, 5_000 * Math.pow(2, n - 1));
+  const jitter = (Math.random() * 4_000) - 2_000;
+  return Math.max(1_000, base + jitter);
+}
+function _resetReconnect(key) { _reconnectAttempts.delete(key); }
+
 function connectBatch(batchIndex, symbols) {
   const streams = symbols.map(s => `${s.toLowerCase()}@trade`).join('/');
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
@@ -790,6 +808,7 @@ function connectBatch(batchIndex, symbols) {
   }
 
   ws.on('open', () => {
+    _resetReconnect(`batch:${batchIndex}`);
     console.log(`[collector] Batch ${batchIndex + 1}: connected`);
     resetSilenceTimer();
   });
@@ -821,8 +840,10 @@ function connectBatch(batchIndex, symbols) {
 
   ws.on('close', (code) => {
     if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-    console.warn(`[collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in 5s...`);
-    setTimeout(() => connectBatch(batchIndex, symbols), 5000);
+    const key   = `batch:${batchIndex}`;
+    const delay = _reconnectDelayMs(key);
+    console.warn(`[collector] Batch ${batchIndex + 1} closed (code=${code}). Reconnecting in ${Math.round(delay)}ms...`);
+    setTimeout(() => connectBatch(batchIndex, symbols), delay);
   });
 
   batchSockets[batchIndex] = ws;
@@ -846,6 +867,7 @@ function connectFuturesAggTradeBatch(symbols) {
   }
 
   ws.on('open', () => {
+    _resetReconnect('futures:aggTrade');
     console.log(`[collector] Futures trade: connected (${symbols.length} symbols)`);
     resetSilenceTimer();
   });
@@ -872,8 +894,10 @@ function connectFuturesAggTradeBatch(symbols) {
 
   ws.on('close', (code) => {
     if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
-    console.warn(`[collector] Futures trade WS closed (code=${code}). Reconnecting in 5s...`);
-    setTimeout(() => connectFuturesAggTradeBatch(symbols), 5000);
+    const key   = 'futures:aggTrade';
+    const delay = _reconnectDelayMs(key);
+    console.warn(`[collector] Futures trade WS closed (code=${code}). Reconnecting in ${Math.round(delay)}ms...`);
+    setTimeout(() => connectFuturesAggTradeBatch(symbols), delay);
   });
 }
 
@@ -914,7 +938,10 @@ function connectFuturesKlineBatch(batchIdx, symbols, interval) {
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
   console.log(`[kline-collector] futures/${interval} batch${batchIdx + 1}: connecting (${symbols.length} symbols)`);
   const ws = new WebSocket(url);
-  ws.on('open', () => console.log(`[kline-collector] futures/${interval} batch${batchIdx + 1}: connected`));
+  ws.on('open', () => {
+    _resetReconnect(`kline:futures:${interval}:${batchIdx}`);
+    console.log(`[kline-collector] futures/${interval} batch${batchIdx + 1}: connected`);
+  });
   ws.on('message', (raw) => {
     try {
       const envelope = JSON.parse(raw);
@@ -930,8 +957,10 @@ function connectFuturesKlineBatch(batchIdx, symbols, interval) {
   });
   ws.on('error', (err) => console.error(`[kline-collector] futures/${interval} batch${batchIdx + 1} error:`, err.message));
   ws.on('close', (code) => {
-    console.warn(`[kline-collector] futures/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in 5s...`);
-    setTimeout(() => connectFuturesKlineBatch(batchIdx, symbols, interval), 5000);
+    const key   = `kline:futures:${interval}:${batchIdx}`;
+    const delay = _reconnectDelayMs(key);
+    console.warn(`[kline-collector] futures/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in ${Math.round(delay)}ms...`);
+    setTimeout(() => connectFuturesKlineBatch(batchIdx, symbols, interval), delay);
   });
 }
 
@@ -953,7 +982,10 @@ function connectSpotKlineBatch(batchIdx, symbols, interval) {
   const url     = `${SPOT_WS_BASE}/stream?streams=${streams}`;
   console.log(`[kline-collector] spot/${interval} batch${batchIdx + 1}: connecting (${symbols.length} symbols)`);
   const ws = new WebSocket(url);
-  ws.on('open', () => console.log(`[kline-collector] spot/${interval} batch${batchIdx + 1}: connected`));
+  ws.on('open', () => {
+    _resetReconnect(`kline:spot:${interval}:${batchIdx}`);
+    console.log(`[kline-collector] spot/${interval} batch${batchIdx + 1}: connected`);
+  });
   ws.on('message', (raw) => {
     try {
       const envelope = JSON.parse(raw);
@@ -969,8 +1001,10 @@ function connectSpotKlineBatch(batchIdx, symbols, interval) {
   });
   ws.on('error', (err) => console.error(`[kline-collector] spot/${interval} batch${batchIdx + 1} error:`, err.message));
   ws.on('close', (code) => {
-    console.warn(`[kline-collector] spot/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in 5s...`);
-    setTimeout(() => connectSpotKlineBatch(batchIdx, symbols, interval), 5000);
+    const key   = `kline:spot:${interval}:${batchIdx}`;
+    const delay = _reconnectDelayMs(key);
+    console.warn(`[kline-collector] spot/${interval} batch${batchIdx + 1} closed (code=${code}). Reconnecting in ${Math.round(delay)}ms...`);
+    setTimeout(() => connectSpotKlineBatch(batchIdx, symbols, interval), delay);
   });
 }
 
@@ -1085,9 +1119,12 @@ function startFuturesKlineRestFallback(getSymbolsFn) {
   console.log('[kline-rest-fallback] Scheduler started — will activate when WS is stale');
 
   let _coldCycleIdx = 0; // rotating index into cold symbols for round-robin batch
+  let _inFlight     = false; // re-entry guard \u2014 one cycle can outlive the next interval tick
 
   // Sentinel: check BTCUSDT 1m key freshness every poll cycle
   _klineRestIntervalId = setInterval(async () => {
+    if (_inFlight) return; // previous cycle still running \u2014 skip this tick
+    _inFlight = true;
     try {
       const lastKey = 'kline:futures:BTCUSDT:1m:last';
       const raw     = await redis.get(lastKey).catch(() => null);
@@ -1126,6 +1163,8 @@ function startFuturesKlineRestFallback(getSymbolsFn) {
       }
     } catch (err) {
       console.error('[kline-rest-fallback] poll error:', err.message);
+    } finally {
+      _inFlight = false;
     }
   }, KLINE_REST_POLL_MS);
 }
@@ -1261,3 +1300,14 @@ const FUTURES_STARTUP_DELAY_MS = parseInt(process.env.FUTURES_STARTUP_DELAY_MS |
 const futuresOrderbookCollector = require('./futuresOrderbookCollector');
 console.log(`[collector] futures orderbook collector will start in ${FUTURES_STARTUP_DELAY_MS / 1000}s to avoid rate-limit burst with spot collector`);
 setTimeout(() => futuresOrderbookCollector.start(redis), FUTURES_STARTUP_DELAY_MS);
+
+// ─── Density Kline Collector ──────────────────────────────────────
+// Starts after the futures orderbook collector has bootstrapped so the
+// density:symbols:tracked:futures list is already populated in Redis.
+// Fetches OHLCV history and subscribes to kline WS for density charts.
+const DENSITY_KLINE_DELAY_MS = parseInt(process.env.DENSITY_KLINE_DELAY_MS || String(FUTURES_STARTUP_DELAY_MS + 30_000), 10);
+const densityKlineCollector  = require('./densityKlineCollector');
+console.log(`[collector] density kline collector will start in ${DENSITY_KLINE_DELAY_MS / 1000}s`);
+setTimeout(() => densityKlineCollector.start(redis).catch(err =>
+  console.error('[collector] densityKlineCollector start error:', err.message),
+), DENSITY_KLINE_DELAY_MS);

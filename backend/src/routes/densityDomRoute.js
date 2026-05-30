@@ -11,6 +11,16 @@
  */
 
 const express = require('express');
+const { parseIntClamp, safeSymbol } = require('../utils/parseClamp');
+const { createRateLimiter } = require('../middleware/rateLimiters');
+
+// Tight per-IP limit on POST /activate to prevent collector slot exhaustion
+// from anonymous abuse (each activate ties up a Binance WS slot).
+const activateLimiter = createRateLimiter({
+  max:       parseInt(process.env.RATE_LIMIT_ACTIVATE_MAX        || '20', 10) || 20,
+  windowSec: parseInt(process.env.RATE_LIMIT_ACTIVATE_WINDOW_SEC || '60', 10) || 60,
+  keyPrefix: 'density-activate',
+});
 
 const VALID_TFS = new Set(['1m', '5m', '15m', '30m', '1h']);
 
@@ -21,12 +31,12 @@ function createDensityDomRouter(redis, densityService) {
   // Full combined snapshot: orderbook + footprint bars + priceLevels + walls.
   // Called once on page load / symbol switch. WS scope=density handles live updates.
   router.get('/dom-snapshot', async (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
+    const symbol = safeSymbol(req.query.symbol);
     const tf     = VALID_TFS.has(req.query.tf) ? req.query.tf : '1m';
-    const bars   = Math.min(parseInt(req.query.bars || '20', 10), 60);
+    const bars   = parseIntClamp(req.query.bars, 20, 1, 60);
 
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
 
     try {
@@ -49,16 +59,13 @@ function createDensityDomRouter(redis, densityService) {
   // ─── GET /api/density/snapshot ───────────────────────────────
   // Unified single-source snapshot: priceLevels[] combining DOM + clusters + POC.
   router.get('/snapshot', async (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
+    const symbol = safeSymbol(req.query.symbol);
     const tf     = VALID_TFS.has(req.query.tf) ? req.query.tf : '1m';
-    const above  = Math.min(Math.max(parseInt(req.query.above || '40', 10), 1), 200);
-    const below  = Math.min(Math.max(parseInt(req.query.below || '40', 10), 1), 200);
+    const above  = parseIntClamp(req.query.above, 40, 1, 200);
+    const below  = parseIntClamp(req.query.below, 40, 1, 200);
 
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
-    }
-    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {
-      return res.status(400).json({ success: false, error: 'Invalid symbol format' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
 
     try {
@@ -85,12 +92,12 @@ function createDensityDomRouter(redis, densityService) {
   // ─── GET /api/density/footprint ──────────────────────────────
   // Returns footprint bars for a symbol + timeframe (in-memory or Redis fallback).
   router.get('/footprint', async (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
+    const symbol = safeSymbol(req.query.symbol);
     const tf     = VALID_TFS.has(req.query.tf) ? req.query.tf : '1m';
-    const bars   = Math.min(parseInt(req.query.bars || '20', 10), 60);
+    const bars   = parseIntClamp(req.query.bars, 20, 1, 60);
 
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
 
     try {
@@ -105,11 +112,17 @@ function createDensityDomRouter(redis, densityService) {
         const pipeline = redis.pipeline();
         for (let i = 0; i < bars; i++) pipeline.get(`footprint:${symbol}:${tf}:${latestBt - i * tfMs}`);
         const results = await pipeline.exec();
-        for (const [, v] of results) {
-          if (!v) continue;
-          try { footprintBars.push(JSON.parse(v)); } catch (_) {}
+        if (!results) {
+          console.error('[densityRoute] footprint pipeline returned no result');
+        } else {
+          for (const entry of results) {
+            if (!entry) continue;
+            const [, v] = entry;
+            if (!v) continue;
+            try { footprintBars.push(JSON.parse(v)); } catch (e) { console.warn('[densityRoute] footprint parse:', e.message); }
+          }
+          footprintBars.sort((a, b) => a.barTime - b.barTime);
         }
-        footprintBars.sort((a, b) => a.barTime - b.barTime);
       }
 
       return res.json({
@@ -127,8 +140,8 @@ function createDensityDomRouter(redis, densityService) {
 
   // ─── GET /api/density/last-trade ─────────────────────────────
   router.get('/last-trade', (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
-    if (!symbol) return res.status(400).json({ success: false, error: 'symbol is required' });
+    const symbol = safeSymbol(req.query.symbol);
+    if (!symbol) return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
 
     const trade = densityService.getLastTrade(symbol);
     if (!trade) {
@@ -139,9 +152,9 @@ function createDensityDomRouter(redis, densityService) {
 
   // ─── POST /api/density/activate ──────────────────────────────
   // Activates aggTrade collection for a symbol on demand (max MAX_SYMBOLS).
-  router.post('/activate', (req, res) => {
-    const symbol = ((req.body?.symbol || req.query.symbol || '') + '').toUpperCase().trim();
-    if (!symbol) return res.status(400).json({ success: false, error: 'symbol is required' });
+  router.post('/activate', activateLimiter(redis), (req, res) => {
+    const symbol = safeSymbol(req.body?.symbol || req.query.symbol);
+    if (!symbol) return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
 
     // Validate: alphanumeric only, 3–20 chars
     if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {

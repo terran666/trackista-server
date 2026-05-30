@@ -25,7 +25,7 @@
  *   alerts    :  500
  *   watch     : 2000
  *   heatmap   : 1000
- *   density   : 2000
+ *   density   :  400
  */
 
 const { WebSocketServer, WebSocket } = require('ws');
@@ -35,6 +35,7 @@ const registry                        = require('../services/wsSubscriptionRegis
 const eventBus                        = require('../services/wsEventBus');
 const metrics                         = require('../services/livePollingMetrics');
 const densityService                  = require('../services/densityService');
+const { normalizeWall }               = require('../utils/normalizeWall');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ const PING_INTERVAL_MS        = 20_000;   // send native WS ping every 20 s
 const MSG_RATE_WINDOW_MS      = 10_000;   // sliding window for client msg rate guard
 const MSG_RATE_MAX            = 50;       // max client messages per window
 const MAX_SINCE_AGE_MS        = 2 * 60 * 1000; // cursor older than 2 min → full resync
+const GET_DELTA_TIMEOUT_MS    = 5_000;    // cap per-client getDelta() to keep flush loop alive
 
 /** Flush cadence per scope (ms). */
 const FLUSH_CADENCE = {
@@ -192,7 +194,11 @@ function handleSubscribe(connId, state, msg) {
     (scope === 'heatmap' && msg.symbol && !rawParams.symbol)
       ? { ...rawParams, symbol: msg.symbol } :
     (scope === 'density' && (msg.symbol || msg.timeframe))
-      ? { symbol: rawParams.symbol || msg.symbol || null, timeframe: rawParams.timeframe || msg.timeframe || '1m' } :
+      ? {
+          ...rawParams,
+          symbol    : (rawParams.symbol || msg.symbol || null),
+          timeframe : (rawParams.timeframe || msg.timeframe || '1m'),
+        } :
     rawParams;
   const since          = typeof msg.since === 'number' ? msg.since : null;
 
@@ -208,6 +214,22 @@ function handleSubscribe(connId, state, msg) {
       message : `scope must be one of: ${[...VALID_SCOPES].join(', ')}`,
     });
     return;
+  }
+
+  // For density scope: detect symbol switch (same subscriptionId, different symbol).
+  // Save the old symbol BEFORE registry.subscribe replaces the sub object so we
+  // can deactivate it afterwards if no other subscribers need it.
+  let _oldDensitySymbol = null;
+  if (scope === 'density' && params.symbol) {
+    const existingDensitySubs = registry.getSubscriptionsByScope('density');
+    const existingSub = existingDensitySubs.find(
+      s => s.connectionId === connId && s.subscriptionId === subscriptionId
+    );
+    if (existingSub?.params?.symbol) {
+      const oldSym = existingSub.params.symbol.toUpperCase();
+      const newSym = params.symbol.toUpperCase();
+      if (oldSym !== newSym) _oldDensitySymbol = oldSym;
+    }
   }
 
   const result = registry.subscribe(connId, subscriptionId, scope, params, since);
@@ -228,6 +250,15 @@ function handleSubscribe(connId, state, msg) {
     eventBus.emit(`${scope}:activate`, params.symbol);
   }
 
+  // Deactivate old density symbol if no other subscribers need it
+  if (_oldDensitySymbol) {
+    const remaining = registry.getSubscriptionsByScope('density')
+      .filter(s => (s.params?.symbol || '').toUpperCase() === _oldDensitySymbol);
+    if (remaining.length === 0) {
+      densityService.deactivateSymbol(_oldDensitySymbol);
+    }
+  }
+
   safeSend(state.ws, {
     type           : 'subscribed',
     scope,
@@ -240,8 +271,25 @@ function handleSubscribe(connId, state, msg) {
 function handleUnsubscribe(connId, msg) {
   const subscriptionId = msg.subscriptionId;
   if (!subscriptionId) return;
+
+  // For density: find the symbol being removed so we can deactivate if orphaned.
+  let _oldDensitySymbol = null;
+  const removingSub = registry.getSubscriptionsByScope('density')
+    .find(s => s.connectionId === connId && s.subscriptionId === subscriptionId);
+  if (removingSub?.params?.symbol) {
+    _oldDensitySymbol = removingSub.params.symbol.toUpperCase();
+  }
+
   registry.unsubscribe(connId, subscriptionId);
   metrics.recordWsUnsubscribe();
+
+  if (_oldDensitySymbol) {
+    const remaining = registry.getSubscriptionsByScope('density')
+      .filter(s => (s.params?.symbol || '').toUpperCase() === _oldDensitySymbol);
+    if (remaining.length === 0) {
+      densityService.deactivateSymbol(_oldDensitySymbol);
+    }
+  }
 }
 
 function handleResyncRequest(connId, msg) {
@@ -298,10 +346,20 @@ async function _flushScreenerScope(scope) {
   const subs = registry.getSubscriptionsByScope(scope);
   if (subs.length === 0) return;
 
-  for (const sub of subs) {
-    const { connectionId, subscriptionId, params, lastDeliveredCursor } = sub;
+  // Process subs in bounded parallel batches so a single slow sub does not
+  // serialize the entire scope's flush. Each sub's I/O is independent
+  // (per-cursor getDelta), but we cap concurrency to avoid hammering Redis.
+  const CONCURRENCY = 10;
+  for (let i = 0; i < subs.length; i += CONCURRENCY) {
+    const batch = subs.slice(i, i + CONCURRENCY);
+    await Promise.allSettled(batch.map(sub => _flushOneScreenerSub(scope, sub)));
+  }
+}
+
+async function _flushOneScreenerSub(scope, sub) {
+  const { connectionId, subscriptionId, params, lastDeliveredCursor } = sub;
     const state = connections.get(connectionId);
-    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+    if (!state || state.ws.readyState !== WebSocket.OPEN) return;
 
     // Stale cursor → tell client to resync via HTTP
     if (lastDeliveredCursor == null || (Date.now() - lastDeliveredCursor) > MAX_SINCE_AGE_MS) {
@@ -315,11 +373,19 @@ async function _flushScreenerScope(scope) {
       metrics.recordWsFullResync();
       // Set cursor to now so we don't spam resync
       registry.updateCursor(connectionId, subscriptionId, Date.now());
-      continue;
+      return;
     }
 
     try {
-      const result = await getDelta(_redis, lastDeliveredCursor, params || {});
+      // Bounded getDelta so a hung Redis call cannot stall the per-scope flush
+      // loop indefinitely. On timeout we fall through to a heartbeat for this
+      // tick — next tick will retry naturally.
+      const result = await Promise.race([
+        getDelta(_redis, lastDeliveredCursor, params || {}),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('getDelta timeout')), GET_DELTA_TIMEOUT_MS).unref(),
+        ),
+      ]);
 
       if (result.fullResyncRequired) {
         safeSend(state.ws, {
@@ -331,11 +397,11 @@ async function _flushScreenerScope(scope) {
         });
         metrics.recordWsFullResync();
         registry.updateCursor(connectionId, subscriptionId, Date.now());
-        continue;
+        return;
       }
 
-      const changedRows = result.changedRows || [];
-      const newAlerts   = result.newAlerts   || [];
+      const changedRows = Array.isArray(result.changedRows) ? result.changedRows : [];
+      const newAlerts   = Array.isArray(result.newAlerts)   ? result.newAlerts   : [];
       const newCursor   = result.nextCursor;
 
       registry.updateCursor(connectionId, subscriptionId, newCursor);
@@ -350,7 +416,7 @@ async function _flushScreenerScope(scope) {
           serverTime     : Date.now(),
         });
         metrics.recordWsHeartbeat();
-        continue;
+        return;
       }
 
       // Build change map with scope-level field projection
@@ -372,14 +438,19 @@ async function _flushScreenerScope(scope) {
       // Include newAlerts inline (matches HTTP delta contract)
       if (newAlerts.length > 0) frame.newAlerts = newAlerts;
 
+      // Сериализуем один раз — и для отправки, и для подсчёта байт.
       const encoded = JSON.stringify(frame);
-      safeSend(state.ws, frame);
+      if (state.ws.readyState === WebSocket.OPEN) {
+        try {
+          state.ws.send(encoded);
+          metrics.recordWsMessageSent();
+        } catch (_) { /* connection closing */ }
+      }
       metrics.recordWsDelta(scope, Buffer.byteLength(encoded, 'utf8'));
 
     } catch (err) {
       console.error(`[liveWsGateway] _flushScreenerScope(${scope}) err:`, err.message);
     }
-  }
 }
 
 // ─── Heatmap flush ───────────────────────────────────────────────────────────
@@ -462,14 +533,32 @@ async function _flushDensity() {
     const below = Math.min(Math.max(parseInt(sub.params?.below ?? 40, 10) || 40, 1), 200);
     const key   = `${symbol}|${tf}|${above}|${below}`;
     if (!groups.has(key)) groups.set(key, { symbol, tf, above, below, subs: [] });
-    groups.get(key).subs.push(sub);
+    const grp = groups.get(key);
+    // Dedup by subscriptionId so an accidental double-subscribe does not
+    // produce duplicated frames per tick.
+    if (!grp.subs.some(s => s.subscriptionId === sub.subscriptionId && s.connectionId === sub.connectionId)) {
+      grp.subs.push(sub);
+    }
   }
 
   for (const { symbol, tf, above, below, subs: gsubs } of groups.values()) {
     let snap;
+    let activateError = null;
     try {
-      if (!densityService.isSymbolActive(symbol)) densityService.activateSymbol(symbol);
-      snap = await densityService.getUnifiedSnapshot(symbol, tf, above, below);
+      if (!densityService.isSymbolActive(symbol)) {
+        const r = densityService.activateSymbol(symbol);
+        if (r && r.ok === false) activateError = r;
+      }
+      if (!activateError) {
+        // Cap density snapshot build time so a slow densityService call
+        // cannot stall the 400ms flush loop indefinitely.
+        snap = await Promise.race([
+          densityService.getUnifiedSnapshot(symbol, tf, above, below),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('density snapshot timeout')), 3_000).unref(),
+          ),
+        ]);
+      }
     } catch (err) {
       console.error(`[liveWsGateway] density snapshot ${symbol}/${tf}:`, err.message);
       snap = null;
@@ -479,6 +568,20 @@ async function _flushDensity() {
       const state = connections.get(sub.connectionId);
       if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
 
+      // Surface capacity / activation failure exactly once per subscription.
+      if (activateError && sub.lastDensityActivateErr !== activateError.error) {
+        safeSend(state.ws, {
+          type           : 'error',
+          scope          : 'density',
+          subscriptionId : sub.subscriptionId,
+          code           : activateError.error,
+          message        : activateError.message || 'Density symbol activation failed',
+          serverTime     : now,
+        });
+        sub.lastDensityActivateErr = activateError.error;
+        continue;
+      }
+
       if (!snap) {
         safeSend(state.ws, {
           type: 'heartbeat', scope: 'density',
@@ -487,9 +590,13 @@ async function _flushDensity() {
         metrics.recordWsHeartbeat();
         continue;
       }
+      // Clear sticky activation error once snapshot resumes.
+      if (sub.lastDensityActivateErr) sub.lastDensityActivateErr = null;
 
-      // Cheap dedupe: send only when DOM updatedAt advanced or trades stale flag flipped.
-      const sig = `${snap.updatedAt}|${snap.poc}|${snap.stale.dom?1:0}|${snap.stale.trades?1:0}`;
+      // Dedupe signature — must change when DOM updates, when POC moves, when
+      // stale flags flip, AND when new trades land (footprint cells change).
+      const sig =
+        `${snap.updatedAt}|${snap.poc}|${snap.stale.dom?1:0}|${snap.stale.trades?1:0}|${snap.lastTradeTs ?? 0}`;
       if (sub.lastDensitySig === sig) {
         // Still emit heartbeat so client knows the link is alive
         safeSend(state.ws, {
@@ -509,6 +616,185 @@ async function _flushDensity() {
         ...snap,
       });
     }
+
+    // ── density:walls — current confirmed/persistent walls from Redis ────
+    // Sent every flush tick so the client always sees the current wall list.
+    // Only delivered when there are subscribed clients for this group.
+    try {
+      const marketType = 'futures'; // TODO: derive from subscription params when spot is added
+      const wallsKey   = `${marketType}:walls:${symbol}`;
+      const wallsRaw   = await _redis.get(wallsKey);
+      if (wallsRaw) {
+        const wallsData = JSON.parse(wallsRaw);
+        const rawWalls  = Array.isArray(wallsData) ? wallsData : (wallsData.walls || []);
+        const walls     = rawWalls.map(w => normalizeWall(w));
+        const wallsSig  = `${wallsData.updatedAt ?? wallsData.ts ?? now}:${walls.length}`;
+        for (const sub of gsubs) {
+          const state = connections.get(sub.connectionId);
+          if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+          if (sub.lastDensityWallsSig === wallsSig) continue;
+          sub.lastDensityWallsSig = wallsSig;
+          safeSend(state.ws, {
+            type           : 'density:walls',
+            subscriptionId : sub.subscriptionId,
+            cursor         : now,
+            serverTime     : now,
+            marketType,
+            symbol,
+            walls,
+          });
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // ── density.wallDepth.updated — pre-computed depth-to-wall data ──────
+    // Read from density:wallDepth:{symbol} cache written by wallDepthRoute.
+    // Cache miss triggers an inline build + write so the WS is always fed.
+    try {
+      const wdKey = `density:wallDepth:${symbol}`;
+      let wdRaw   = await _redis.get(wdKey);
+      if (!wdRaw) {
+        // Cache is empty — attempt inline rebuild (non-fatal if it fails)
+        try {
+          const { buildAndCacheWallDepth } = require('./wallDepthRoute');
+          const built = await buildAndCacheWallDepth(_redis, symbol);
+          if (built) wdRaw = JSON.stringify(built);
+        } catch (_ignore) { /* wallDepthRoute unavailable */ }
+      }
+      if (wdRaw) {
+        const wdData = JSON.parse(wdRaw);
+        const wdSig  = `${wdData.updatedAt}:${wdData.bid?.targetWall?.price ?? 'x'}:${wdData.ask?.targetWall?.price ?? 'x'}`;
+        for (const sub of gsubs) {
+          const state = connections.get(sub.connectionId);
+          if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+          if (sub.lastDensityWallDepthSig === wdSig) continue;
+          sub.lastDensityWallDepthSig = wdSig;
+          safeSend(state.ws, {
+            type           : 'density.wallDepth.updated',
+            subscriptionId : sub.subscriptionId,
+            cursor         : now,
+            serverTime     : now,
+            symbol,
+            data           : wdData,
+          });
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // ── density:depth — cumulative depth map from orderbook ─────────────
+    // Sent every flush tick. Only bids/asks arrays, lightweight.
+    try {
+      const marketType  = 'futures';
+      const obKey       = `${marketType}:orderbook:${symbol}`;
+      const obRaw       = await _redis.get(obKey);
+      if (obRaw) {
+        const ob      = JSON.parse(obRaw);
+        const DEPTH_LEVELS = 100;
+        const rawBids = (ob.bids || []).slice(0, DEPTH_LEVELS);
+        const rawAsks = (ob.asks || []).slice(0, DEPTH_LEVELS);
+        const bestBid = rawBids.length ? parseFloat(rawBids[0][0]) : 0;
+        const bestAsk = rawAsks.length ? parseFloat(rawAsks[0][0]) : 0;
+        const midPrice = (bestBid + bestAsk) / 2 || bestBid || bestAsk;
+        const obSig = ob.updatedAt ?? ob.ts ?? now;
+        function buildCum(levels) {
+          let c = 0, cu = 0;
+          return levels.map((level) => {
+            // Normalize: collector stores {price,size} objects; handle both formats.
+            const price = Array.isArray(level) ? parseFloat(level[0]) : parseFloat(level.price);
+            const size  = Array.isArray(level) ? parseFloat(level[1]) : parseFloat(level.size);
+            c += size; cu += size * price;
+            return { price, size, cumulativeSize: c, cumulativeUsdt: cu };
+          });
+        }
+        for (const sub of gsubs) {
+          const state = connections.get(sub.connectionId);
+          if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+          if (sub.lastDensityDepthSig === obSig) continue;
+          sub.lastDensityDepthSig = obSig;
+          safeSend(state.ws, {
+            type           : 'density:depth',
+            subscriptionId : sub.subscriptionId,
+            cursor         : now,
+            serverTime     : now,
+            marketType,
+            symbol,
+            midPrice,
+            bids           : buildCum(rawBids),
+            asks           : buildCum(rawAsks),
+          });
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // ── density:wall-event — new wall lifecycle events since last poll ───
+    // Uses per-subscription cursor (lastWallEventTs) so each client gets
+    // only events it hasn't seen yet.
+    try {
+      const marketType = 'futures';
+      const evKey      = `density:wall-events:${marketType}:${symbol}`;
+      // Find the highest cursor across all subs in this group to do one ZRANGEBYSCORE.
+      const minCursor  = gsubs.reduce((m, sub) => Math.min(m, sub.lastWallEventTs ?? (now - 60_000)), now);
+      const evRaws     = await _redis.zrangebyscore(evKey, minCursor + 1, '+inf');
+      if (evRaws.length > 0) {
+        const events = evRaws.map(r => { try { return JSON.parse(r); } catch (_) { return null; } }).filter(Boolean);
+        if (events.length > 0) {
+          for (const sub of gsubs) {
+            const state = connections.get(sub.connectionId);
+            if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+            const subCursor = sub.lastWallEventTs ?? (now - 60_000);
+            const subEvents = events.filter(ev => ev.ts > subCursor);
+            if (subEvents.length === 0) continue;
+            safeSend(state.ws, {
+              type           : 'density:wall-event',
+              subscriptionId : sub.subscriptionId,
+              cursor         : now,
+              serverTime     : now,
+              marketType,
+              symbol,
+              events         : subEvents,
+            });
+            sub.lastWallEventTs = subEvents[subEvents.length - 1].ts;
+          }
+        }
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // ── density:candle — latest 1m bar from the bar aggregator ──────────
+    // Pushed every 400ms flush cadence so the chart always shows a live
+    // (potentially incomplete) current candle. Signature-deduped per sub.
+    try {
+      const marketType = 'futures';
+      const barsKey    = `bars:1m:${symbol}`;
+      const lastRaw    = await _redis.zrange(barsKey, -1, -1);
+      if (lastRaw && lastRaw.length > 0) {
+        const bar = JSON.parse(lastRaw[0]);
+        const candle = {
+          time   : bar.ts,
+          open   : bar.open,
+          high   : bar.high,
+          low    : bar.low,
+          close  : bar.close,
+          volume : bar.volumeUsdt ?? 0,
+        };
+        const candleSig = `${candle.time}:${candle.close}`;
+        for (const sub of gsubs) {
+          const state = connections.get(sub.connectionId);
+          if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+          if (sub.lastDensityCandleSig === candleSig) continue;
+          sub.lastDensityCandleSig = candleSig;
+          safeSend(state.ws, {
+            type           : 'density:candle',
+            subscriptionId : sub.subscriptionId,
+            cursor         : now,
+            serverTime     : now,
+            marketType,
+            symbol,
+            tf             : '1m',
+            candle,
+          });
+        }
+      }
+    } catch (_) { /* non-fatal */ }
   }
 }
 
@@ -536,11 +822,17 @@ async function _flushAlerts() {
   if (subs.length === 0) return;
 
   const now = Date.now();
+  const CONCURRENCY = 10;
+  for (let i = 0; i < subs.length; i += CONCURRENCY) {
+    const batch = subs.slice(i, i + CONCURRENCY);
+    await Promise.allSettled(batch.map(sub => _flushOneAlertsSub(sub, now)));
+  }
+}
 
-  for (const sub of subs) {
-    const { connectionId, subscriptionId, lastDeliveredCursor } = sub;
+async function _flushOneAlertsSub(sub, now) {
+  const { connectionId, subscriptionId, lastDeliveredCursor } = sub;
     const state = connections.get(connectionId);
-    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+    if (!state || state.ws.readyState !== WebSocket.OPEN) return;
 
     const since = typeof lastDeliveredCursor === 'number' ? lastDeliveredCursor : now - 5000;
 
@@ -550,7 +842,7 @@ async function _flushAlerts() {
       if (!raws || raws.length === 0) {
         safeSend(state.ws, { type: 'heartbeat', scope: 'alerts', subscriptionId, cursor: now, serverTime: now });
         metrics.recordWsHeartbeat();
-        continue;
+        return;
       }
 
       // Re-read the live cursor from the sub object: the event-bus listener may have
@@ -560,18 +852,22 @@ async function _flushAlerts() {
       const liveCursor = typeof sub.lastDeliveredCursor === 'number' ? sub.lastDeliveredCursor : since;
 
       const alerts = raws
-        .map(r => { try { return JSON.parse(r); } catch { return null; } })
+        .map(r => { try { return JSON.parse(r); } catch (e) { console.warn('[liveWsGateway] _flushAlerts parse:', e.message); return null; } })
         .filter(Boolean)
         .filter(a => (a.createdAt ?? 0) > liveCursor);
       alerts.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
-      const newCursor = alerts.length > 0 ? (alerts[alerts.length - 1]?.createdAt ?? now) : now;
+      // Никогда не откатываем курсор ниже того, что уже доставил event-bus.
+      // Иначе: event-bus обновил liveCursor до T_alert во время await zrangebyscore,
+      // alerts.length = 0 после фильтрации, newCursor = now < T_alert → откат → дубль.
+      const rawCursor = alerts.length > 0 ? (alerts[alerts.length - 1]?.createdAt ?? now) : now;
+      const newCursor = Math.max(rawCursor, liveCursor);
       registry.updateCursor(connectionId, subscriptionId, newCursor);
 
       if (alerts.length === 0) {
-        safeSend(state.ws, { type: 'heartbeat', scope: 'alerts', subscriptionId, cursor: now, serverTime: now });
+        safeSend(state.ws, { type: 'heartbeat', scope: 'alerts', subscriptionId, cursor: newCursor, serverTime: now });
         metrics.recordWsHeartbeat();
-        continue;
+        return;
       }
 
       for (const alert of alerts) {
@@ -588,7 +884,6 @@ async function _flushAlerts() {
     } catch (err) {
       console.error('[liveWsGateway] _flushAlerts err:', err.message);
     }
-  }
 }
 
 // ─── Watch-state flush ────────────────────────────────────────────────────────
@@ -598,26 +893,57 @@ async function _flushWatch() {
   if (subs.length === 0) return;
 
   try {
-    // Scan all levelwatchstate:* keys from Redis — ONCE per flush interval
+    // Scan all levelwatchstate:* keys from Redis — ONCE per flush interval.
+    // Hard caps prevent an unbounded SCAN from blowing memory or starving the
+    // flush loop if the keyspace ever explodes.
+    const SCAN_KEY_CAP   = 5000;
+    const SCAN_ITER_CAP  = 50;
     const snapshot = new Map();
-    let cursor = '0';
+    let cursor   = '0';
+    let iters    = 0;
+    let aborted  = false;
     do {
       const [nextCursor, keys] = await _redis.scan(cursor, 'MATCH', 'levelwatchstate:*', 'COUNT', 200);
       cursor = nextCursor;
-      if (!keys.length) continue;
+      iters++;
+      if (!keys.length) {
+        if (iters >= SCAN_ITER_CAP) { aborted = true; break; }
+        continue;
+      }
 
       const pipe = _redis.pipeline();
       for (const k of keys) pipe.get(k);
       const results = await pipe.exec();
+      if (!results) {
+        console.error('[liveWsGateway] _flushWatch pipeline returned no result');
+        break;
+      }
 
       for (let i = 0; i < keys.length; i++) {
         const raw = results[i]?.[1];
         if (!raw) continue;
         try {
           snapshot.set(keys[i], JSON.parse(raw));
-        } catch { /* skip */ }
+        } catch (e) { console.warn('[liveWsGateway] _flushWatch JSON parse:', e.message); }
+        if (snapshot.size >= SCAN_KEY_CAP) { aborted = true; break; }
       }
+      if (aborted || iters >= SCAN_ITER_CAP) { aborted = aborted || iters >= SCAN_ITER_CAP; break; }
     } while (cursor !== '0');
+    if (aborted) {
+      // Partial snapshot — do NOT overwrite _watchStateSnap.
+      // If we did, keys captured in previous full scan but absent from this
+      // partial scan would appear as `removed` on the next tick (false removes).
+      console.warn(`[liveWsGateway] _flushWatch aborted SCAN at ${snapshot.size} keys (iters=${iters}) — skipping diff`);
+      const now = Date.now();
+      for (const sub of subs) {
+        const { connectionId, subscriptionId } = sub;
+        const state = connections.get(connectionId);
+        if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+        safeSend(state.ws, { type: 'heartbeat', scope: 'watch', subscriptionId, cursor: now, serverTime: now });
+        metrics.recordWsHeartbeat();
+      }
+      return;
+    }
 
     // Compute diff against previous snapshot
     const prev        = _watchStateSnap || new Map();
@@ -675,9 +1001,15 @@ async function _flushWatch() {
 
 // ─── Event bus listeners (near-instant alert push) ───────────────────────────
 
+// Keep references so we can detach on shutdown / re-attach safely.
+const _busHandlers = [];
+
 function _attachEventBusListeners() {
+  // Detach any previously-attached handlers first — protects against
+  // double-attach when attachLiveWsGateway() is called more than once.
+  _detachEventBusListeners();
   // Near-instant heatmap snapshot push (complements the 1s flush loop)
-  eventBus.on('heatmap:update', ({ symbol, snapshot }) => {
+  const onHeatmap = ({ symbol, snapshot }) => {
     const subs = registry.getSubscriptionsByScope('heatmap');
     const now  = Date.now();
     for (const sub of subs) {
@@ -699,11 +1031,14 @@ function _attachEventBusListeners() {
       });
       registry.updateCursor(sub.connectionId, sub.subscriptionId, snapshotTs);
     }
-  });
+  };
+  eventBus.on('heatmap:update', onHeatmap);
+  _busHandlers.push(['heatmap:update', onHeatmap]);
 
   // ── Density DOM update — orderbook changed (≤200ms cadence from densityService)
-  eventBus.on('density:dom', ({ symbol, bids, asks, updatedAt }) => {
+  const onDensityDom = ({ symbol, bids, asks, updatedAt }) => {
     const subs = registry.getSubscriptionsByScope('density');
+    if (subs.length === 0) return;
     const now  = Date.now();
     for (const sub of subs) {
       if ((sub.params?.symbol || '').toUpperCase() !== symbol) continue;
@@ -719,11 +1054,14 @@ function _attachEventBusListeners() {
         serverTime     : now,
       });
     }
-  });
+  };
+  eventBus.on('density:dom', onDensityDom);
+  _busHandlers.push(['density:dom', onDensityDom]);
 
   // ── Density last trade — per aggTrade
-  eventBus.on('density:lastTrade', ({ symbol, trade }) => {
+  const onDensityLastTrade = ({ symbol, trade }) => {
     const subs = registry.getSubscriptionsByScope('density');
+    if (subs.length === 0) return;
     const now  = Date.now();
     for (const sub of subs) {
       if ((sub.params?.symbol || '').toUpperCase() !== symbol) continue;
@@ -740,11 +1078,14 @@ function _attachEventBusListeners() {
         serverTime     : now,
       });
     }
-  });
+  };
+  eventBus.on('density:lastTrade', onDensityLastTrade);
+  _busHandlers.push(['density:lastTrade', onDensityLastTrade]);
 
   // ── Density footprint cell update — per aggTrade (1m only)
-  eventBus.on('density:footprint', (update) => {
+  const onDensityFootprint = (update) => {
     const subs = registry.getSubscriptionsByScope('density');
+    if (subs.length === 0) return;
     const now  = Date.now();
     for (const sub of subs) {
       if ((sub.params?.symbol || '').toUpperCase() !== update.symbol) continue;
@@ -766,10 +1107,12 @@ function _attachEventBusListeners() {
         serverTime     : now,
       });
     }
-  });
+  };
+  eventBus.on('density:footprint', onDensityFootprint);
+  _busHandlers.push(['density:footprint', onDensityFootprint]);
 
   // ── Robobot task lifecycle update — broadcast to all robobot subscribers
-  eventBus.on('robobot:task:update', (update) => {
+  const onRobobotTask = (update) => {
     const subs = registry.getSubscriptionsByScope('robobot');
     const now  = Date.now();
     for (const sub of subs) {
@@ -785,9 +1128,11 @@ function _attachEventBusListeners() {
         ...update,
       });
     }
-  });
+  };
+  eventBus.on('robobot:task:update', onRobobotTask);
+  _busHandlers.push(['robobot:task:update', onRobobotTask]);
 
-  eventBus.on('robobot:event', (ev) => {
+  const onRobobotEvent = (ev) => {
     const subs = registry.getSubscriptionsByScope('robobot');
     const now  = Date.now();
     for (const sub of subs) {
@@ -801,10 +1146,12 @@ function _attachEventBusListeners() {
         event          : ev,
       });
     }
-  });
+  };
+  eventBus.on('robobot:event', onRobobotEvent);
+  _busHandlers.push(['robobot:event', onRobobotEvent]);
 
   // Immediate alert push to scope='alerts' subscribers (complements the flush loop)
-  eventBus.on('alert', (alert) => {
+  const onAlert = (alert) => {
     const subs = registry.getSubscriptionsByScope('alerts');
     const now  = Date.now();
     for (const sub of subs) {
@@ -826,7 +1173,16 @@ function _attachEventBusListeners() {
       metrics.recordWsAlertSent();
       registry.updateCursor(sub.connectionId, sub.subscriptionId, alert.createdAt ?? now);
     }
-  });
+  };
+  eventBus.on('alert', onAlert);
+  _busHandlers.push(['alert', onAlert]);
+}
+
+function _detachEventBusListeners() {
+  while (_busHandlers.length) {
+    const [event, handler] = _busHandlers.pop();
+    try { eventBus.off(event, handler); } catch (_) { /* noop */ }
+  }
 }
 
 // ─── Ping/pong lifecycle ──────────────────────────────────────────────────────
@@ -873,15 +1229,41 @@ function _onConnection(ws) {
     handleMessage(state.connectionId, data.toString('utf8'));
   });
 
-  ws.on('close', () => {
-    clearInterval(state.pingTimer);
+  // Single guarded cleanup so close+error firing together don't double-clean
+  // and so externally-triggered ws.terminate() still releases the ping timer
+  // and registry entries.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+
+    // Collect density symbols held by this connection BEFORE the registry wipes them.
+    const _densitySymbols = new Set(
+      registry.getSubscriptionsByScope('density')
+        .filter(s => s.connectionId === state.connectionId && s.params?.symbol)
+        .map(s => s.params.symbol.toUpperCase())
+    );
+
+    if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
     registry.cleanupConnection(state.connectionId);
     connections.delete(state.connectionId);
     metrics.recordWsDisconnect();
-  });
+
+    // Deactivate any density symbols that now have no remaining subscribers.
+    for (const sym of _densitySymbols) {
+      const remaining = registry.getSubscriptionsByScope('density')
+        .filter(s => (s.params?.symbol || '').toUpperCase() === sym);
+      if (remaining.length === 0) {
+        densityService.deactivateSymbol(sym);
+      }
+    }
+  };
+
+  ws.on('close', cleanup);
 
   ws.on('error', (err) => {
     console.error(`[liveWsGateway] ws error [${state.connectionId}]:`, err.message);
+    cleanup();
   });
 }
 
@@ -922,6 +1304,21 @@ function attachLiveWsGateway(httpServer, redis) {
 // ─── Stats for health endpoint ────────────────────────────────────────────────
 
 /**
+ * Stop flush loops and detach event-bus handlers. Used by graceful shutdown
+ * and during testing to release timers/listeners.
+ */
+function stopGateway() {
+  stopFlushLoops();
+  _detachEventBusListeners();
+  _watchStateSnap = null;
+  for (const state of connections.values()) {
+    if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
+    try { state.ws.terminate(); } catch (_) { /* noop */ }
+  }
+  connections.clear();
+}
+
+/**
  * Runtime stats for inclusion in /api/runtime/live-health.
  */
 function getGatewayStats() {
@@ -932,4 +1329,4 @@ function getGatewayStats() {
   };
 }
 
-module.exports = { attachLiveWsGateway, getGatewayStats };
+module.exports = { attachLiveWsGateway, getGatewayStats, stopGateway };

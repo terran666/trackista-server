@@ -16,10 +16,11 @@ function createScreenerAlertsRouter(redis) {
 
   // GET /api/screener/alerts/recent?limit=50
   router.get('/recent', async (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
-    if (isNaN(limit) || limit < 1) {
+    const parsed = Number.parseInt(req.query.limit ?? '50', 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
       return res.status(400).json({ success: false, error: 'Invalid limit parameter' });
     }
+    const limit = Math.min(parsed, 200);
 
     try {
       const alerts = await recentAlertsStore.getRecent(redis, req.user.id, limit);

@@ -1,6 +1,7 @@
 'use strict';
 
 const { buildDensityView } = require('../services/density/densityViewBuilder');
+const { safeSymbol } = require('../utils/parseClamp');
 
 // ─── GET /api/density-view ────────────────────────────────────────
 //
@@ -32,14 +33,14 @@ const { buildDensityView } = require('../services/density/densityViewBuilder');
 //
 function createDensityViewHandler(redis) {
   return async function densityViewHandler(req, res) {
-    const symbol     = (req.query.symbol     || '').toUpperCase().trim();
+    const symbol     = safeSymbol(req.query.symbol);
     const scale      = (req.query.scale      || '').trim();
     const marketType = (req.query.marketType || 'futures').toLowerCase().trim();
 
     if (!symbol) {
       return res.status(400).json({
         success: false,
-        error:   'Query param "symbol" is required (e.g. ?symbol=BTCUSDT)',
+        error:   'Query param "symbol" is required and must match /^[A-Z0-9]{3,20}$/',
       });
     }
 

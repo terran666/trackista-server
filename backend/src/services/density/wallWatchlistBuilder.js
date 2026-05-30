@@ -137,6 +137,10 @@ async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'sp
     pipeline.get(`signal:${sym}`);
   }
   const results = await pipeline.exec();
+  if (!results) {
+    console.error('[wallWatchlistBuilder] pipeline returned no result (connection lost?)');
+    return [];
+  }
 
   const items = [];
 
@@ -144,9 +148,9 @@ async function buildWallWatchlist(redis, { symbolsParam, limit, marketType = 'sp
     const symbol = symbols[i];
     const base   = i * 3;
 
-    const ob       = safeParse(results[base][1]);
-    const wallsDoc = safeParse(results[base + 1][1]);
-    const signal   = safeParse(results[base + 2][1]);
+    const ob       = safeParse(results[base]?.[1]);
+    const wallsDoc = safeParse(results[base + 1]?.[1]);
+    const signal   = safeParse(results[base + 2]?.[1]);
 
     // Skip symbols with no walls data
     if (!wallsDoc || !Array.isArray(wallsDoc.walls) || wallsDoc.walls.length === 0) continue;

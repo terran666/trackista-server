@@ -144,6 +144,169 @@ const FUTURES_RECONNECT_DELAY_MS     = 5000;
 const FUTURES_STATS_LOG_INTERVAL_MS  = 60_000;
 const FUTURES_VOLUME_REFRESH_MS      = 60 * 60 * 1000;
 
+// ─── Universe category limits ─────────────────────────────────────
+//
+// finalList = CORE (≤15) + WALL_ANOMALY (≤40) + MOMENTUM (≤30) + LIQUIDITY (≤20)
+// Total ≤ DENSITY_TRACKED_SYMBOLS_LIMIT (100 default).
+// Each symbol appears in exactly one category (dedup by insertion order).
+//
+const DENSITY_CORE_LIMIT         = parseInt(process.env.DENSITY_CORE_LIMIT         || '15', 10);
+const DENSITY_WALL_ANOMALY_LIMIT = parseInt(process.env.DENSITY_WALL_ANOMALY_LIMIT || '40', 10);
+const DENSITY_MOMENTUM_LIMIT     = parseInt(process.env.DENSITY_MOMENTUM_LIMIT     || '30', 10);
+const DENSITY_LIQUIDITY_LIMIT    = parseInt(process.env.DENSITY_LIQUIDITY_LIMIT    || '20', 10);
+
+// ─── Wall rank score sub-weights ─────────────────────────────────
+//   wallRankScore =
+//     NORMALIZED_W  * normalizedWallScore      (how anomalous vs symbol's own depth)
+//     COUNT_W       * confirmedWallCountScore   (number of confirmed walls)
+//     NEAR_PRICE_W  * wallNearPriceScore        (walls close to current price)
+//     LIFETIME_W    * wallLifetimeScore         (avg lifetime of confirmed walls)
+//     REFRESH_W     * wallRefreshScore          (avg refill count of confirmed walls)
+//
+const WALL_SCORE_NORMALIZED_W  = parseFloat(process.env.WALL_SCORE_NORMALIZED_W  || '0.45');
+const WALL_SCORE_COUNT_W       = parseFloat(process.env.WALL_SCORE_COUNT_W       || '0.20');
+const WALL_SCORE_NEAR_PRICE_W  = parseFloat(process.env.WALL_SCORE_NEAR_PRICE_W  || '0.15');
+const WALL_SCORE_LIFETIME_W    = parseFloat(process.env.WALL_SCORE_LIFETIME_W    || '0.10');
+const WALL_SCORE_REFRESH_W     = parseFloat(process.env.WALL_SCORE_REFRESH_W     || '0.10');
+
+// ─── Momentum score sub-weights ───────────────────────────────────
+//   momentumScore =
+//     VOL_SPIKE_W   * volumeSpikeScore    (current vol vs 24h avg/min)
+//     TRADE_SPIKE_W * tradeCountSpike     (current trades vs 24h avg/min)
+//     PRICE_MOVE_W  * priceMoveScore      (abs(priceChange24h) / 10)
+//     TAKER_W       * takerImbalance      (0 in Этап 1 — not yet available)
+//     VOLATILITY_W  * volatilityScore     (H-L range / 10%)
+//
+const MOMENTUM_VOL_SPIKE_W     = parseFloat(process.env.MOMENTUM_VOL_SPIKE_W     || '0.30');
+const MOMENTUM_TRADE_SPIKE_W   = parseFloat(process.env.MOMENTUM_TRADE_SPIKE_W   || '0.25');
+const MOMENTUM_PRICE_MOVE_W    = parseFloat(process.env.MOMENTUM_PRICE_MOVE_W    || '0.20');
+const MOMENTUM_TAKER_W         = parseFloat(process.env.MOMENTUM_TAKER_W         || '0.15');
+const MOMENTUM_VOLATILITY_W    = parseFloat(process.env.MOMENTUM_VOLATILITY_W    || '0.10');
+
+// ─── Adaptive wall threshold (normalWallUsdForSymbol) ─────────────
+//
+//   normalWallUsd = max(avgSidedDepthWithin1Pct * WALL_DEPTH_RATIO, staticThreshold)
+//
+//   A wall is "anomalous" when its USD size >= WALL_ANOMALY_MIN_NORM * normalWallUsd.
+//   normalizedWallScore = min(wallUsd / (5 * normalWallUsd), 1)   so 5× = full score.
+//
+const WALL_DEPTH_RATIO      = parseFloat(process.env.WALL_DEPTH_RATIO      || '0.03');
+const WALL_ANOMALY_MIN_NORM = parseFloat(process.env.WALL_ANOMALY_MIN_NORM || '1.5');
+
+// ─── Adaptive wall detection v3 — per-orderbook statistical thresholds ────────
+//
+//  adaptiveThreshold = max(
+//    staticMinWallUsd,
+//    p95OrderUsd * WALL_P95_MULTIPLIER,
+//    medianOrderUsd * WALL_MEDIAN_MULTIPLIER,
+//    avgDepthNear1Pct * WALL_DEPTH_RATIO,
+//  )
+//
+//  wallPower = 0.35*p95RatioScore + 0.30*localRatioScore
+//            + 0.15*distanceScore + 0.10*lifetimeScore + 0.10*isolationScore
+//
+const WALL_SCAN_DISTANCE_PCT    = parseFloat(process.env.WALL_SCAN_DISTANCE_PCT    || '5');   // % from mid
+const WALL_P95_MULTIPLIER       = parseFloat(process.env.WALL_P95_MULTIPLIER       || '1.5'); // sizeUsd >= p95 × 1.5
+const WALL_LOCAL_WINDOW_LEVELS  = parseInt(process.env.WALL_LOCAL_WINDOW_LEVELS  || '5',  10); // ±N price levels
+const WALL_LOCAL_MULTIPLIER     = parseFloat(process.env.WALL_LOCAL_MULTIPLIER     || '3');   // vs local median
+const WALL_MEDIAN_MULTIPLIER    = parseFloat(process.env.WALL_MEDIAN_MULTIPLIER    || '4');   // vs side median
+const WALL_SIMILAR_LEVELS_LIMIT = parseInt(process.env.WALL_SIMILAR_LEVELS_LIMIT || '5',  10); // isolation threshold
+
+// wallPower tier thresholds
+const WALL_POWER_SOFT_MIN    = parseFloat(process.env.WALL_POWER_SOFT_MIN    || '0.45');
+const WALL_POWER_STRONG_MIN  = parseFloat(process.env.WALL_POWER_STRONG_MIN  || '0.65');
+const WALL_POWER_EXTREME_MIN = parseFloat(process.env.WALL_POWER_EXTREME_MIN || '0.80');
+
+// Redis keys for adaptive wall analytics
+const DENSITY_WALL_STATS_KEY_PREFIX = 'density:wallStats:';   // + symbol
+const DENSITY_BEST_WALL_KEY_PREFIX  = 'density:bestWall:';    // + symbol
+const DENSITY_WALL_STATS_TTL_S      = 300;  // 5 minutes
+
+// ─── Momentum category entry threshold ────────────────────────────
+// Symbol enters MOMENTUM bucket only when its momentumScore >= this value.
+const MOMENTUM_MIN_SCORE    = parseFloat(process.env.MOMENTUM_MIN_SCORE    || '0.20');
+
+// ─── Score Redis keys / TTL ───────────────────────────────────────
+const DENSITY_SCORE_KEY_PREFIX = 'density:score:';   // + symbol
+const DENSITY_RANKED_KEY       = 'density:symbols:ranked';
+const DENSITY_SCORE_TTL_S      = 300;  // 5 minutes
+// ─── Volatility filter (low-volatility & stable-coin exclusion) ───────────────
+//
+//   DENSITY_STABLE_BASE_BLACKLIST         — base assets always excluded (comma-sep)
+//   DENSITY_MIN_VOLATILITY_4H_PCT         — min 4h high-low range % for inclusion
+//   DENSITY_MIN_VOLATILITY_24H_PCT        — min 24h high-low range % for inclusion
+//   DENSITY_VOLATILITY_BREAKOUT_1H_PCT    — override: 1h spike allows entry despite low-vol
+//   DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT   — override: 15m price move allows entry
+//   DENSITY_VOLUME_SPIKE_OVERRIDE         — override: volume spike ratio allows entry
+//
+// Logic: exclude if volatility4hPct < MIN_4H AND volatility24hPct < MIN_24H,
+//        unless a breakout override fires. Stable blacklist has NO override.
+//
+const DENSITY_STABLE_BASE_BLACKLIST = (
+  process.env.DENSITY_STABLE_BASE_BLACKLIST || 'USDC,FDUSD,TUSD,USDP,DAI,BUSD,EUR,AEUR'
+).split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+
+const DENSITY_MIN_VOLATILITY_4H_PCT          = parseFloat(process.env.DENSITY_MIN_VOLATILITY_4H_PCT          || '1.0');
+const DENSITY_MIN_VOLATILITY_24H_PCT         = parseFloat(process.env.DENSITY_MIN_VOLATILITY_24H_PCT         || '1.5');
+const DENSITY_VOLATILITY_BREAKOUT_1H_PCT     = parseFloat(process.env.DENSITY_VOLATILITY_BREAKOUT_1H_PCT     || '1.2');
+const DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT    = parseFloat(process.env.DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT    || '1.0');
+const DENSITY_VOLUME_SPIKE_OVERRIDE          = parseFloat(process.env.DENSITY_VOLUME_SPIKE_OVERRIDE          || '3.0');
+
+// ─── Tier 1 always-live symbols ───────────────────────────────────
+//
+// These symbols are always in CORE regardless of volume/momentum score.
+// Tier assignments: CORE → tier1,  WALL/MOMENTUM → tier2,  LIQUIDITY → tier3
+//
+const DENSITY_TIER1_SYMBOLS = new Set(
+  (process.env.DENSITY_TIER1_SYMBOLS || 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT')
+    .split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
+);
+
+// ─── Hot candidate lifecycle ──────────────────────────────────────
+//
+// A symbol becomes HOT when its volume or trade-count spike >= threshold.
+// It stays HOT for HOT_CANDIDATE_EXPIRY_MS even if the spike subsides.
+// After expiry it is removed from the hot list unless it spikes again.
+//
+const HOT_CANDIDATE_EXPIRY_MS = parseInt(process.env.HOT_CANDIDATE_EXPIRY_MS || '900000', 10); // 15 min
+
+// Minimum multiplier (vs 24h average) for a spike to trigger HOT status
+const HOT_VOLUME_SPIKE_MIN = parseFloat(process.env.HOT_VOLUME_SPIKE_MIN || '3');
+const HOT_TRADE_SPIKE_MIN  = parseFloat(process.env.HOT_TRADE_SPIKE_MIN  || '3');
+
+// Redis key for hot candidates map  { symbol: hotSince (ms timestamp) }
+const DENSITY_HOT_CANDIDATES_KEY = 'density:hot-candidates';
+
+// ─── Badge thresholds ─────────────────────────────────────────────
+//
+// HIGH    — bestWallPower >= this value  (relative strength "extreme")
+// NEAR    — nearestWall distancePct <= this value (% from mid price)
+// WHALE   — wall sizeUsd >= normalWallUsd * this multiplier
+// NEW     — wall firstSeen within last N ms
+//
+const BADGE_HIGH_WALL_POWER  = parseFloat(process.env.BADGE_HIGH_WALL_POWER  || '0.80');
+const BADGE_NEAR_DIST_PCT    = parseFloat(process.env.BADGE_NEAR_DIST_PCT    || '0.5');
+const BADGE_WHALE_MULTIPLIER = parseFloat(process.env.BADGE_WHALE_MULTIPLIER || '8');
+const BADGE_NEW_LIFETIME_MS  = parseInt(process.env.BADGE_NEW_LIFETIME_MS    || '90000', 10); // 90 s
+
+// ─── Smart density score weights ─────────────────────────────────
+//
+// smartDensityScore = (0-100) composite that drives left-panel sort order.
+//
+//   WALL_POWER_W  × bestWallPower              (relative wall strength 0-1)
+//   NEAR_WALL_W   × nearestWallScore           (proximity to price, 0-1)
+//   VOL_SPIKE_W   × volumeSpikeScore           (spike ratio clamped to [0,1])
+//   TRADE_SPIKE_W × tradeSpikeScore            (spike ratio clamped to [0,1])
+//   AGE_W         × ageScore                   (lifetime of nearest wall, 0-1)
+//
+// Scores sum to 100 points.
+//
+const SMART_SCORE_WALL_POWER_W  = parseFloat(process.env.SMART_SCORE_WALL_POWER_W  || '40');
+const SMART_SCORE_NEAR_WALL_W   = parseFloat(process.env.SMART_SCORE_NEAR_WALL_W   || '25');
+const SMART_SCORE_VOL_SPIKE_W   = parseFloat(process.env.SMART_SCORE_VOL_SPIKE_W   || '20');
+const SMART_SCORE_TRADE_SPIKE_W = parseFloat(process.env.SMART_SCORE_TRADE_SPIKE_W || '10');
+const SMART_SCORE_AGE_W         = parseFloat(process.env.SMART_SCORE_AGE_W         || '5');
+
 module.exports = {
   FUTURES_DENSITY_ENABLED,
   TRACKED_UNIVERSE_REFRESH_MS,
@@ -188,4 +351,67 @@ module.exports = {
   FUTURES_RECONNECT_DELAY_MS,
   FUTURES_STATS_LOG_INTERVAL_MS,
   FUTURES_VOLUME_REFRESH_MS,
+  // Category limits
+  DENSITY_CORE_LIMIT,
+  DENSITY_WALL_ANOMALY_LIMIT,
+  DENSITY_MOMENTUM_LIMIT,
+  DENSITY_LIQUIDITY_LIMIT,
+  // Wall rank score weights
+  WALL_SCORE_NORMALIZED_W,
+  WALL_SCORE_COUNT_W,
+  WALL_SCORE_NEAR_PRICE_W,
+  WALL_SCORE_LIFETIME_W,
+  WALL_SCORE_REFRESH_W,
+  // Momentum score weights
+  MOMENTUM_VOL_SPIKE_W,
+  MOMENTUM_TRADE_SPIKE_W,
+  MOMENTUM_PRICE_MOVE_W,
+  MOMENTUM_TAKER_W,
+  MOMENTUM_VOLATILITY_W,
+  // Adaptive threshold
+  WALL_DEPTH_RATIO,
+  WALL_ANOMALY_MIN_NORM,
+  MOMENTUM_MIN_SCORE,
+  // Adaptive wall v3
+  WALL_SCAN_DISTANCE_PCT,
+  WALL_P95_MULTIPLIER,
+  WALL_LOCAL_WINDOW_LEVELS,
+  WALL_LOCAL_MULTIPLIER,
+  WALL_MEDIAN_MULTIPLIER,
+  WALL_SIMILAR_LEVELS_LIMIT,
+  WALL_POWER_SOFT_MIN,
+  WALL_POWER_STRONG_MIN,
+  WALL_POWER_EXTREME_MIN,
+  DENSITY_WALL_STATS_KEY_PREFIX,
+  DENSITY_BEST_WALL_KEY_PREFIX,
+  DENSITY_WALL_STATS_TTL_S,
+  // Score Redis keys
+  DENSITY_SCORE_KEY_PREFIX,
+  DENSITY_RANKED_KEY,
+  DENSITY_SCORE_TTL_S,
+  // Volatility filter
+  DENSITY_STABLE_BASE_BLACKLIST,
+  DENSITY_MIN_VOLATILITY_4H_PCT,
+  DENSITY_MIN_VOLATILITY_24H_PCT,
+  DENSITY_VOLATILITY_BREAKOUT_1H_PCT,
+  DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT,
+  DENSITY_VOLUME_SPIKE_OVERRIDE,
+  // Tier 1 symbols
+  DENSITY_TIER1_SYMBOLS,
+  // Hot candidates
+  HOT_CANDIDATE_EXPIRY_MS,
+  HOT_VOLUME_SPIKE_MIN,
+  HOT_TRADE_SPIKE_MIN,
+  DENSITY_HOT_CANDIDATES_KEY,
+  // Badges
+  BADGE_HIGH_WALL_POWER,
+  BADGE_NEAR_DIST_PCT,
+  BADGE_WHALE_MULTIPLIER,
+  BADGE_NEW_LIFETIME_MS,
+  // Smart density score weights
+  SMART_SCORE_WALL_POWER_W,
+  SMART_SCORE_NEAR_WALL_W,
+  SMART_SCORE_VOL_SPIKE_W,
+  SMART_SCORE_TRADE_SPIKE_W,
+  SMART_SCORE_AGE_W,
 };

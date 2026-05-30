@@ -75,15 +75,27 @@ function validateLevelPayload(payload, requireAll = true) {
 // ─── Service factory ──────────────────────────────────────────────
 function createLevelsService(db, redis) {
 
+  // Per-symbol in-flight Promise map — prevents thundering-herd when many
+  // concurrent callers (e.g. cache miss + write) trigger a rebuild for the
+  // same symbol at the same instant. All callers share the single MySQL
+  // round-trip and Redis SET.
+  const _rebuildInFlight = new Map();
+
   // Rebuild Redis cache for a symbol from MySQL (called after every write)
-  async function rebuildLevelsCache(symbol) {
-    const [rows] = await db.query(
-      'SELECT * FROM levels WHERE symbol = ? AND is_active = TRUE ORDER BY price ASC',
-      [symbol],
-    );
-    const levels = rows.map(rowToLevel);
-    await redis.set(`levels:${symbol}`, JSON.stringify(levels), 'EX', REDIS_TTL);
-    return levels;
+  function rebuildLevelsCache(symbol) {
+    const existing = _rebuildInFlight.get(symbol);
+    if (existing) return existing;
+    const p = (async () => {
+      const [rows] = await db.query(
+        'SELECT * FROM levels WHERE symbol = ? AND is_active = TRUE ORDER BY price ASC',
+        [symbol],
+      );
+      const levels = rows.map(rowToLevel);
+      await redis.set(`levels:${symbol}`, JSON.stringify(levels), 'EX', REDIS_TTL);
+      return levels;
+    })().finally(() => { _rebuildInFlight.delete(symbol); });
+    _rebuildInFlight.set(symbol, p);
+    return p;
   }
 
   // GET active levels — try Redis first, fall back to MySQL

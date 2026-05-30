@@ -16,7 +16,7 @@
 const { computeDerivativesContext } = require('../engines/moves/derivativesContextEngine');
 const { binanceFetch } = require('../utils/binanceRestLogger');
 
-const POLL_INTERVAL_MS  = parseInt(process.env.DERIVATIVES_POLL_INTERVAL_MS || '60000', 10); // 60s
+const POLL_INTERVAL_MS  = parseInt(process.env.DERIVATIVES_POLL_INTERVAL_MS || '10000', 10); // 10s (TZ: 5-10s for OI)
 const ENABLED           = process.env.DERIVATIVES_ENABLED !== 'false';
 const BINANCE_FAPI      = 'https://fapi.binance.com';
 const MAX_SYMBOLS       = parseInt(process.env.DERIVATIVES_MAX_SYMBOLS || '150', 10);
@@ -274,7 +274,11 @@ function createDerivativesContextService(redis) {
         status          : errorsCount > 20 ? 'warning' : 'ok',
       }));
 
-      await pipeline.exec();
+      const _execRes = await pipeline.exec();
+      if (!_execRes) console.error('[derivativesContext] write pipeline returned no result');
+      else for (const [pErr] of _execRes) {
+        if (pErr) { console.error('[derivativesContext] write pipeline cmd error:', pErr.message); break; }
+      }
 
     } catch (err) {
       errorsCount++;

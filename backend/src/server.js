@@ -10,6 +10,7 @@ const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
 const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete, patchHandler: manualLevelsPatchFactory } = require('./routes/manualLevelsRoute');
 const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
+const { getById: trackedLevelsGetById } = require('./services/trackedLevelsStore');
 const { bulkHandler: trackedExtremesBulk, listHandler: trackedExtremesList, deleteOneHandler: trackedExtremesDeleteOne, deleteManyHandler: trackedExtremesDeleteMany, patchOneHandler: trackedExtremesPatchOne, patchManyHandler: trackedExtremesPatchMany } = require('./routes/trackedExtremesRoute');
 const { createHandler: extremesRaysCreate, patchHandler: extremesRaysPatch, deleteHandler: extremesRaysDelete, listHandler: extremesRaysList } = require('./routes/extremesRaysRoute');
 const { bulkHandler: trackedRaysBulk, listHandler: trackedRaysList, deleteOneHandler: trackedRaysDeleteOne, deleteManyHandler: trackedRaysDeleteMany, patchOneHandler: trackedRaysPatchOne, patchManyHandler: trackedRaysPatchMany, lineValueHandler: trackedRaysLineValue } = require('./routes/trackedRaysRoute');
@@ -32,6 +33,9 @@ const { createDensityTrackedSymbolsHandler } = require('./routes/densityTrackedS
 const { createBinanceRateLimitStateHandler }  = require('./routes/binanceRateLimitStateRoute');
 const { createFuturesObStateHandler }          = require('./routes/futuresObStateRoute');
 const { createFuturesWallsDebugHandler }        = require('./routes/futuresWallsDebugRoute');
+const { createWallDebugHandler }                = require('./routes/wallDebugRoute');
+const { createWallDepthHandlers }               = require('./routes/wallDepthRoute');
+const { createUniverseDebugHandler }            = require('./routes/universeDebugRoute');
 const { createTrackedUniverseHandler, createTrackedUniverseSummaryHandler } = require('./routes/trackedUniverseRoute');
 const { createBinanceProxyRouter }             = require('./routes/binanceProxyRoute');
 const { attachBinanceWsProxy, getWsProxyStats } = require('./routes/binanceWsProxy');
@@ -88,7 +92,7 @@ const livePollingMetrics                = require('./services/livePollingMetrics
 const { createKlineFlatRouter }         = require('./routes/klineFlatRoute');
 const { createScreenerSpotStatsRouter } = require('./routes/screenerSpotStatsRoute');
 const { createSynthRouter }             = require('./routes/synthRoute');
-const { attachLiveWsGateway }           = require('./routes/liveWsGateway');
+const { attachLiveWsGateway, stopGateway: stopLiveWsGateway } = require('./routes/liveWsGateway');
 const { createHeatmapRouter, attachHeatmapWs } = require('./routes/heatmapRoute');
 const { createDensityDomRouter }        = require('./routes/densityDomRoute');
 const heatmapService                    = require('./services/heatmapService');
@@ -109,17 +113,39 @@ console.log('[backend] Starting backend API...');
 console.log(`[backend] Redis: ${REDIS_HOST}:${REDIS_PORT}`);
 console.log(`[backend] MySQL: ${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DB}`);
 
+// ─── Process safety net ───────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
+  const msg = (reason && (reason.stack || reason.message)) || String(reason);
+  console.error('[backend] UNHANDLED REJECTION:', msg);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[backend] UNCAUGHT EXCEPTION:', err && (err.stack || err.message));
+  // Process state is corrupted after an uncaught exception. Trigger graceful
+  // shutdown so the orchestrator restarts a clean instance.
+  if (typeof shutdown === 'function') {
+    shutdown('uncaughtException').catch(() => process.exit(1));
+    setTimeout(() => process.exit(1), 10_000).unref();
+  } else {
+    process.exit(1);
+  }
+});
+
 // ─── Redis client ────────────────────────────────────────────────
 const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
 
+let _backoffSynced = false;
 redis.on('connect', () => {
   console.log('[backend] Connected to Redis');
   // Restore Binance IP backoff state from Redis so that klines routes don't
   // hammer Binance while a collector-triggered IP ban is still active.
+  // Guard against repeat invocations on Redis reconnects.
+  if (_backoffSynced) return;
+  _backoffSynced = true;
   const { syncBackoffFromRedis } = require('./utils/binanceRestLogger');
-  syncBackoffFromRedis(redis).catch(err =>
-    console.error('[backend] syncBackoffFromRedis failed:', err.message),
-  );
+  syncBackoffFromRedis(redis).catch(err => {
+    _backoffSynced = false;
+    console.error('[backend] syncBackoffFromRedis failed:', err.message);
+  });
 });
 redis.on('error',   (err) => console.error('[backend] Redis error:', err.message));
 
@@ -135,21 +161,30 @@ const db = mysql.createPool({
   timezone:        'Z',
 });
 
-db.getConnection()
-  .then(conn => {
-    console.log('[backend] Connected to MySQL');
-    conn.release();
-    // Run alert-module migrations and ensure MinIO bucket exists
-    runMigrations(db).catch(err => console.error('[migrations] Failed:', err.message));
-    runMoveMigrations(db).catch(err => console.error('[moveMigrations] Failed:', err.message));
-    runMoveMigrations2(db).catch(err => console.error('[moveMigrations2] Failed:', err.message));
-    runBarAggregatorMigrations(db).catch(err => console.error('[barAggregatorMigrations] Failed:', err.message));
-    runWatchLevelsMigrations(db).catch(err => console.error('[watchMigrations] Failed:', err.message));
-    runScreenerAlertMigrations(db).catch(err => console.error('[screenerAlertMigrations] Failed:', err.message));
-    runRobobotMigrations(db).catch(err => console.error('[robobotMigrations] Failed:', err.message));
-    ensureBucket().catch(err => console.error('[storage] ensureBucket failed:', err.message));
-  })
-  .catch(err => console.error('[backend] MySQL connection error:', err.message));
+// Run all migrations sequentially to avoid races on shared schema objects.
+// Service startup below assumes tables/columns from these migrations exist.
+let migrationsReady = (async () => {
+  const conn = await db.getConnection();
+  console.log('[backend] Connected to MySQL');
+  conn.release();
+  const steps = [
+    ['migrations',              () => runMigrations(db)],
+    ['moveMigrations',          () => runMoveMigrations(db)],
+    ['moveMigrations2',         () => runMoveMigrations2(db)],
+    ['barAggregatorMigrations', () => runBarAggregatorMigrations(db)],
+    ['watchMigrations',         () => runWatchLevelsMigrations(db)],
+    ['screenerAlertMigrations', () => runScreenerAlertMigrations(db)],
+    ['robobotMigrations',       () => runRobobotMigrations(db)],
+  ];
+  for (const [name, run] of steps) {
+    try { await run(); }
+    catch (err) { console.error(`[${name}] Failed:`, err.message); }
+  }
+  try { await ensureBucket(); }
+  catch (err) { console.error('[storage] ensureBucket failed:', err.message); }
+})().catch(err => {
+  console.error('[backend] MySQL connection / migrations error:', err.message);
+});
 
 // ─── Levels service ───────────────────────────────────────────────
 const levels  = createLevelsService(db, redis);
@@ -212,7 +247,53 @@ densityService.start(redis, wsEventBus)
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
-app.use(express.json());
+// Trust the first hop (nginx) so `req.ip` reflects the real client; the
+// rate-limiter middleware relies on `req.ip` for per-IP keys.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
+// Minimal security headers (helmet-equivalent for our REST surface). nginx
+// in front may already set some of these — these are belt-and-suspenders.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  next();
+});
+
+// Optional CORS — only enable when CORS_ORIGIN is set (e.g. for dev frontend
+// hitting the API directly without nginx). In production nginx terminates CORS.
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
+if (CORS_ORIGIN) {
+  const allowed = CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && allowed.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+      if (req.method === 'OPTIONS') return res.status(204).end();
+    }
+    next();
+  });
+}
+
+app.use(express.json({ limit: '256kb' }));
+
+// Global API rate-limit guard. Per-route limiters (auth, posts, votes)
+// remain stricter; this is a coarse last-resort cap against burst floods.
+{
+  const { createRateLimiter } = require('./middleware/rateLimiters');
+  const globalApiLimiter = createRateLimiter({
+    max:       parseInt(process.env.RATE_LIMIT_API_MAX || '600', 10) || 600,
+    windowSec: parseInt(process.env.RATE_LIMIT_API_WINDOW_SEC || '60', 10) || 60,
+    keyPrefix: 'api',
+  })(redis);
+  app.use('/api', globalApiLimiter);
+}
 
 // GET /health
 app.get('/health', (_req, res) => {
@@ -399,40 +480,113 @@ app.get('/api/market/in-play', async (req, res) => {
   }
 });
 
+// Reads impulse:signal:{sym} written by marketImpulseService (composite 0-100 score)
+async function fetchAllImpulseSignals() {
+  const rawSymbols = await redis.get('symbols:active:usdt');
+  if (!rawSymbols) return null;
+  const symbols = JSON.parse(rawSymbols);
+  const pipeline = redis.pipeline();
+  for (const sym of symbols) pipeline.get(`impulse:signal:${sym}`);
+  const results = await pipeline.exec();
+  const signals = [];
+  for (const [err, raw] of results) {
+    if (err || !raw) continue;
+    try { signals.push(JSON.parse(raw)); } catch (_) {}
+  }
+  return signals;
+}
+
 // GET /api/market/impulse?limit=20&direction=up|down|mixed|all
 app.get('/api/market/impulse', async (req, res) => {
   const limit     = Math.min(parseInt(req.query.limit || '20', 10), 500);
   const direction = (req.query.direction || 'all').toLowerCase();
 
   try {
-    const signals = await fetchAllSignals();
+    const signals = await fetchAllImpulseSignals();
     if (signals === null) {
-      return res.status(503).json({ success: false, error: 'Symbol list not available yet' });
+      return res.status(503).json({ success: false, error: 'Symbol list not available yet', count: 0, items: [] });
     }
 
-    const filtered = direction === 'all'
-      ? signals
-      : signals.filter(s => s.impulseDirection === direction);
+    let filtered;
+    if (direction === 'all') {
+      filtered = signals;
+    } else if (direction === 'mixed') {
+      // mixed = UP + DOWN (excludes NEUTRAL)
+      filtered = signals.filter(s => {
+        const d = (s.impulseDirection || 'NEUTRAL').toUpperCase();
+        return d === 'UP' || d === 'DOWN';
+      });
+    } else {
+      filtered = signals.filter(s => (s.impulseDirection || 'NEUTRAL').toLowerCase() === direction);
+    }
 
-    filtered.sort((a, b) => b.impulseScore - a.impulseScore);
+    // Primary: impulseScore DESC; secondary: volumeSpikeRatio15s DESC; tertiary: tradeAcceleration DESC
+    filtered.sort((a, b) => {
+      const scoreDiff = (b.impulseScore ?? 0) - (a.impulseScore ?? 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      const vsrDiff = (b.volumeSpikeRatio15s ?? 0) - (a.volumeSpikeRatio15s ?? 0);
+      if (vsrDiff !== 0) return vsrDiff;
+      return (b.tradeAcceleration ?? 0) - (a.tradeAcceleration ?? 0);
+    });
+
     const items = filtered.slice(0, limit).map(s => ({
-      symbol:               s.symbol,
-      impulseScore:         s.impulseScore,
-      impulseDirection:     s.impulseDirection,
-      volumeSpikeRatio15s:  s.volumeSpikeRatio15s,
-      tradeAcceleration:    s.tradeAcceleration,
-      deltaImbalancePct60s: s.deltaImbalancePct60s,
-      priceVelocity60s:     s.priceVelocity60s,
-      signalConfidence:     s.signalConfidence,
-      baselineReady:        s.baselineReady,
+      symbol:                s.symbol                ?? '',
+      impulseScore:          s.impulseScore          ?? 0,
+      impulseDirection:      s.impulseDirection      ?? 'NEUTRAL',
+      volumeSpikeRatio15s:   s.volumeSpikeRatio15s   ?? 0,
+      tradeAcceleration:     s.tradeAcceleration     ?? 0,
+      tradesPerSec:          s.tradesPerSec          ?? 0,
+      avgTradesPerSec60s:    s.avgTradesPerSec60s    ?? 0,
+      // Volume panel fields
+      volumeUsdt1s:          s.volumeUsdt1s          ?? 0,
+      volumeUsdt5s:          s.volumeUsdt5s          ?? 0,
+      volumeUsdt15s:         s.volumeUsdt15s         ?? 0,
+      volumeUsdt60s:         s.volumeUsdt60s         ?? 0,
+      // Delta panel fields
+      deltaImbalancePct60s:  s.deltaImbalancePct60s  ?? 0,
+      deltaUsdt60s:          s.deltaUsdt60s          ?? 0,
+      openInterestChangePct: s.openInterestChangePct ?? 0,
+      domBidPct:             s.domBidPct             ?? 0,
+      domAskPct:             s.domAskPct             ?? 0,
+      domImbalancePct:       s.domImbalancePct       ?? 0,
+      priceVelocity60s:      s.priceVelocity60s      ?? 0,
+      signalConfidence:      s.signalConfidence      ?? 0,
+      baselineReady:         s.baselineReady         ?? false,
+      updatedAt:             s.updatedAt             ?? 0,
     }));
 
     return res.json({ success: true, count: items.length, items });
   } catch (err) {
     console.error('[backend] Error in /api/market/impulse:', err.message);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
+    return res.status(500).json({ success: false, error: 'Failed to fetch impulse data', count: 0, items: [] });
   }
 });
+
+// GET /api/market/impulse/:symbol/ticks?limit=300
+// Returns rolling 1s price/volume/delta snapshots for short-term chart.
+// Sorted ASC by ts. Up to 300 ticks (~5 minutes).
+{
+  const { safeSymbol: _safeSymbol } = require('./utils/parseClamp');
+  app.get('/api/market/impulse/:symbol/ticks', async (req, res) => {
+    const symbol = _safeSymbol(req.params.symbol);
+    if (!symbol) return res.status(400).json({ success: false, error: 'Invalid symbol' });
+    const limit = Math.min(parseInt(req.query.limit || '300', 10), 300);
+    try {
+      const raws = await redis.zrange(`ticks:impulse:${symbol}`, -limit, -1);
+      if (!raws || raws.length === 0) {
+        return res.json({ success: true, symbol, count: 0, ticks: [] });
+      }
+      const ticks = [];
+      for (const r of raws) {
+        try { ticks.push(JSON.parse(r)); } catch (_) {}
+      }
+      return res.json({ success: true, symbol, count: ticks.length, ticks });
+    } catch (err) {
+      console.error('[backend] Error in /api/market/impulse/:symbol/ticks:', err.message);
+      return res.status(500).json({ success: false, error: 'Failed to fetch ticks', symbol, count: 0, ticks: [] });
+    }
+  });
+}
 
 // GET /api/market/top-active?limit=20
 app.get('/api/market/top-active', async (req, res) => {
@@ -528,7 +682,21 @@ console.log('[backend] registering /api/futures-ob/state route');
 app.get('/api/futures-ob/state', createFuturesObStateHandler(redis));
 // GET /api/futures-walls-debug?symbol=BTCUSDT
 console.log('[backend] registering /api/futures-walls-debug route');
-app.get('/api/futures-walls-debug', createFuturesWallsDebugHandler(redis));
+app.get('/api/futures-walls-debug', authRequired, createFuturesWallsDebugHandler(redis));
+
+// GET /api/density/wall-debug?symbol=BTCUSDT — v3 adaptive wall algorithm debug
+console.log('[backend] registering /api/density/wall-debug route');
+app.get('/api/density/wall-debug', authRequired, createWallDebugHandler(redis));
+
+// GET /api/density/wall-depth?symbol=ETHUSDT — depth-to-wall visualization data
+// GET /api/density/wall-depth-debug?symbol=ETHUSDT — debug variant with rejects
+console.log('[backend] registering /api/density/wall-depth routes');
+const _wallDepthHandlers = createWallDepthHandlers(redis);
+app.get('/api/density/wall-depth',       _wallDepthHandlers.main);
+app.get('/api/density/wall-depth-debug', _wallDepthHandlers.debug);
+
+// GET /api/density/universe-debug — included + excluded symbols with volatility diagnostics
+app.get('/api/density/universe-debug', authRequired, createUniverseDebugHandler(redis));
 // ─── Level endpoints ─────────────────────────────────────────────
 
 // GET /api/levels — levels engine (global/local, supports futures/spot)
@@ -543,7 +711,16 @@ app.get('/api/autolevels', autoLevelsHandler);
 console.log('[backend] registering /api/manual-levels routes');
 app.post('/api/manual-levels',       authRequired, manualLevelsCreate);
 app.get('/api/manual-levels',        authRequired, manualLevelsList);
-app.delete('/api/manual-levels/:id', authRequired, manualLevelsDelete);
+app.delete('/api/manual-levels/:id', authRequired, (req, res) => {
+  const id    = parseInt(req.params.id, 10);
+  const level = !isNaN(id) && id > 0 ? manualLevelsGetById(id) : null;
+  manualLevelsDelete(req, res);
+  if (level?.alertEnabled) {
+    const market = level.marketType || 'futures';
+    redis.del(`levelwatchstate:${market}:${level.symbol}:manual-${id}`).catch(() => {});
+    levelWatchEngine?.loader?.invalidate();
+  }
+});
 // NOTE: app.patch('/api/manual-levels/:id', ...) is registered AFTER all
 // /watch sub-routes below to avoid Express matching '2/watch' as id='2/watch'
 
@@ -634,6 +811,13 @@ app.patch('/api/manual-levels/:id/watch', authRequired, (req, res) => {
     console.log(`[watch-config] display_scope_saved id=${id} scope=${displayScope}`);
   }
   levelWatchEngine.loader.invalidate();
+  // Immediately delete the Redis watch-state key when watch is disabled so
+  // the WS flush loop stops broadcasting the level as active right away
+  // (otherwise the key lingers until its 90 s TTL expires).
+  if (watchEnabled === false) {
+    const market = level.marketType || 'futures';
+    redis.del(`levelwatchstate:${market}:${level.symbol}:manual-${id}`).catch(() => {});
+  }
   const ao = updated.alertOptions || {};
   return res.json({
     success:         true,
@@ -730,58 +914,79 @@ app.patch('/api/manual-levels/:id',  authRequired, manualLevelsPatchFactory(leve
 
 // ─── Tracked levels endpoints ─────────────────────────────────────
 console.log('[backend] registering /api/tracked-levels routes');
-app.post('/api/tracked-levels/bulk',        trackedLevelsBulk);
-app.get('/api/tracked-levels',              trackedLevelsList);
-app.delete('/api/tracked-levels/:id',       trackedLevelsDeleteOne);
-app.post('/api/tracked-levels/delete-many', trackedLevelsDeleteMany);
-app.patch('/api/tracked-levels/:id',        (req, res) => { trackedLevelsPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.post('/api/tracked-levels/patch-many',  trackedLevelsPatchMany);
+app.post('/api/tracked-levels/bulk',        authRequired, (req, res) => { trackedLevelsBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.get('/api/tracked-levels',              authRequired, trackedLevelsList);
+app.delete('/api/tracked-levels/:id',       authRequired, (req, res) => {
+  const id    = parseInt(req.params.id, 10);
+  const level = !isNaN(id) && id > 0 ? trackedLevelsGetById(id) : null;
+  trackedLevelsDeleteOne(req, res);
+  if (level?.alertEnabled) {
+    const market = level.marketType || 'futures';
+    redis.del(`levelwatchstate:${market}:${level.symbol}:tracked-${id}`).catch(() => {});
+    levelWatchEngine?.loader?.invalidate();
+  }
+});
+app.post('/api/tracked-levels/delete-many', authRequired, (req, res) => { trackedLevelsDeleteMany(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.patch('/api/tracked-levels/:id',        authRequired, async (req, res) => {
+  await trackedLevelsPatchOne(req, res);
+  levelWatchEngine?.loader?.invalidate();
+  // Immediately delete the Redis watch-state key when alertEnabled is turned off
+  if (req.body?.alertEnabled === false) {
+    const id    = parseInt(req.params.id, 10);
+    const level = !isNaN(id) && id > 0 ? trackedLevelsGetById(id) : null;
+    if (level) {
+      const market = level.marketType || 'futures';
+      redis.del(`levelwatchstate:${market}:${level.symbol}:tracked-${id}`).catch(() => {});
+    }
+  }
+});
+app.post('/api/tracked-levels/patch-many',  authRequired, (req, res) => { trackedLevelsPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Tracked extremes endpoints ──────────────────────────────────
 console.log('[backend] registering /api/tracked-extremes routes');
-app.post('/api/tracked-extremes/bulk',        authRequired, (req, res) => { trackedExtremesBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/tracked-extremes/bulk',        authRequired, async (req, res) => { await trackedExtremesBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/tracked-extremes',              authRequired, trackedExtremesList);
 app.delete('/api/tracked-extremes/:id',       authRequired, trackedExtremesDeleteOne);
 app.post('/api/tracked-extremes/delete-many', authRequired, trackedExtremesDeleteMany);
-app.patch('/api/tracked-extremes/:id',        authRequired, (req, res) => { trackedExtremesPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.post('/api/tracked-extremes/patch-many',  authRequired, (req, res) => { trackedExtremesPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.patch('/api/tracked-extremes/:id',        authRequired, async (req, res) => { await trackedExtremesPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/tracked-extremes/patch-many',  authRequired, async (req, res) => { await trackedExtremesPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Tracked rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/tracked-rays routes');
-app.post('/api/tracked-rays/bulk',        trackedRaysBulk);
-app.get('/api/tracked-rays',              trackedRaysList);
-app.delete('/api/tracked-rays/:id',       trackedRaysDeleteOne);
-app.post('/api/tracked-rays/delete-many', trackedRaysDeleteMany);
-app.patch('/api/tracked-rays/:id',        trackedRaysPatchOne);
-app.post('/api/tracked-rays/patch-many',  trackedRaysPatchMany);
-app.get('/api/tracked-rays/:id/value',    trackedRaysLineValue);
+app.post('/api/tracked-rays/bulk',        authRequired, trackedRaysBulk);
+app.get('/api/tracked-rays',              authRequired, trackedRaysList);
+app.delete('/api/tracked-rays/:id',       authRequired, trackedRaysDeleteOne);
+app.post('/api/tracked-rays/delete-many', authRequired, trackedRaysDeleteMany);
+app.patch('/api/tracked-rays/:id',        authRequired, trackedRaysPatchOne);
+app.post('/api/tracked-rays/patch-many',  authRequired, trackedRaysPatchMany);
+app.get('/api/tracked-rays/:id/value',    authRequired, trackedRaysLineValue);
 
 // ─── Manual sloped levels endpoints ────────────────────────────────
 console.log('[backend] registering /api/manual-sloped-levels routes');
 app.post('/api/manual-sloped-levels',             authRequired, manualSlopedCreate);
-app.get('/api/manual-sloped-levels',              manualSlopedList);
+app.get('/api/manual-sloped-levels',              authRequired, manualSlopedList);
 app.delete('/api/manual-sloped-levels/:id',       authRequired, manualSlopedDelete);
-app.patch('/api/manual-sloped-levels/:id',        authRequired, (req, res) => { manualSlopedPatch(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.get('/api/manual-sloped-levels/:id/value',    manualSlopedLineValue);
+app.patch('/api/manual-sloped-levels/:id',        authRequired, async (req, res) => { await manualSlopedPatch(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.get('/api/manual-sloped-levels/:id/value',    authRequired, manualSlopedLineValue);
 
 // ─── Saved rays endpoints ────────────────────────────────────────
 console.log('[backend] registering /api/saved-rays routes');
-app.post('/api/saved-rays/bulk',             authRequired, (req, res) => { savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/saved-rays/bulk',             authRequired, async (req, res) => { await savedRaysBulk(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.get('/api/saved-rays',                   authRequired, savedRaysList);
-app.delete('/api/saved-rays/:id',            authRequired, (req, res) => { savedRaysDeleteOne(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.post('/api/saved-rays/delete-many',      authRequired, (req, res) => { savedRaysDeleteMany(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.delete('/api/saved-rays/:id',            authRequired, async (req, res) => { await savedRaysDeleteOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/saved-rays/delete-many',      authRequired, async (req, res) => { await savedRaysDeleteMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 app.patch('/api/saved-rays/:id/watch',       authRequired, (req, res) => savedRaysWatchPatch(req, res, levelWatchEngine?.loader));
 app.get('/api/saved-rays/:id/watch',         authRequired, savedRaysWatchGet);
 app.get('/api/saved-rays/:id/watch-state',   authRequired, (req, res) => savedRaysWatchState(req, res, redis));
-app.patch('/api/saved-rays/:id',             authRequired, (req, res) => { savedRaysPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
-app.post('/api/saved-rays/patch-many',       authRequired, (req, res) => { savedRaysPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.patch('/api/saved-rays/:id',             authRequired, async (req, res) => { await savedRaysPatchOne(req, res); levelWatchEngine?.loader?.invalidate(); });
+app.post('/api/saved-rays/patch-many',       authRequired, async (req, res) => { await savedRaysPatchMany(req, res); levelWatchEngine?.loader?.invalidate(); });
 
 // ─── Extremes rays endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/extremes-rays routes');
-app.post('/api/extremes-rays',        extremesRaysCreate);
-app.get('/api/extremes-rays',         extremesRaysList);
-app.patch('/api/extremes-rays/:id',   extremesRaysPatch);
-app.delete('/api/extremes-rays/:id',  extremesRaysDelete);
+app.post('/api/extremes-rays',        authRequired, extremesRaysCreate);
+app.get('/api/extremes-rays',         authRequired, extremesRaysList);
+app.patch('/api/extremes-rays/:id',   authRequired, extremesRaysPatch);
+app.delete('/api/extremes-rays/:id',  authRequired, extremesRaysDelete);
 
 // ─── Level Watch Engine routes (must be before /api/levels/:symbol wildcard) ───
 console.log('[backend] registering /api/levels/:id/watch routes');
@@ -868,7 +1073,7 @@ app.get('/api/levels/:symbol', async (req, res) => {
 });
 
 // POST /api/levels/manual
-app.post('/api/levels/manual', async (req, res) => {
+app.post('/api/levels/manual', authRequired, async (req, res) => {
   const payload = req.body || {};
   const errors  = levels.validateLevelPayload(payload, true);
   if (errors.length) {
@@ -888,7 +1093,7 @@ app.post('/api/levels/manual', async (req, res) => {
 });
 
 // PATCH /api/levels/:id
-app.patch('/api/levels/:id', async (req, res) => {
+app.patch('/api/levels/:id', authRequired, async (req, res) => {
   const id      = parseInt(req.params.id, 10);
   const payload = req.body || {};
 
@@ -908,7 +1113,7 @@ app.patch('/api/levels/:id', async (req, res) => {
 });
 
 // DELETE /api/levels/:id  (soft delete)
-app.delete('/api/levels/:id', async (req, res) => {
+app.delete('/api/levels/:id', authRequired, async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ success: false, error: 'Invalid id' });
 
@@ -941,8 +1146,8 @@ app.get('/api/delivery/status', async (_req, res) => {
   }
 });
 
-// POST /api/delivery/test  (dev/internal only)
-app.post('/api/delivery/test', async (req, res) => {
+// POST /api/delivery/test  (dev/internal only — auth-gated to prevent outbound spam)
+app.post('/api/delivery/test', authRequired, async (req, res) => {
   const body = req.body || {};
   const symbol       = body.symbol       || 'BTCUSDT';
   const direction    = body.direction    || 'UP';
@@ -1205,7 +1410,7 @@ app.use('/api/screener/alerts',         authRequired, createScreenerAlertsRouter
 // New unified snapshot / live-delta / diagnostics routes
 app.use('/api/screener/snapshot',        createScreenerSnapshotRouter(redis));
 app.use('/api/screener/live',            createScreenerLiveRouter(redis));
-app.use('/api/screener/debug',           createScreenerDiagnosticsRouter(redis));
+app.use('/api/screener/debug',           authRequired, createScreenerDiagnosticsRouter(redis));
 app.use('/api/screener/kline-flat',      createKlineFlatRouter(redis));
 app.use('/api/screener/spot-stats',      createScreenerSpotStatsRouter(redis));
 
@@ -1238,17 +1443,17 @@ app.use('/api/alert-sounds', createAlertSoundsRouter());
 // ─── Synthetic Feed (dev/test) ───────────────────────────────────
 console.log('[backend] registering /api/synth routes');
 const synthPlaybackService = new SyntheticPlaybackService(redis);
-app.use('/api/synth', createSynthRouter(synthPlaybackService));
+app.use('/api/synth', authRequired, createSynthRouter(synthPlaybackService));
 
 // ─── Phase 2: TESTTEST diagnostic routes ─────────────────────────
 const path = require('path');
-app.use('/api/testtest', createTestTestRouter(redis, db, { moveDetectionSvc, derivativesSvc, rankingSvc }));
+app.use('/api/testtest', authRequired, createTestTestRouter(redis, db, { moveDetectionSvc, derivativesSvc, rankingSvc }));
 app.get('/testtest', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 'testtest.html')));
 app.get('/screener', (_req, res) => res.sendFile(path.join(__dirname, 'routes', 'screener.html')));
 
 // ─── Phase 3: Runtime QA routes ─────────────────────────────────
 console.log('[backend] registering /api/runtime-qa routes');
-app.use('/api/runtime-qa', createRuntimeQaRouter(redis, runtimeQaSvc));
+app.use('/api/runtime-qa', authRequired, createRuntimeQaRouter(redis, runtimeQaSvc));
 
 // ─── Live polling health ─────────────────────────────────────────
 console.log('[backend] registering /api/runtime/live-health route');
@@ -1259,7 +1464,7 @@ console.log('[backend] registering /api/bars routes');
 app.use('/api/bars', createBarsRouter(redis, db));
 
 console.log('[backend] registering /api/ws-proxy/debug route');
-app.get('/api/ws-proxy/debug', (_req, res) => {
+app.get('/api/ws-proxy/debug', authRequired, (_req, res) => {
   return res.json({ success: true, now: new Date().toISOString(), ...getWsProxyStats() });
 });
 
@@ -1269,6 +1474,11 @@ app.use('/api/heatmap', createHeatmapRouter(redis, heatmapService));
 
 console.log('[backend] registering /api/density routes');
 app.use('/api/density', createDensityDomRouter(redis, densityService));
+
+// Density chart / orderbook / depth / symbols / appearance (new density page)
+const { createDensityChartRouter } = require('./routes/densityChartRoute');
+console.log('[backend] registering /api/density chart/orderbook/depth-map/symbols/appearance routes');
+app.use('/api/density', createDensityChartRouter(redis));
 
 // ─── Robobot module ─────────────────────────────────────────────
 console.log('[backend] registering /api/robobot routes');
@@ -1281,7 +1491,7 @@ const robobotWatchService = createRobobotWatchService({
   cloudBridge  : robobotCloudBridge,
 });
 robobotWatchService.start();
-app.use('/api/robobot', createRobobotRouter({
+app.use('/api/robobot', authRequired, createRobobotRouter({
   redis,
   taskService  : robobotTaskService,
   eventService : robobotEventService,
@@ -1309,3 +1519,53 @@ attachHeatmapWs(httpServer, redis, wsEventBus);
 
 // Attach Binance WS proxy: /ws/stream/* → wss://stream.binance.com and /ws/fstream/* → wss://fstream.binance.com
 attachBinanceWsProxy(httpServer);
+
+// ─── Graceful shutdown ───────────────────────────────────────
+let _shuttingDown = false;
+async function shutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`[backend] ${signal} received — shutting down gracefully…`);
+
+  // Stop accepting new HTTP/WS connections; let in-flight requests finish.
+  try {
+    await new Promise((resolve) => {
+      httpServer.close(() => resolve());
+      // Hard cap so we don't hang forever on a stuck keep-alive socket.
+      setTimeout(() => resolve(), 8_000).unref();
+    });
+  } catch (err) {
+    console.error('[backend] httpServer.close error:', err.message);
+  }
+
+  // Stop background services that expose a .stop() handle. Each is wrapped so
+  // one slow/buggy service does not block others. Order: producers → consumers.
+  const stopSteps = [
+    ['liveWsGateway',      () => stopLiveWsGateway?.()],
+    ['alertEngine',        () => alertEngine?.stop?.()],
+    ['correlationSvc',     () => correlationSvc?.stop?.()],
+    ['barAggregatorSvc',   () => barAggregatorSvc?.stop?.()],
+    ['runtimeQaSvc',       () => runtimeQaSvc?.stop?.()],
+    ['outcomeSvc',         () => outcomeSvc?.stop?.()],
+    ['rankingSvc',         () => rankingSvc?.stop?.()],
+    ['derivativesSvc',     () => derivativesSvc?.stop?.()],
+    ['preEventSvc',        () => preEventSvc?.stop?.()],
+    ['moveDetectionSvc',   () => moveDetectionSvc?.stop?.()],
+    ['screenerAlertEngine',() => screenerAlertEngine?.stop?.()],
+    ['robobotWatchService',() => robobotWatchService?.stop?.()],
+  ];
+  await Promise.allSettled(stopSteps.map(async ([name, fn]) => {
+    try { await fn(); }
+    catch (err) { console.error(`[backend] ${name}.stop error:`, err.message); }
+  }));
+
+  // Close DB pool and Redis client. Do this last so shutdown handlers in
+  // services that flush state on close still have a working client.
+  try { await db.end(); } catch (err) { console.error('[backend] db.end error:', err.message); }
+  try { await redis.quit(); } catch (err) { console.error('[backend] redis.quit error:', err.message); }
+  console.log('[backend] shutdown complete');
+  process.exit(0);
+}
+// Expose for the uncaughtException handler hoisted earlier in the file.
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));

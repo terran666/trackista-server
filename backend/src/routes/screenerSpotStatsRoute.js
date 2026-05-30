@@ -87,13 +87,16 @@ function createScreenerSpotStatsRouter(redis) {
       const limitNum = Math.min(parseInt(q.limit, 10) || 200, MAX_LIMIT);
 
       // ── Filters ────────────────────────────────────────────────
+      // `Number.isFinite` guards against NaN slipping through into Redis/SQL
+      // params or comparison ops (where NaN comparisons silently return false).
+      const finiteOrNull = (v) => (Number.isFinite(v) ? v : null);
       const priceDir      = q.priceDir     || 'any';
-      const priceMinPct   = q.priceMinPct  != null ? parseFloat(q.priceMinPct)  : null;
-      const priceMaxPct   = q.priceMaxPct  != null ? parseFloat(q.priceMaxPct)  : null;
-      const tradesMin     = q.tradesMin    != null ? parseInt(q.tradesMin, 10)  : null;
-      const turnoverMin   = q.turnoverMin  != null ? parseFloat(q.turnoverMin)  : null;
-      const minImpulse    = q.minImpulse   != null ? parseFloat(q.minImpulse)   : null;
-      const minInPlay     = q.minInPlay    != null ? parseFloat(q.minInPlay)    : null;
+      const priceMinPct   = q.priceMinPct  != null ? finiteOrNull(parseFloat(q.priceMinPct))  : null;
+      const priceMaxPct   = q.priceMaxPct  != null ? finiteOrNull(parseFloat(q.priceMaxPct))  : null;
+      const tradesMin     = q.tradesMin    != null ? finiteOrNull(parseInt(q.tradesMin, 10))  : null;
+      const turnoverMin   = q.turnoverMin  != null ? finiteOrNull(parseFloat(q.turnoverMin))  : null;
+      const minImpulse    = q.minImpulse   != null ? finiteOrNull(parseFloat(q.minImpulse))   : null;
+      const minInPlay     = q.minInPlay    != null ? finiteOrNull(parseFloat(q.minInPlay))    : null;
       const symbolSearch  = q.symbolSearch ? q.symbolSearch.toUpperCase()       : null;
 
       // ── Symbol list ────────────────────────────────────────────

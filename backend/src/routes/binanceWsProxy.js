@@ -53,6 +53,9 @@ function getRedisKlineClients() {
     _redisGet.on('error', err => console.error('[kline-ws-redis] get error:', err.message));
     // Route pub/sub messages to subscribed WS clients AND reset stale watchdog
     _redisSub.on('message', (channel, message) => {
+      // Update lastDataTs so gap-fill knows how long the channel was silent
+      const _wdEntry = _klineWatchdogs.get(channel);
+      if (_wdEntry) _wdEntry.lastDataTs = Date.now();
       _resetKlineWatchdog(channel);
       const clients = klineListeners.get(channel);
       if (!clients || clients.size === 0) return;
@@ -118,7 +121,7 @@ const _klineWatchdogs = new Map();
 
 function _startKlineWatchdog(channel, immediateMs = KLINE_STALE_TRIGGER_MS) {
   if (_klineWatchdogs.has(channel)) return; // already watching
-  const entry = { staleTimer: null };
+  const entry = { staleTimer: null, lastDataTs: Date.now() };
   _klineWatchdogs.set(channel, entry);
   _armStaleTimer(channel, entry, immediateMs);
 }
@@ -151,57 +154,104 @@ function _armStaleTimer(channel, entry, delayMs = KLINE_STALE_TRIGGER_MS) {
   }, delayMs);
 }
 
-async function _pollKlineOnce(market, symbol, interval) {
+// Interval → milliseconds lookup for gap-fill calculation
+const _INTERVAL_MS = {
+  '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+  '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
+  '6h': 21_600_000, '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000,
+};
+
+/**
+ * How many bars to fetch to fill the gap since lastDataTs.
+ * Used as the `limit` for the first REST poll after a stale/ban window.
+ * Capped at 10 so we never over-fetch during a long outage.
+ */
+function _calcFillLimit(entry, interval) {
+  const ivMs = _INTERVAL_MS[interval];
+  if (!ivMs || !entry.lastDataTs) return 1;
+  const staleMs = Date.now() - entry.lastDataTs;
+  return Math.min(Math.max(1, Math.ceil(staleMs / ivMs) + 1), 10);
+}
+
+/**
+ * Pause REST kline polling for a rate-limited channel.
+ * Unlike _stopKlineWatchdog, the watchdog entry is KEPT ALIVE so it can
+ * auto-resume once the ban expires — preventing permanent chart gaps.
+ */
+function _pauseKlineWatchdog(channel, pauseMs) {
+  _staleChannels.delete(channel); // stop being round-robin polled during ban
+  const parts = channel.split(':'); // kline:{market}:{symbol}:{interval}
+  console.warn(
+    `[kline-watchdog] ${parts[1]}/${parts[2]}@${parts[3]} rate-limited — ` +
+    `pausing REST for ${Math.ceil(pauseMs / 1000)}s (watchdog kept alive)`,
+  );
+  setTimeout(() => {
+    if (!klineListeners.has(channel) || klineListeners.get(channel).size === 0) return;
+    const entry = _klineWatchdogs.get(channel);
+    if (!entry) return; // all clients disconnected during the pause
+    console.log(`[kline-watchdog] ${parts[1]}/${parts[2]}@${parts[3]} ban pause expired — resuming REST fallback`);
+    _activateRestFallback(channel, entry);
+  }, pauseMs);
+}
+
+async function _pollKlineOnce(market, symbol, interval, limit = 1) {
   const baseUrl = market === 'futures' ? BINANCE_FAPI_KLINES : BINANCE_SPOT_KLINES;
-  const url     = `${baseUrl}?symbol=${symbol}&interval=${interval}&limit=1`;
+  const url     = `${baseUrl}?symbol=${symbol}&interval=${interval}&limit=${limit}`;
   try {
     const res = await binanceFetch(url, { signal: AbortSignal.timeout(5_000) }, 'klineWatchdog', symbol, interval);
     if (!res.ok) {
       console.warn(`[kline-watchdog] REST ${market}/${symbol}@${interval} HTTP ${res.status}`);
       if (res.status === 418 || res.status === 429) {
-        console.warn(`[kline-watchdog] ${market}/${symbol}@${interval} rate-limited — stopping REST fallback`);
-        _stopKlineWatchdog(`kline:${market}:${symbol}:${interval}`);
+        const retryMs = (parseInt(res.headers.get('retry-after') || '0', 10) * 1_000) || 60_000;
+        _pauseKlineWatchdog(`kline:${market}:${symbol}:${interval}`, retryMs + 1_000);
       }
       return;
     }
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) return;
-    const row      = data[data.length - 1]; // last (possibly open) candle
-    const isClosed = Date.now() > Number(row[6]);
-    const msg = {
-      e: 'kline',
-      E: Date.now(),
-      s: symbol,
-      k: {
-        t: Number(row[0]), T: Number(row[6]),
-        s: symbol, i: interval,
-        f: 0, L: 0,
-        o: row[1], c: row[4], h: row[2], l: row[3],
-        v: row[5], n: Number(row[8]),
-        x: isClosed,
-        q: row[7], V: row[9], Q: row[10], B: '0',
-      },
-    };
-    const payload  = JSON.stringify(msg);
-    const channel  = `kline:${market}:${symbol}:${interval}`;
-    const { get }  = getRedisKlineClients();
+    const now     = Date.now();
+    const channel = `kline:${market}:${symbol}:${interval}`;
+    const clients = klineListeners.get(channel);
+    const { get } = getRedisKlineClients();
+    let lastPayload = null;
 
     // Send DIRECTLY to WebSocket clients — do NOT publish to Redis pub/sub.
     // Publishing to pub/sub would trigger _redisSub.on('message') → _resetKlineWatchdog
     // which would mistake our own message for "collector WS resumed" and stop the fallback.
-    const clients = klineListeners.get(channel);
-    if (clients) {
-      for (const ws of clients) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    // When limit > 1 (gap-fill on re-activation), all fetched bars are sent in order.
+    for (const row of data) {
+      const isClosed = now > Number(row[6]);
+      const msg = {
+        e: 'kline',
+        E: now,
+        s: symbol,
+        k: {
+          t: Number(row[0]), T: Number(row[6]),
+          s: symbol, i: interval,
+          f: 0, L: 0,
+          o: row[1], c: row[4], h: row[2], l: row[3],
+          v: row[5], n: Number(row[8]),
+          x: isClosed,
+          q: row[7], V: row[9], Q: row[10], B: '0',
+        },
+      };
+      lastPayload = JSON.stringify(msg);
+      if (clients) {
+        for (const ws of clients) {
+          if (ws.readyState === WebSocket.OPEN) ws.send(lastPayload);
+        }
       }
     }
-    // Still update the :last key so new clients get fresh data on connect
-    get.set(`${channel}:last`, payload, 'EX', 300).catch(() => {});
+    // Update lastDataTs and :last key so new clients get fresh data on connect
+    const wdEntry = _klineWatchdogs.get(channel);
+    if (wdEntry) wdEntry.lastDataTs = now;
+    if (lastPayload) get.set(`${channel}:last`, lastPayload, 'EX', 300).catch(() => {});
   } catch (err) {
     if (err.status === 418) {
-      // binanceFetch threw because IP ban is active — stop watchdog until collector resumes
-      console.warn(`[kline-watchdog] ${market}/${symbol}@${interval} IP ban active — stopping REST fallback`);
-      _stopKlineWatchdog(`kline:${market}:${symbol}:${interval}`);
+      // binanceFetch threw because IP ban is active — pause REST until ban expires.
+      // Using _pauseKlineWatchdog (not _stopKlineWatchdog) keeps the entry alive
+      // so the watchdog auto-resumes after the ban, preventing permanent chart gaps.
+      _pauseKlineWatchdog(`kline:${market}:${symbol}:${interval}`, (err.retryAfterMs || 60_000) + 1_000);
     }
     // Ignore other individual poll errors — next tick will retry
   }
@@ -223,8 +273,9 @@ function _activateRestFallback(channel, entry) {
   _staleChannels.add(channel);
   _ensureGlobalPoller();
 
-  // Poll immediately for first data point (before first tick fires)
-  _pollKlineOnce(market, symbol, interval);
+  // Poll immediately for first data point (before first tick fires).
+  // Gap-fill: fetch enough bars to cover the stale/ban window, not just 1.
+  _pollKlineOnce(market, symbol, interval, _calcFillLimit(entry, interval));
 }
 
 function subscribeKlineClient(market, symbol, interval, clientWs) {
@@ -323,7 +374,11 @@ function stateLabel(state) {
 }
 
 // ── Upstream connection (with reconnect) ──────────────────────────────────────
-function connectUpstream(upstreamUrl, market, stream, connId, clientWs, attempt) {
+// `rewriteAggTrade`: when true, rewrite `"e":"trade"` → `"e":"aggTrade"` in
+// each frame. Used as a transparent fallback for futures @aggTrade — Binance
+// USD-M sometimes silently stops publishing @aggTrade frames while @trade keeps
+// flowing. Field set used by clients (p,q,T) is identical between the two.
+function connectUpstream(upstreamUrl, market, stream, connId, clientWs, attempt, rewriteAggTrade = false) {
   const info = activeConnections.get(connId);
   if (!info) return; // client already gone
 
@@ -355,7 +410,16 @@ function connectUpstream(upstreamUrl, market, stream, connId, clientWs, attempt)
 
   upstream.on('message', (data, isBinary) => {
     if (clientWs.readyState !== WebSocket.OPEN) return;
-    clientWs.send(data, { binary: isBinary });
+    let payload = data;
+    if (rewriteAggTrade && !isBinary) {
+      // Cheap in-place rewrite: "e":"trade" → "e":"aggTrade" (only first occurrence,
+      // which is the event-name field at the start of the frame).
+      const s = data.toString('utf8');
+      if (s.indexOf('"e":"trade"') !== -1) {
+        payload = s.replace('"e":"trade"', '"e":"aggTrade"');
+      }
+    }
+    clientWs.send(payload, { binary: isBinary });
     info.msgRelayed++;
     if (info.msgRelayed % RELAY_LOG_EVERY_N_MSGS === 0) {
       console.log(`${label} relay checkpoint: ${info.msgRelayed} messages relayed`);
@@ -384,7 +448,7 @@ function connectUpstream(upstreamUrl, market, stream, connId, clientWs, attempt)
       console.log(`${label} scheduling upstream reconnect #${nextAttempt} in ${delay}ms`);
       setTimeout(() => {
         if (clientWs.readyState === WebSocket.OPEN && activeConnections.has(connId)) {
-          connectUpstream(upstreamUrl, market, stream, connId, clientWs, nextAttempt);
+          connectUpstream(upstreamUrl, market, stream, connId, clientWs, nextAttempt, rewriteAggTrade);
         }
       }, delay);
     } else {
@@ -424,8 +488,18 @@ function attachBinanceWsProxy(httpServer) {
       }
 
       // ── All other streams → proxy to Binance ──────────────────────────────
+      // Workaround: Binance USD-M futures @aggTrade is currently silent for many
+      // symbols (handshake OK, zero frames). Transparently substitute @trade
+      // upstream and rewrite the event name back to "aggTrade" on the way out.
+      let upstreamStreamName = streamName;
+      let rewriteAggTrade = false;
+      if (market === 'futures' && /@aggTrade$/i.test(streamName)) {
+        upstreamStreamName = streamName.replace(/@aggTrade$/i, '@trade');
+        rewriteAggTrade = true;
+      }
+
       const upstreamBase = market === 'spot' ? SPOT_WS_BASE : FUTURES_WS_BASE;
-      const upstreamUrl  = `${upstreamBase}/${streamName}`;
+      const upstreamUrl  = `${upstreamBase}/${upstreamStreamName}`;
       const connId       = nextConnId++;
       const label        = `[binance-ws-proxy] [${connId}] ${market}/${streamName}`;
 
@@ -440,10 +514,10 @@ function attachBinanceWsProxy(httpServer) {
         statsInterval:      null,
       });
 
-      console.log(`${label} client connected → ${upstreamUrl}`);
+      console.log(`${label} client connected → ${upstreamUrl}${rewriteAggTrade ? ' (aggTrade↔trade rewrite)' : ''}`);
 
       // Connect upstream (attempt 0 = initial, not a reconnect)
-      connectUpstream(upstreamUrl, market, streamName, connId, clientWs, 0);
+      connectUpstream(upstreamUrl, market, streamName, connId, clientWs, 0, rewriteAggTrade);
 
       // Forward client messages → upstream (subscribe / unsubscribe JSON frames)
       clientWs.on('message', (data, isBinary) => {

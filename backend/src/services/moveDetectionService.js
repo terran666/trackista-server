@@ -89,8 +89,14 @@ function createMoveDetectionService(redis, db) {
     const pipeline = redis.pipeline();
     for (const sym of symbols) pipeline.get(`walls:${sym}`);
     const results = await pipeline.exec();
+    if (!results) {
+      console.error('[moveDetection] refreshWalls pipeline returned no result');
+      return;
+    }
     for (let i = 0; i < symbols.length; i++) {
-      const parsed = tryParse(results[i][1]);
+      const entry = results[i];
+      if (!entry) continue;
+      const parsed = tryParse(entry[1]);
       if (parsed) wallCache.set(symbols[i], parsed);
     }
   }
@@ -126,7 +132,11 @@ function createMoveDetectionService(redis, db) {
       pipeline.set(`move:leaders:${tf}:up`,   JSON.stringify(up.slice(0, 50)));
       pipeline.set(`move:leaders:${tf}:down`, JSON.stringify(down.slice(0, 50)));
     }
-    await pipeline.exec();
+    const results = await pipeline.exec();
+    if (!results) console.error('[moveDetection] refreshLeaders pipeline returned no result');
+    else for (const [pErr] of results) {
+      if (pErr) { console.error('[moveDetection] refreshLeaders pipeline cmd error:', pErr.message); break; }
+    }
   }
 
   // ── MySQL writes ──────────────────────────────────────────────────
@@ -388,6 +398,18 @@ function createMoveDetectionService(redis, db) {
         if (tickCount % 3 === 0) {
           for (const ev of eventsToUpdate) await updateEvent(ev);
         }
+      }
+
+      // ── Prune per-symbol maps against the active universe ───────
+      // The Binance universe drops/replaces symbols over time. Without this
+      // sweep, `priceHistories` and `activeEvents` would grow forever and
+      // hold price points for delisted pairs.
+      const activeSet = new Set(symbols);
+      for (const sym of priceHistories.keys()) {
+        if (!activeSet.has(sym)) priceHistories.delete(sym);
+      }
+      for (const sym of activeEvents.keys()) {
+        if (!activeSet.has(sym)) activeEvents.delete(sym);
       }
 
       // ── Refresh leaders every N seconds ─────────────────────────

@@ -150,7 +150,14 @@ function createAlertEngineService(redis, deliveryService = null) {
       pipeline.zadd('alerts:live', event.createdAt, json);
       pipeline.zremrangebyrank('alerts:live', 0, -(ALERT_RECENT_LIMIT + 1));
     }
-    await pipeline.exec();
+    const _alertExec = await pipeline.exec();
+    if (!_alertExec) {
+      console.error('[alerts] publish pipeline returned no result (connection lost?)');
+    } else {
+      for (const [pErr] of _alertExec) {
+        if (pErr) { console.error('[alerts] publish pipeline cmd error:', pErr.message); break; }
+      }
+    }
     totalAlerts++;
     console.log(`[alert.published] id=${event.id} type=${event.type} symbol=${event.symbol} priority=${event.priority}`);
 
@@ -234,6 +241,10 @@ function createAlertEngineService(redis, deliveryService = null) {
         pipeline.get(`levelstate:${sym}`);
       }
       const results = await pipeline.exec();
+      if (!results) {
+        console.error('[alerts] tick read pipeline returned no result (connection lost?)');
+        return;
+      }
 
       let processedSymbols = 0;
       let alertsThisTick   = 0;
@@ -243,8 +254,8 @@ function createAlertEngineService(redis, deliveryService = null) {
 
       for (let i = 0; i < symbols.length; i++) {
         const sym = symbols[i];
-        const [, rawSignal]     = results[i * 2];
-        const [, rawLevelState] = results[i * 2 + 1];
+        const [, rawSignal]     = results[i * 2]     || [null, null];
+        const [, rawLevelState] = results[i * 2 + 1] || [null, null];
 
         // Нет ни signal, ни levelstate — пропускаем
         if (!rawSignal && !rawLevelState) continue;
@@ -253,8 +264,8 @@ function createAlertEngineService(redis, deliveryService = null) {
 
         let signal     = null;
         let levelState = null;
-        try { if (rawSignal)     signal     = JSON.parse(rawSignal);     } catch (_) {}
-        try { if (rawLevelState) levelState = JSON.parse(rawLevelState); } catch (_) {}
+        try { if (rawSignal)     signal     = JSON.parse(rawSignal);     } catch (e) { console.warn('[alerts] parse signal:', e.message); }
+        try { if (rawLevelState) levelState = JSON.parse(rawLevelState); } catch (e) { console.warn('[alerts] parse levelState:', e.message); }
 
         // Контекст сигнала для level alerts
         const signalContext = signal ? {
@@ -293,17 +304,25 @@ function createAlertEngineService(redis, deliveryService = null) {
     }
   }
 
+  let _intervalHandle = null;
+  let _running        = false;
+
   function start() {
+    if (_intervalHandle) return;
     console.log('[alerts] Alert engine started (1s interval)');
-    let running = false;
-    setInterval(async () => {
-      if (running) return; // skip if previous tick still in progress
-      running = true;
-      try { await tick(); } finally { running = false; }
+    _intervalHandle = setInterval(async () => {
+      if (_running) return; // skip if previous tick still in progress (mutex)
+      _running = true;
+      try { await tick(); } finally { _running = false; }
     }, ENGINE_INTERVAL_MS);
+    if (_intervalHandle.unref) _intervalHandle.unref();
   }
 
-  return { start };
+  function stop() {
+    if (_intervalHandle) { clearInterval(_intervalHandle); _intervalHandle = null; }
+  }
+
+  return { start, stop };
 }
 
 module.exports = { createAlertEngineService };

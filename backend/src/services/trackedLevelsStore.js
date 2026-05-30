@@ -80,30 +80,49 @@ function bulkSave({ symbol, marketType, tf, source, levels }) {
     return { skipped: true, items: existing };
   }
 
+  // Preserve user watch settings (alertEnabled, watchMode, alertOptions) for levels
+  // that survive the bulk-replace at the same price+side. This prevents a data refresh
+  // (new fingerprint) from silently wiping the user's marking on an unchanged level.
+  const existingWatchMap = new Map(); // key: `${price}:${side}` → watch fields
+  for (const l of store.levels) {
+    if (l.symbol !== sym || l.marketType !== marketType || l.tf !== tf || l.source !== source) continue;
+    if (!l.alertEnabled) continue;
+    existingWatchMap.set(`${l.price}:${l.side}`, {
+      alertEnabled: l.alertEnabled,
+      watchMode:    l.watchMode    ?? null,
+      alertOptions: l.alertOptions ?? null,
+    });
+  }
+
   // Remove old records for this combination
   store.levels = store.levels.filter(
     l => !(l.symbol === sym && l.marketType === marketType && l.tf === tf && l.source === source)
   );
 
-  // Insert new records
-  const created = levels.map(l => ({
-    id:                 store.nextId++,
-    symbol:             sym,
-    marketType,
-    tf,
-    source,
-    price:              l.price,
-    side:               l.side,
-    type:               l.type              || null,
-    touches:            l.touches           ?? null,
-    score:              l.score             ?? null,
-    virgin:             l.virgin            ?? null,
-    formationTimestamp: l.formationTimestamp || null,
-    drawFromTimestamp:  l.drawFromTimestamp  || null,
-    alertEnabled:       false,
-    createdAt:          now,
-    updatedAt:          now,
-  }));
+  // Insert new records, restoring watch settings where price+side matches an existing watched level
+  const created = levels.map(l => {
+    const watchState = existingWatchMap.get(`${l.price}:${l.side}`);
+    return {
+      id:                 store.nextId++,
+      symbol:             sym,
+      marketType,
+      tf,
+      source,
+      price:              l.price,
+      side:               l.side,
+      type:               l.type              || null,
+      touches:            l.touches           ?? null,
+      score:              l.score             ?? null,
+      virgin:             l.virgin            ?? null,
+      formationTimestamp: l.formationTimestamp || null,
+      drawFromTimestamp:  l.drawFromTimestamp  || null,
+      alertEnabled:       watchState?.alertEnabled ?? false,
+      watchMode:          watchState?.watchMode    ?? null,
+      alertOptions:       watchState?.alertOptions ?? null,
+      createdAt:          now,
+      updatedAt:          now,
+    };
+  });
 
   store.levels.push(...created);
   store.fingerprints[fpKey] = incoming;

@@ -26,6 +26,9 @@ const REPORT_INTERVAL_MS = 60_000;
 // Rolling log: each entry is kept for 60 s then evicted.
 // Stored as { ts, service, endpoint, symbol, reason, status }
 const rollingLog = [];
+// Hard cap to defend against runaway log growth (e.g. an endpoint stuck in a
+// retry loop). 10 000 entries ≈ a few MB; far above any healthy minute.
+const ROLLING_LOG_CAP = 10_000;
 
 function evictOld() {
   const cutoff = Date.now() - 60_000;
@@ -43,7 +46,7 @@ function buildSummary() {
   return { total: rollingLog.length, byService, byEndpoint };
 }
 
-setInterval(() => {
+const _reportTimer = setInterval(() => {
   const s = buildSummary();
   if (s.total === 0) return;
   const sep = '='.repeat(48);
@@ -57,6 +60,7 @@ setInterval(() => {
   }
   console.log(`[binance-rest] ${sep}`);
 }, REPORT_INTERVAL_MS);
+if (_reportTimer.unref) _reportTimer.unref();
 
 function extractEndpoint(url) {
   try {
@@ -163,6 +167,10 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
   } finally {
     const endpoint = extractEndpoint(url);
     rollingLog.push({ ts: startTs, service, endpoint, symbol, reason, status });
+    if (rollingLog.length > ROLLING_LOG_CAP) {
+      // Drop the oldest 25% in one shot — cheaper than a per-push splice.
+      rollingLog.splice(0, Math.floor(ROLLING_LOG_CAP / 4));
+    }
     console.log(
       `[binance-rest] ts=${startTs}` +
       ` service=${service}` +

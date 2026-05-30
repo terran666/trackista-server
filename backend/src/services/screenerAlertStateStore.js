@@ -56,7 +56,14 @@ async function batchSetStates(redis, updates) {
   for (const [k, v] of updates) {
     pipeline.set(k, JSON.stringify(v), 'EX', STATE_TTL_SEC);
   }
-  await pipeline.exec();
+  const results = await pipeline.exec();
+  if (!results) {
+    console.error('[screenerAlertState] batchSetStates pipeline returned no result (connection lost?)');
+    return;
+  }
+  for (const [pErr] of results) {
+    if (pErr) { console.error('[screenerAlertState] batchSetStates cmd error:', pErr.message); break; }
+  }
 }
 
 /**

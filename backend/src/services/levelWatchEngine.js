@@ -46,7 +46,7 @@ function isDebugLevel(symbol, internalId) {
 // ─── Constants ────────────────────────────────────────────────────
 const ENGINE_INTERVAL_MS     = 1000;
 const SUMMARY_LOG_INTERVAL   = 30; // ticks
-const WATCHSTATE_TTL_SEC     = 90; // Redis key TTL for levelwatchstate:
+const WATCHSTATE_TTL_SEC     = 15; // Redis key TTL for levelwatchstate:
 const ALERT_RECENT_LIMIT     = 500;
 const ALERT_EVENT_TTL_SEC    = 7 * 24 * 60 * 60;
 
@@ -1097,7 +1097,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
       if (triggerByETA || triggerByDist) {
         const onCD  = await isCooldownActive('early_warning', level.market, level.symbol, level.internalId);
-        const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'early_warning', nowMs);
+        const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'early_warning', nowMs);
         if (!onCD && notFP) {
           const delivery = buildDeliveryConfig('early_warning', ao);
           const earlyWarning = {
@@ -1125,7 +1125,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
     // when movingToward=false and warnBeforeDistancePct=null (the default).
     if (!etaWarningFired && state.isNearby) {
       const onCD  = await isCooldownActive('early_warning', level.market, level.symbol, level.internalId);
-      const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'early_warning', nowMs);
+      const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'early_warning', nowMs);
       if (!onCD && notFP) {
         const delivery = buildDeliveryConfig('early_warning', ao);
         events.push(buildWatchEvent('early_warning', level, state, {
@@ -1154,7 +1154,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       const threshold = ao.minVolumeDeltaPct ?? 80;
       if (state.volumeDeltaPct >= threshold) {
         const onCD  = await isCooldownActive('nearby_volume_spike', level.market, level.symbol, level.internalId);
-        const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_volume_spike', nowMs);
+        const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_volume_spike', nowMs);
         if (!onCD && notFP) {
           const delivery = buildDeliveryConfig('nearby_volume_spike', ao);
           events.push(buildWatchEvent('nearby_volume_spike', level, state, {
@@ -1172,7 +1172,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       const threshold = ao.minTradesDeltaPct ?? 30;
       if (state.tradesDeltaPct >= threshold) {
         const onCD  = await isCooldownActive('nearby_trades_spike', level.market, level.symbol, level.internalId);
-        const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_trades_spike', nowMs);
+        const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_trades_spike', nowMs);
         if (!onCD && notFP) {
           const delivery = buildDeliveryConfig('nearby_trades_spike', ao);
           events.push(buildWatchEvent('nearby_trades_spike', level, state, {
@@ -1195,7 +1195,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         const minWall = ao.minWallStrength ?? 0;
         if (!minWall || (wallStr && wallStr >= minWall)) {
           const onCD  = await isCooldownActive('nearby_wall_appeared', level.market, level.symbol, level.internalId);
-          const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_wall_appeared', nowMs);
+          const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_wall_appeared', nowMs);
           if (!onCD && notFP) {
             const delivery = buildDeliveryConfig('nearby_wall_appeared', ao);
             events.push(buildWatchEvent('nearby_wall_appeared', level, state, {
@@ -1212,7 +1212,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
           state.wallContext.wallChange === 'increasing' &&
           state.wallContext.wallStrength > (prevState.wallStrength ?? 0) * 1.2) {
         const onCD  = await isCooldownActive('nearby_wall_strengthened', level.market, level.symbol, level.internalId);
-        const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_wall_strengthened', nowMs);
+        const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_wall_strengthened', nowMs);
         if (!onCD && notFP) {
           const delivery = buildDeliveryConfig('nearby_wall_strengthened', ao);
           events.push(buildWatchEvent('nearby_wall_strengthened', level, state, {
@@ -1229,7 +1229,7 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       const threshold = ao.minApproachSpeed ?? 0;
       if (approachAcceleration > 0.0001 && Math.abs(approachSpeed ?? 0) > threshold) {
         const onCD  = await isCooldownActive('nearby_approach_accelerated', level.market, level.symbol, level.internalId);
-        const notFP = await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_approach_accelerated', nowMs);
+        const notFP = !onCD && await checkAndSetFingerprint(level.symbol, level.market, level.internalId, 'nearby_approach_accelerated', nowMs);
         if (!onCD && notFP) {
           const delivery = buildDeliveryConfig('nearby_approach_accelerated', ao);
           events.push(buildWatchEvent('nearby_approach_accelerated', level, state, {
@@ -1941,6 +1941,10 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         pipeline.get(`${pfx}metrics:${symbol}`);
       }
       const results = await pipeline.exec();
+      if (!results) {
+        console.error('[levelWatch] read pipeline returned no result (connection lost?)');
+        return;
+      }
 
       const writePipeline = redis.pipeline();
 
@@ -1960,9 +1964,9 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         const lvlArr = groups.get(gk);
         const [market, symbol] = gk.split(':');
 
-        let [, rawPrice]     = results[gi * 3];
-        const [, rawSignal]  = results[gi * 3 + 1];
-        const [, rawMetrics] = results[gi * 3 + 2];
+        let [, rawPrice]     = results[gi * 3]     || [null, null];
+        const [, rawSignal]  = results[gi * 3 + 1] || [null, null];
+        const [, rawMetrics] = results[gi * 3 + 2] || [null, null];
 
         if (!rawPrice && market !== 'spot') {
           // Fallback 1: use spot price when futures price key is missing
@@ -2004,8 +2008,8 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
 
         let signal  = null;
         let metrics = null;
-        try { if (rawSignal)  signal  = JSON.parse(rawSignal);  } catch (_) {}
-        try { if (rawMetrics) metrics = JSON.parse(rawMetrics); } catch (_) {}
+        try { if (rawSignal)  signal  = JSON.parse(rawSignal);  } catch (e) { console.warn('[levelWatch] parse signal:', e.message); }
+        try { if (rawMetrics) metrics = JSON.parse(rawMetrics); } catch (e) { console.warn('[levelWatch] parse metrics:', e.message); }
 
         const prevPrice = previousPrices.get(gk) ?? null;
         previousPrices.set(gk, currentPrice);
@@ -2122,7 +2126,11 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
         }
       }
 
-      await writePipeline.exec();
+      const _wExec = await writePipeline.exec();
+      if (!_wExec) console.error('[levelWatch] write pipeline returned no result');
+      else for (const [pErr] of _wExec) {
+        if (pErr) { console.error('[levelWatch] write pipeline cmd error:', pErr.message); break; }
+      }
 
       // GC: remove state for levels that are no longer in the active watch list.
       // Prevents unbounded growth of previousStates and suppressedStateMap when
@@ -2130,6 +2138,11 @@ function createLevelWatchEngine(redis, db, deliveryService = null) {
       const activeIds = new Set(levels.map(l => l.internalId));
       for (const id of previousStates.keys())     { if (!activeIds.has(id)) previousStates.delete(id); }
       for (const id of suppressedStateMap.keys()) { if (!activeIds.has(id)) suppressedStateMap.delete(id); }
+      // previousPrices is keyed by `${market}:${symbol}` \u2014 prune by active group keys.
+      const activeGroupKeys = new Set(levels.map(l => `${l.market}:${l.symbol}`));
+      for (const gk of previousPrices.keys()) {
+        if (!activeGroupKeys.has(gk)) previousPrices.delete(gk);
+      }
 
       if (logSummary) {
         console.log(

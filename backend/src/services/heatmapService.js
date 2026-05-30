@@ -349,7 +349,14 @@ function connectWs(symbol) {
     state.synced  = false;
     if (state.deactivated) return;
     console.warn(`[heatmap] ${symbol}: WS closed (${code}), reconnecting in ${RECONNECT_DELAY_MS}ms`);
-    setTimeout(() => connectWs(symbol), RECONNECT_DELAY_MS);
+    // Track the timer so deactivateSymbol() can cancel a pending reconnect.
+    if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      if (state.deactivated) return;
+      connectWs(symbol);
+    }, RECONNECT_DELAY_MS);
+    if (state.reconnectTimer.unref) state.reconnectTimer.unref();
   });
 
   ws.on('error', (err) => {
@@ -382,6 +389,18 @@ async function refreshTopSymbols() {
     const top = trackedSet
       ? candidates.filter(s => trackedSet.has(s)).slice(0, MAX_SYMBOLS)
       : candidates.slice(0, MAX_SYMBOLS);
+    const topSet = new Set(top);
+
+    // Deactivate symbols that are no longer in the top-N so fresh top symbols
+    // can take their slots. Skip symbols not present in the desired top list.
+    let removed = 0;
+    for (const sym of [...bookStates.keys()]) {
+      if (!topSet.has(sym)) {
+        deactivateSymbol(sym);
+        removed++;
+      }
+    }
+
     let added = 0;
     for (const sym of top) {
       if (!bookStates.has(sym)) {
@@ -389,8 +408,8 @@ async function refreshTopSymbols() {
         if (result.ok) added++;
       }
     }
-    if (added > 0) {
-      console.log(`[heatmap] hourly refresh: activated ${added} new top symbols`);
+    if (removed > 0 || added > 0) {
+      console.log(`[heatmap] hourly refresh: removed=${removed} added=${added} top symbols`);
     }
   } catch (err) {
     console.warn('[heatmap] refreshTopSymbols error:', err.message);
@@ -426,9 +445,17 @@ function startSnapshotTimer() {
     }
 
     if (count > 0) {
-      pipeline.exec().catch(err =>
-        console.error('[heatmap] Redis pipeline error:', err.message),
-      );
+      pipeline.exec()
+        .then(results => {
+          if (!results) {
+            console.error('[heatmap] Redis pipeline returned no result (connection lost?)');
+            return;
+          }
+          for (const [pErr] of results) {
+            if (pErr) { console.error('[heatmap] Redis pipeline cmd error:', pErr.message); break; }
+          }
+        })
+        .catch(err => console.error('[heatmap] Redis pipeline error:', err.message));
     }
   }, SNAPSHOT_INTERVAL_MS);
   if (_timer.unref) _timer.unref();
@@ -469,6 +496,15 @@ function deactivateSymbol(symbol) {
   const state = bookStates.get(sym);
   if (!state) return;
   state.deactivated = true;
+  // Cancel any pending reconnect so we don't resurrect the WS after delete.
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+  if (state.recoveryTimer) {
+    clearTimeout(state.recoveryTimer);
+    state.recoveryTimer = null;
+  }
   if (state.ws) {
     try { state.ws.terminate(); } catch (_) {}
     state.ws = null;

@@ -1,5 +1,7 @@
 'use strict';
 
+const { safeSymbol } = require('../utils/parseClamp');
+
 /**
  * correlationRoute — GET /api/correlation/*
  *
@@ -59,16 +61,25 @@ function createCorrelationRouter(redis) {
   // GET /api/correlation/btc/current/:symbol
   // Returns all correlation configs for one symbol
   router.get('/btc/current/:symbol', async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
+    const symbol = safeSymbol(req.params.symbol);
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'Invalid symbol' });
+    }
     try {
       const pipe = redis.pipeline();
       for (const { tf, window } of CONFIGS) {
         pipe.get(`correlation:btc:current:${symbol}:${tf}:${window}`);
       }
       const results = await pipe.exec();
+      if (!results) {
+        console.error('[correlationRoute] /btc/current pipeline returned no result');
+        return res.status(500).json({ success: false, error: 'Internal server error' });
+      }
 
       const items = [];
-      for (const [err, raw] of results) {
+      for (const entry of results) {
+        if (!entry) continue;
+        const [err, raw] = entry;
         if (err || !raw) continue;
         const obj = tryParse(raw);
         if (obj) items.push(markStale(obj));
@@ -115,6 +126,10 @@ function createCorrelationRouter(redis) {
         pipe.get(`correlation:btc:current:${sym}:${tf}:${window}`);
       }
       const results = await pipe.exec();
+      if (!results) {
+        console.error('[correlationRoute] /btc/list pipeline returned no result');
+        return res.status(500).json({ success: false, error: 'Internal server error' });
+      }
 
       const rows = [];
       for (let i = 0; i < symbols.length; i++) {
@@ -149,13 +164,19 @@ function createCorrelationRouter(redis) {
         pipe.get(`correlation:btc:current:${sym}:${tf}:${window}`);
       }
       const results = await pipe.exec();
+      if (!results) {
+        console.error('[correlationRoute] /btc/summary pipeline returned no result');
+        return res.status(500).json({ success: false, error: 'Internal server error' });
+      }
 
       const stateCounts  = {};
       const biasCounts   = {};
       let totalCount = 0;
       let sumCorr    = 0;
 
-      for (const [err, raw] of results) {
+      for (const entry of results) {
+        if (!entry) continue;
+        const [err, raw] = entry;
         if (err || !raw) continue;
         const obj = tryParse(raw);
         if (!obj || obj.correlationToBtc == null) continue;

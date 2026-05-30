@@ -89,9 +89,10 @@ async function softDeleteComment(db, commentId, postId) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+    // Scope by post_id so a caller can't decrement a foreign post's count.
     const [result] = await conn.query(
-      "UPDATE alert_comments SET status = 'deleted' WHERE id = ? AND status = 'active'",
-      [commentId],
+      "UPDATE alert_comments SET status = 'deleted' WHERE id = ? AND post_id = ? AND status = 'active'",
+      [commentId, postId],
     );
     if (result.affectedRows > 0) {
       await conn.query(

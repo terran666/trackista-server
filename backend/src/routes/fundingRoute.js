@@ -1,5 +1,7 @@
 'use strict';
 
+const { safeSymbol } = require('../utils/parseClamp');
+
 /**
  * fundingRoute — GET /api/funding/*
  *
@@ -74,7 +76,10 @@ function createFundingRouter(redis) {
 
   // GET /api/funding/current/:symbol
   router.get('/current/:symbol', async (req, res) => {
-    const symbol = req.params.symbol.toUpperCase();
+    const symbol = safeSymbol(req.params.symbol);
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'Invalid symbol' });
+    }
     try {
       const raw = await redis.get(`funding:current:${symbol}`);
       if (!raw) {

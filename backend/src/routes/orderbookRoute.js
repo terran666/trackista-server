@@ -59,6 +59,12 @@ function createOrderbookHandler(redis) {
         error:   'Query param "symbol" is required (e.g. ?symbol=BTCUSDT)',
       });
     }
+    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {
+      return res.status(400).json({
+        success: false,
+        error:   'Query param "symbol" must match /^[A-Z0-9]{3,20}$/',
+      });
+    }
     if (marketType !== 'spot' && marketType !== 'futures') {
       return res.status(400).json({
         success: false,

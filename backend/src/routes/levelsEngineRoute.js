@@ -3,6 +3,7 @@
 const { calculateLevels } = require('../engines/levels/levelsEngine');
 const { getCachedBars, setCachedBars } = require('../utils/klinesCache');
 const { binanceFetch } = require('../utils/binanceRestLogger');
+const { safeSymbol } = require('../utils/parseClamp');
 
 const BINANCE_SPOT_BASE    = 'https://api.binance.com';
 const BINANCE_FUTURES_BASE = 'https://fapi.binance.com';
@@ -82,7 +83,7 @@ async function levelsHandler(req,res){
 
   console.log('[levels] HANDLER VERSION 2');
 
-  const symbol = (req.query.symbol || '').toUpperCase();
+  const symbol = safeSymbol(req.query.symbol);
   const tf     = (req.query.tf || '').toLowerCase();
   const type   = (req.query.type || 'local').toLowerCase();
 
@@ -94,7 +95,7 @@ async function levelsHandler(req,res){
 
     return res.status(400).json({
       success:false,
-      error:'Missing symbol'
+      error:'Missing or invalid symbol'
     });
 
   }

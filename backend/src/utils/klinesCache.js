@@ -13,7 +13,7 @@
 //
 // TTL is read from KLINES_CACHE_TTL_MS env (default 15 000 ms).
 
-const KLINES_CACHE_TTL_MS = parseInt(process.env.KLINES_CACHE_TTL_MS || '15000', 10);
+const KLINES_CACHE_TTL_MS = parseInt(process.env.KLINES_CACHE_TTL_MS || '120000', 10);
 const klinesCache = new Map(); // key → { bars, expiresAt }
 
 function getCachedBars(key) {

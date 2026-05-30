@@ -115,6 +115,12 @@ function createBarAggregatorService(redis, db) {
         return;
       }
 
+      // Prune `prevOiMap` so delisted symbols don't accumulate stale OI.
+      const _activeSet = new Set(symbols);
+      for (const sym of prevOiMap.keys()) {
+        if (!_activeSet.has(sym)) prevOiMap.delete(sym);
+      }
+
       // Batch-read all keys for all symbols in one pipeline round-trip
       const rPipe = redis.pipeline();
       for (const sym of symbols) {
@@ -361,7 +367,7 @@ function createBarAggregatorService(redis, db) {
         errorsCount,
         lastErrorMessage: err.message,
         status          : 'warning',
-      }), 'EX', 120).catch(() => {});
+      }), 'EX', 120).catch(e => console.warn('[barAgg] redis status set error:', e.message));
     }
   }
 

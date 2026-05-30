@@ -101,7 +101,10 @@ async function getFeed(db, { limit = 20, cursor, symbol, authorId, timeframe, ma
   if (market)    { conditions.push('p.market = ?');    params.push(market); }
   if (cursor)    { conditions.push('p.id < ?');        params.push(cursor); }
 
-  const cap = Math.min(limit, 50);
+  // Clamp to a positive integer in [1, 50]; reject NaN / negative / 0 values
+  // that would otherwise produce `LIMIT 0` or a SQL syntax error.
+  const parsed = Number.parseInt(limit, 10);
+  const cap = Math.max(1, Math.min(Number.isFinite(parsed) ? parsed : 20, 50));
   params.push(cap + 1);
 
   const [rows] = await db.query(

@@ -1,0 +1,100 @@
+﻿[alert.published] id=EIGENUSDT-market_in_play-1777141303564-generic type=market_in_play symbol=EIGENUSDT priority=high
+[telegram] skipped type=market_in_play symbol=EIGENUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=KERNELUSDT-market_in_play-1777141304574-generic type=market_in_play symbol=KERNELUSDT priority=high
+[telegram] skipped type=market_in_play symbol=KERNELUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=RAVEUSDT-market_in_play-1777141304574-generic type=market_in_play symbol=RAVEUSDT priority=high
+[telegram] skipped type=market_in_play symbol=RAVEUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=KSMUSDT-market_in_play-1777141305566-generic type=market_in_play symbol=KSMUSDT priority=high
+[telegram] skipped type=market_in_play symbol=KSMUSDT reason=disabled_by_config
+[alert.published] id=ASTERUSDT-market_in_play-1777141305566-generic type=market_in_play symbol=ASTERUSDT priority=high
+[telegram] skipped type=market_in_play symbol=ASTERUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[binance-proxy] futures GET /v1/ticker/24hr?symbol=APEUSDT тЖТ https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=APEUSDT (safe=true)
+[binance-proxy] futures /v1/ticker/24hr cache-hit (age=30s)
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=FOGOUSDT-market_in_play-1777141309569-generic type=market_in_play symbol=FOGOUSDT priority=high
+[telegram] skipped type=market_in_play symbol=FOGOUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=KITEUSDT-market_in_play-1777141310538-generic type=market_in_play symbol=KITEUSDT priority=high
+[telegram] skipped type=market_in_play symbol=KITEUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=SEIUSDT-market_in_play-1777141310538-generic type=market_in_play symbol=SEIUSDT priority=high
+[telegram] skipped type=market_in_play symbol=SEIUSDT reason=disabled_by_config
+[alert.published] id=PROVEUSDT-market_in_play-1777141310538-generic type=market_in_play symbol=PROVEUSDT priority=high
+[telegram] skipped type=market_in_play symbol=PROVEUSDT reason=disabled_by_config
+[alert.published] id=BULLAUSDT-market_in_play-1777141310538-generic type=market_in_play symbol=BULLAUSDT priority=high
+[telegram] skipped type=market_in_play symbol=BULLAUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=ENSUSDT-market_in_play-1777141313538-generic type=market_in_play symbol=ENSUSDT priority=high
+[telegram] skipped type=market_in_play symbol=ENSUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=SPXUSDT-market_in_play-1777141313538-generic type=market_in_play symbol=SPXUSDT priority=high
+[telegram] skipped type=market_in_play symbol=SPXUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[binance-rest] ================================================
+[binance-rest]  Requests/min summary (backend) тАФ total: 6
+[binance-rest]    service  binanceProxy: 5 req/min
+[binance-rest]    service  autoLevelsRoute: 1 req/min
+[binance-rest]    endpoint /fapi/v1/klines: 5 req/min
+[binance-rest]    endpoint /api/v3/klines: 1 req/min
+[binance-rest] ================================================
+[density-track] spot disabled (DENSITY_SPOT_ENABLED !== true) тАФ wrote empty tracked list
+[density-track] refresh complete тАФ universe=498 scored=498 tracked=100 top3=RAVEUSDT,SOLUSDT,APEUSDT
+[density-track] spot synced from universe тАФ count=497
+[density-track] futures v2 refresh complete тАФ universe=497 hysteresisKeep=0 final=497
+[runtime-qa] summary ok=4 warn=5 fail=3 status=fail
+[runtime-qa] [service:debug:ranking-service:state] symbolsProcessed=0 after multiple runs
+[runtime-qa] [symbol:BTCUSDT] price missing
+[runtime-qa] [symbol:ETHUSDT] price missing
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[correlationService] tick #2: 400 symbols, 2760 records, 1437ms
+[monitor] summary symbols=0 levels=0 approaching=0 touched=0 breakout=0 bounce=0
+[impulse] summary tick=60 warmed=498/498 detected=0 total=0
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] activeLevels=1 symbols=1 simple=0 early=0 total=0 stored=0 telegram=0 filteredCD=0
+[alerts] summary processed=498 new=0 total=137 recentFeed=500
+[alert.published] id=MEUSDT-market_in_play-1777141317544-generic type=market_in_play symbol=MEUSDT priority=high
+[telegram] skipped type=market_in_play symbol=MEUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=ANKRUSDT-market_in_play-1777141317544-generic type=market_in_play symbol=ANKRUSDT priority=high
+[telegram] skipped type=market_in_play symbol=ANKRUSDT reason=disabled_by_config
+[alert.published] id=TRADOORUSDT-market_in_play-1777141317544-generic type=market_in_play symbol=TRADOORUSDT priority=high
+[telegram] skipped type=market_in_play symbol=TRADOORUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=1000SHIBUSDT-market_in_play-1777141318540-generic type=market_in_play symbol=1000SHIBUSDT priority=high
+[telegram] skipped type=market_in_play symbol=1000SHIBUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=ZRXUSDT-market_in_play-1777141319544-generic type=market_in_play symbol=ZRXUSDT priority=high
+[telegram] skipped type=market_in_play symbol=ZRXUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=NVDAUSDT-market_in_play-1777141321543-generic type=market_in_play symbol=NVDAUSDT priority=high
+[telegram] skipped type=market_in_play symbol=NVDAUSDT reason=disabled_by_config
+[alert.published] id=TUTUSDT-market_in_play-1777141321543-generic type=market_in_play symbol=TUTUSDT priority=high
+[telegram] skipped type=market_in_play symbol=TUTUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=LINEAUSDT-market_in_play-1777141322540-generic type=market_in_play symbol=LINEAUSDT priority=high
+[telegram] skipped type=market_in_play symbol=LINEAUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[barAggregatorService] tick barTs=2026-04-25T18:21:00.000Z futures=498/498 spot=217/218 missing(metrics=0 ohlc=0) loopMs=70
+[alert.published] id=ICPUSDT-market_in_play-1777141325544-generic type=market_in_play symbol=ICPUSDT priority=high
+[telegram] skipped type=market_in_play symbol=ICPUSDT reason=disabled_by_config
+[alert.published] id=JOEUSDT-market_in_play-1777141325544-generic type=market_in_play symbol=JOEUSDT priority=high
+[telegram] skipped type=market_in_play symbol=JOEUSDT reason=disabled_by_config
+[alert.published] id=CELOUSDT-market_in_play-1777141325544-generic type=market_in_play symbol=CELOUSDT priority=high
+[telegram] skipped type=market_in_play symbol=CELOUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[alert.published] id=USELESSUSDT-market_in_play-1777141325544-generic type=market_in_play symbol=USELESSUSDT priority=high
+[telegram] skipped type=market_in_play symbol=USELESSUSDT reason=disabled_by_config
+[alert.published] id=XVGUSDT-market_in_play-1777141326541-generic type=market_in_play symbol=XVGUSDT priority=high
+[telegram] skipped type=market_in_play symbol=XVGUSDT reason=disabled_by_config
+[alert.published] id=KNCUSDT-market_in_play-1777141326541-generic type=market_in_play symbol=KNCUSDT priority=high
+[telegram] skipped type=market_in_play symbol=KNCUSDT reason=disabled_by_config
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab
+[watch-engine] popup_primary APEUSDT manual-152 status=approaching priority=1 source=manual scope=tab

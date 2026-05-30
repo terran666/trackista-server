@@ -16,19 +16,24 @@
  */
 
 const { rowToEvent } = require('./levelWatchRoute');
+const { safeSymbol } = require('../utils/parseClamp');
 
 function createLevelEventsRouter(db) {
   const express = require('express');
   const router  = express.Router();
 
   router.get('/', async (req, res) => {
-    const symbol    = req.query.symbol    ? req.query.symbol.toUpperCase()   : null;
+    const symbol    = req.query.symbol    ? safeSymbol(req.query.symbol)     : null;
     const market    = req.query.market    || null;
     const eventType = req.query.eventType || null;
     const from      = req.query.from      ? parseInt(req.query.from, 10)     : null;
     const to        = req.query.to        ? parseInt(req.query.to, 10)       : null;
     const limit     = Math.max(1, Math.min(parseInt(req.query.limit || '50', 10) || 50, 500));
     const cursor    = req.query.cursor   ? parseInt(req.query.cursor, 10)    : null;
+
+    if (req.query.symbol && !symbol) {
+      return res.status(400).json({ success: false, error: 'symbol must match /^[A-Z0-9]{3,20}$/' });
+    }
 
     if (from !== null && (isNaN(from) || from <= 0)) {
       return res.status(400).json({ success: false, error: 'from must be a positive timestamp (ms)' });

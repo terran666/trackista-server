@@ -350,14 +350,13 @@ function passesFilters(row, filters) {
 async function runPipeline(redis, alertSinceMs) {
   const t0 = Date.now();
 
-  // ── Round 1: singletons ──────────────────────────────────────────
-  const symbolsRaw = await redis.get('symbols:active:usdt');
+  // ── Round 1: singletons (one mget = one RTT instead of two sequential GETs) ──
+  const [symbolsRaw, tickersRaw] = await redis.mget('symbols:active:usdt', 'futures:tickers:all');
   if (!symbolsRaw) return null;
 
   const symbols  = tryParse(symbolsRaw) || [];
   if (!symbols.length) return { symbols: [], raw: [], tickerMap: new Map(), alertMap: new Map(), pipelineMs: 0 };
 
-  const tickersRaw = await redis.get('futures:tickers:all');
   const tickers    = tryParse(tickersRaw) || [];
   const tickerMap  = new Map();
   for (const t of tickers) if (t.symbol) tickerMap.set(t.symbol, t);

@@ -31,6 +31,17 @@ const {
   FUTURES_WALL_ABSENCE_GRACE_MS,
   FUTURES_CONFIRMED_WALL_ABSENCE_GRACE_MS,
   FUTURES_WALL_SCAN_MS,
+  // v3 adaptive wall algorithm
+  WALL_SCAN_DISTANCE_PCT,
+  WALL_P95_MULTIPLIER,
+  WALL_LOCAL_WINDOW_LEVELS,
+  WALL_LOCAL_MULTIPLIER,
+  WALL_MEDIAN_MULTIPLIER,
+  WALL_DEPTH_RATIO,
+  WALL_SIMILAR_LEVELS_LIMIT,
+  WALL_POWER_SOFT_MIN,
+  WALL_POWER_STRONG_MIN,
+  WALL_POWER_EXTREME_MIN,
 } = require('./densityFuturesConfig');
 
 // ─── Threshold lookup ──────────────────────────────────────────────
@@ -88,7 +99,59 @@ const droppedHistory = new Map();
 const presenceMemoryMap = new Map();
 const PRESENCE_MEMORY_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Map<symbol, { bid, ask, bidAdaptiveThresh, askAdaptiveThresh, avgDepthNear1PctUsd, midPrice, updatedAt }>
+// Written every scanAndUpdate() tick; read by buildWallStatsPayload / buildBestWallPayload.
+const wallStatsMap = new Map();
+
 const MAX_DROPPED_HISTORY = 20;
+
+// ─── Wall event queue ─────────────────────────────────────────────
+// Map<symbol, Array<wallEvent>>
+// Events are accumulated between flush ticks and drained by the collector
+// via getAndClearPendingEvents().
+const pendingEventsMap = new Map();
+const MAX_PENDING_EVENTS = 200; // per symbol — hard cap to avoid unbounded growth
+
+/**
+ * Emit a wall lifecycle event for a symbol.
+ * @param {string} symbol
+ * @param {string} status  new|confirmed|persistent|dropped|increased|decreased|suspicious_spoof
+ * @param {object} cand    candidate/dropped object
+ * @param {number} [now]
+ */
+function _emitWallEvent(symbol, status, cand, now = Date.now()) {
+  let arr = pendingEventsMap.get(symbol);
+  if (!arr) { arr = []; pendingEventsMap.set(symbol, arr); }
+  if (arr.length >= MAX_PENDING_EVENTS) return; // safety cap
+  const threshold = getFuturesWallThreshold(symbol);
+  arr.push({
+    id:          `${symbol}:${cand.side}:${cand.price}:${now}`,
+    ts:          now,
+    marketType:  'futures',
+    symbol,
+    side:        cand.side,
+    price:       cand.price,
+    sizeUsdt:    cand.currentUsdValue ?? cand.usdValue ?? 0,
+    type:        'limit',
+    status,
+    strength:    parseFloat(((cand.currentUsdValue ?? cand.usdValue ?? 0) / Math.max(threshold, 1)).toFixed(2)),
+    distancePct: parseFloat((cand.distancePct ?? 0).toFixed(4)),
+    lifetimeMs:  cand.firstSeenTs ? now - cand.firstSeenTs : 0,
+  });
+}
+
+/**
+ * Return and clear all pending wall events for a symbol.
+ * Called by the collector's flush timer to write events to Redis.
+ * @param {string} symbol
+ * @returns {Array}
+ */
+function getAndClearPendingEvents(symbol) {
+  const arr = pendingEventsMap.get(symbol);
+  if (!arr || arr.length === 0) return [];
+  pendingEventsMap.set(symbol, []);
+  return arr;
+}
 
 // ─── Candidate constructor ─────────────────────────────────────────
 
@@ -110,11 +173,18 @@ function makeCandidate(symbol, side, price, normPrice, usdValue, size, distanceP
     distancePct,
     deepWall,                     // true when usdValue >= threshold × FUTURES_DEEP_WALL_MULTIPLIER
     status:                'candidate',
-    // Scoring fields — computed each scan tick
+    // v2 scores (kept for backward compat)
     qualityScore:          0,
     bounceScore:           0,
     breakoutScore:         0,
     spoofScore:            0,
+    // v3 adaptive wall analytics (updated each tick from current orderbook stats)
+    wallPower:             0,
+    wallCategory:          null,
+    lastP95Usd:            0,
+    lastLocalMedianUsd:    0,
+    lastSimilarLevelsCount: 0,
+    lastAdaptiveThreshold: 0,
     // Behaviour tracking
     refillCount:           0,
     touchCount:            0,
@@ -150,6 +220,8 @@ function dropCandidate(symbol, wallKey, candidate, reason, now) {
     pmSym.set(wallKey, { accMs: candidate.accumulatedPresenceMs, maxUsdValue: candidate.maxUsdValue, droppedAt: now });
   }
 
+  _emitWallEvent(symbol, 'dropped', { ...candidate, lifetimeMs: now - candidate.firstSeenTs }, now);
+
   const map = candidateMap.get(symbol);
   if (map) map.delete(wallKey);
 
@@ -157,6 +229,172 @@ function dropCandidate(symbol, wallKey, candidate, reason, now) {
     `[futures-walls] ${symbol}: dropped (${reason}) — ${candidate.side} @ ${candidate.price}` +
     ` accPresence=${Math.round(candidate.accumulatedPresenceMs / 1000)}s`,
   );
+}
+
+// ─── v3 Statistical helpers ────────────────────────────────────────────────
+
+/**
+ * Return the p-th percentile (0–1) from a pre-sorted ascending array.
+ * e.g. p=0.95 → 95th percentile.
+ */
+function _percentile(sortedAsc, p) {
+  if (!sortedAsc.length) return 0;
+  const idx = Math.ceil(p * sortedAsc.length) - 1;
+  return sortedAsc[Math.max(0, Math.min(idx, sortedAsc.length - 1))];
+}
+
+/**
+ * Compute order-size statistics for one orderbook side.
+ * @param {{ usdValue: number }[]} levels  All levels for this side (any order).
+ * @returns {{ p50, p75, p90, p95, avg, max, levelCount }}
+ */
+function _computeSideStats(levels) {
+  if (!levels.length) return { p50: 0, p75: 0, p90: 0, p95: 0, avg: 0, max: 0, levelCount: 0 };
+  const sorted = levels.map(l => l.usdValue).sort((a, b) => a - b);
+  const sum    = sorted.reduce((s, v) => s + v, 0);
+  return {
+    p50:        _percentile(sorted, 0.50),
+    p75:        _percentile(sorted, 0.75),
+    p90:        _percentile(sorted, 0.90),
+    p95:        _percentile(sorted, 0.95),
+    avg:        sum / sorted.length,
+    max:        sorted[sorted.length - 1],
+    levelCount: sorted.length,
+  };
+}
+
+/**
+ * Compute the adaptive wall threshold for one orderbook side.
+ *
+ *   adaptiveThreshold = max(
+ *     staticMinWallUsd,
+ *     p95OrderUsd   × WALL_P95_MULTIPLIER,
+ *     medianOrderUsd × WALL_MEDIAN_MULTIPLIER,
+ *     avgDepthNear1Pct × WALL_DEPTH_RATIO,
+ *   )
+ *
+ * @param {number} staticMin         Per-symbol static floor (getFuturesWallThreshold)
+ * @param {{ p50, p95 }} sideStats
+ * @param {number} avgDepthNear1Pct  (bid_depth_within_1pct + ask_depth_within_1pct) / 2
+ * @returns {number}
+ */
+function _computeAdaptiveThreshold(staticMin, sideStats, avgDepthNear1Pct) {
+  return Math.max(
+    staticMin,
+    sideStats.p95  * WALL_P95_MULTIPLIER,
+    sideStats.p50  * WALL_MEDIAN_MULTIPLIER,
+    avgDepthNear1Pct * WALL_DEPTH_RATIO,
+  );
+}
+
+/**
+ * Compute the median usdValue of the ±window neighbors of a level at `idx`
+ * in the price-sorted `sideArray`.  The candidate itself is excluded.
+ *
+ * @param {{ usdValue: number }[]} sideArray  Sorted by price (any direction).
+ * @param {number} idx
+ * @param {number} window  Number of levels each side to include.
+ * @returns {number}
+ */
+function _computeLocalMedian(sideArray, idx, window) {
+  const start     = Math.max(0, idx - window);
+  const end       = Math.min(sideArray.length - 1, idx + window);
+  const neighbors = [];
+  for (let i = start; i <= end; i++) {
+    if (i !== idx) neighbors.push(sideArray[i].usdValue);
+  }
+  if (!neighbors.length) return 0;
+  neighbors.sort((a, b) => a - b);
+  return _percentile(neighbors, 0.50);
+}
+
+/**
+ * Count how many levels on this side have a usdValue "similar" to candidateUsd
+ * (within ±35%).  A high count means the candidate is part of a cluster and
+ * should not be treated as a unique wall.
+ *
+ * @param {{ usdValue: number }[]} sideArray
+ * @param {number} candidateUsd
+ * @returns {number}
+ */
+function _computeSimilarLevelsCount(sideArray, candidateUsd) {
+  const lo = candidateUsd * 0.65;
+  const hi = candidateUsd * 1.35;
+  return sideArray.filter(l => l.usdValue >= lo && l.usdValue <= hi).length;
+}
+
+/**
+ * Compute wallPower ∈ [0, 1] for a confirmed/persistent wall.
+ *
+ *   wallPower =
+ *     0.35 × p95RatioScore
+ *   + 0.30 × localRatioScore
+ *   + 0.15 × distanceScore
+ *   + 0.10 × lifetimeScore
+ *   + 0.10 × isolationScore
+ *
+ * @param {{
+ *   usdValue: number,
+ *   p95Usd: number,
+ *   localMedianUsd: number,
+ *   distancePct: number,
+ *   lifetimeMs: number,
+ *   similarLevelsCount: number,
+ * }} params
+ * @returns {number}
+ */
+function _computeWallPower({ usdValue, p95Usd, localMedianUsd, distancePct, lifetimeMs, similarLevelsCount }) {
+  // p95RatioScore: p95Ratio = usdValue / p95Usd;  3× p95 = 1.0
+  const p95Ratio       = p95Usd > 0 ? usdValue / p95Usd : 0;
+  const p95RatioScore  = Math.min(p95Ratio / 3, 1);
+
+  // localRatioScore: 5× local median = 1.0
+  const localRatio      = localMedianUsd > 0 ? usdValue / localMedianUsd : 0;
+  const localRatioScore = Math.min(localRatio / 5, 1);
+
+  // distanceScore (step function per ТЗ)
+  let distanceScore;
+  if      (distancePct <= 0.5) distanceScore = 1.0;
+  else if (distancePct <= 1.0) distanceScore = 0.8;
+  else if (distancePct <= 2.0) distanceScore = 0.6;
+  else if (distancePct <= 5.0) distanceScore = 0.3;
+  else                         distanceScore = 0;
+
+  // lifetimeScore: 0s→0, 20s→0.4, 60s→0.7, 180s→1.0
+  const lifeSec = lifetimeMs / 1000;
+  let lifetimeScore;
+  if      (lifeSec >= 180) lifetimeScore = 1.0;
+  else if (lifeSec >= 60)  lifetimeScore = 0.7 + (lifeSec - 60)  / 120 * 0.3;
+  else if (lifeSec >= 20)  lifetimeScore = 0.4 + (lifeSec - 20)  / 40  * 0.3;
+  else                     lifetimeScore = (lifeSec / 20)         * 0.4;
+
+  // isolationScore: 1 similar → 1.0; WALL_SIMILAR_LEVELS_LIMIT → 0.0
+  const denom         = Math.max(WALL_SIMILAR_LEVELS_LIMIT - 1, 1);
+  const isolationScore = Math.max(0, 1 - (similarLevelsCount - 1) / denom);
+
+  const wallPower = Math.min(
+    0.35 * p95RatioScore  +
+    0.30 * localRatioScore +
+    0.15 * distanceScore   +
+    0.10 * lifetimeScore   +
+    0.10 * isolationScore,
+    1,
+  );
+  return parseFloat(wallPower.toFixed(4));
+}
+
+/**
+ * Return the wall category string for a given wallPower value.
+ * Returns null when the wall is below SOFT_WALL threshold.
+ *
+ * @param {number} wallPower
+ * @returns {'EXTREME_WALL'|'STRONG_WALL'|'SOFT_WALL'|null}
+ */
+function _getWallCategory(wallPower) {
+  if (wallPower >= WALL_POWER_EXTREME_MIN) return 'EXTREME_WALL';
+  if (wallPower >= WALL_POWER_STRONG_MIN)  return 'STRONG_WALL';
+  if (wallPower >= WALL_POWER_SOFT_MIN)    return 'SOFT_WALL';
+  return null;
 }
 
 // ─── Main scan & update ────────────────────────────────────────────
@@ -180,9 +418,6 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
   if (!midPrice || midPrice <= 0) return;
 
   // ── Prune expired presence-memory entries for this symbol ────────────────
-  // presenceMemoryMap entries are written on dropCandidate() and consumed when
-  // the same wall reappears.  Without explicit TTL cleanup the map grows without
-  // bound for symbols whose walls disappear and never return.
   const _pmCleanup = presenceMemoryMap.get(symbol);
   if (_pmCleanup) {
     for (const [key, mem] of _pmCleanup) {
@@ -190,59 +425,109 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
     }
   }
 
-  const threshold       = getFuturesWallThreshold(symbol);
+  const staticThreshold = getFuturesWallThreshold(symbol);
 
-  // Smooth linear distance scaling:
-  //   effectiveMaxDist = min(BASE + (ratio-1) * SCALE, HARD_CAP)
-  // where ratio = usdValue / threshold.
-  // This lets large walls be visible far from the current price,
-  // scaling proportionally rather than with a hard binary cutoff.
-  function effectiveDistCap(usdValue) {
-    const ratio = usdValue / threshold;
-    return Math.min(
-      FUTURES_MAX_WALL_DISTANCE_PCT + (ratio - 1) * FUTURES_DIST_SCALE_PER_MULTIPLIER,
-      FUTURES_DEEP_WALL_MAX_DISTANCE_PCT,
-    );
-  }
-
-  // ── Build the set of qualifying levels this tick ─────────────────
-  // Map<wallKey, { price, normPrice, size, usdValue, side, distancePct, deepWall }>
-  const activeLevels = new Map();
+  // ── v3 Pre-pass: collect all levels within WALL_SCAN_DISTANCE_PCT ─────────
+  // Build price-sorted arrays (closest-to-mid first) so local statistics can
+  // use array index as a proxy for price adjacency.
+  //
+  //  bidLevels: sorted highest-price first (closest bid = best bid = index 0)
+  //  askLevels: sorted lowest-price  first (closest ask = best ask = index 0)
+  //
+  const bidLevels = [];  // { price, size, usdValue, dist }
+  const askLevels = [];
+  let   depthNear1PctTotal = 0;   // total USD for both sides within 1% of mid
 
   for (const [priceStr, size] of bids) {
     if (size <= 0) continue;
     const price    = parseFloat(priceStr);
-    const usdValue = price * size;
-    if (usdValue < threshold) continue;
     const dist     = ((midPrice - price) / midPrice) * 100;
-    if (dist < 0) continue;
-    if (dist > effectiveDistCap(usdValue)) continue;
-    const deepWall  = usdValue >= threshold * FUTURES_DEEP_WALL_MULTIPLIER_FLAG;
-    const normPrice = normalizePrice(price, symbol);
-    const key = `${symbol}:bid:${normPrice}`;
-    // If multiple raw prices collapse to the same normalised bucket, keep highest usdValue
-    const existing = activeLevels.get(key);
-    if (!existing || usdValue > existing.usdValue) {
-      activeLevels.set(key, { price, normPrice, size, usdValue, side: 'bid', distancePct: dist, deepWall });
-    }
+    if (dist < 0 || dist > WALL_SCAN_DISTANCE_PCT) continue;
+    const usdValue = price * size;
+    bidLevels.push({ price, size, usdValue, dist });
+    if (dist <= 1.0) depthNear1PctTotal += usdValue;
   }
-
   for (const [priceStr, size] of asks) {
     if (size <= 0) continue;
     const price    = parseFloat(priceStr);
-    const usdValue = price * size;
-    if (usdValue < threshold) continue;
     const dist     = ((price - midPrice) / midPrice) * 100;
-    if (dist < 0) continue;
-    if (dist > effectiveDistCap(usdValue)) continue;
-    const deepWall  = usdValue >= threshold * FUTURES_DEEP_WALL_MULTIPLIER_FLAG;
-    const normPrice = normalizePrice(price, symbol);
-    const key = `${symbol}:ask:${normPrice}`;
-    const existing = activeLevels.get(key);
-    if (!existing || usdValue > existing.usdValue) {
-      activeLevels.set(key, { price, normPrice, size, usdValue, side: 'ask', distancePct: dist, deepWall });
-    }
+    if (dist < 0 || dist > WALL_SCAN_DISTANCE_PCT) continue;
+    const usdValue = price * size;
+    askLevels.push({ price, size, usdValue, dist });
+    if (dist <= 1.0) depthNear1PctTotal += usdValue;
   }
+
+  // Sort: closest to mid first (bids ↓ price, asks ↑ price)
+  bidLevels.sort((a, b) => b.price - a.price);
+  askLevels.sort((a, b) => a.price - b.price);
+
+  const avgDepthNear1Pct = depthNear1PctTotal / 2;
+  const bidStats         = _computeSideStats(bidLevels);
+  const askStats         = _computeSideStats(askLevels);
+  const bidAdaptiveThresh = _computeAdaptiveThreshold(staticThreshold, bidStats, avgDepthNear1Pct);
+  const askAdaptiveThresh = _computeAdaptiveThreshold(staticThreshold, askStats, avgDepthNear1Pct);
+
+  // Store for payload builders
+  wallStatsMap.set(symbol, {
+    bid: bidStats, ask: askStats,
+    bidAdaptiveThresh, askAdaptiveThresh,
+    avgDepthNear1Pct,
+    midPrice, updatedAt: now,
+  });
+
+  // ── v3 Build qualifying active levels ─────────────────────────────────────
+  // Qualification criteria:
+  //   1. sizeUsd >= adaptiveThreshold   (adaptive: p95×1.5 / median×4 / depth×3%)
+  //   2. sizeUsd >= localMedianUsd × WALL_LOCAL_MULTIPLIER  (3× local neighborhood)
+  //   3. distancePct <= WALL_SCAN_DISTANCE_PCT  (5% flat — no dynamic scaling)
+  //
+  // Levels that pass become candidates; the lifecycle state machine then handles
+  // the temporal minimum (FUTURES_MIN_WALL_LIFETIME_MS) before confirmation.
+  //
+  const activeLevels = new Map();
+
+  const _qualifyOneSide = (sideArray, side, adaptiveThresh) => {
+    for (let i = 0; i < sideArray.length; i++) {
+      const level = sideArray[i];
+      const { price, size, usdValue, dist } = level;
+
+      // Hard filter 1: adaptive threshold
+      if (usdValue < adaptiveThresh) continue;
+
+      // Hard filter 2: local anomaly vs neighborhood
+      const localMedianUsd = _computeLocalMedian(sideArray, i, WALL_LOCAL_WINDOW_LEVELS);
+      if (localMedianUsd > 0 && usdValue < localMedianUsd * WALL_LOCAL_MULTIPLIER) continue;
+
+      // Compute isolation metric.
+      // Hard filter 3: reject levels that are part of a dense cluster of similar-sized
+      // orders — they represent normal liquidity depth, not anomalous walls.
+      // (WALL_SIMILAR_LEVELS_LIMIT default=5: reject if 6+ similar-sized levels exist)
+      const similarLevelsCount = _computeSimilarLevelsCount(sideArray, usdValue);
+      if (similarLevelsCount > WALL_SIMILAR_LEVELS_LIMIT) continue;
+
+      const deepWall  = usdValue >= staticThreshold * FUTURES_DEEP_WALL_MULTIPLIER_FLAG;
+      const normPrice = normalizePrice(price, symbol);
+      const key       = `${symbol}:${side}:${normPrice}`;
+
+      // If multiple raw prices collapse to the same normalised bucket, keep highest usdValue
+      const existing = activeLevels.get(key);
+      if (!existing || usdValue > existing.usdValue) {
+        activeLevels.set(key, {
+          price, normPrice, size, usdValue, side,
+          distancePct:         dist,
+          deepWall,
+          // v3 analytics stored on the level for propagation to candidate
+          p95Usd:              (side === 'bid' ? bidStats.p95 : askStats.p95),
+          localMedianUsd,
+          similarLevelsCount,
+          adaptiveThreshold:   adaptiveThresh,
+        });
+      }
+    }
+  };
+
+  _qualifyOneSide(bidLevels, 'bid', bidAdaptiveThresh);
+  _qualifyOneSide(askLevels, 'ask', askAdaptiveThresh);
 
   // ── Ensure state map for this symbol ────────────────────────────
   if (!candidateMap.has(symbol)) {
@@ -256,27 +541,47 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
     cand._prevScanTs = now;
 
     if (activeLevels.has(wallKey)) {
-      // Wall present & above threshold this tick
-      const level = activeLevels.get(wallKey);
+      // Wall present & above adaptive threshold this tick
+      const level   = activeLevels.get(wallKey);
       const prevUsd = cand.currentUsdValue;
       cand.accumulatedPresenceMs += scanInterval;
-      cand.lastSeenTs      = now;
-      cand.currentUsdValue = level.usdValue;
-      cand.currentSize     = level.size;
-      cand.distancePct     = level.distancePct;
-      cand.deepWall        = level.deepWall;
+      cand.lastSeenTs       = now;
+      cand.currentUsdValue  = level.usdValue;
+      cand.currentSize      = level.size;
+      cand.distancePct      = level.distancePct;
+      cand.deepWall         = level.deepWall;
       if (level.usdValue > cand.maxUsdValue) cand.maxUsdValue = level.usdValue;
       // Detect refill: USD value recovered after dropping by >20%
       if (prevUsd > 0 && cand.currentUsdValue > prevUsd * 1.2) cand.refillCount++;
       cand.hitCount++;
-      cand.missingSinceTs  = null;
+      cand.missingSinceTs = null;
+
+      // Update v3 analytics from current scan
+      cand.lastP95Usd             = level.p95Usd;
+      cand.lastLocalMedianUsd     = level.localMedianUsd;
+      cand.lastSimilarLevelsCount = level.similarLevelsCount;
+      cand.lastAdaptiveThreshold  = level.adaptiveThreshold;
+
+      // Emit increased/decreased events for confirmed/persistent walls only (30s cooldown)
+      if (
+        (cand.status === 'confirmed' || cand.status === 'persistent') &&
+        prevUsd > 0 &&
+        (!cand._lastSizeEventTs || now - cand._lastSizeEventTs >= 30_000)
+      ) {
+        const changePct = (cand.currentUsdValue - prevUsd) / prevUsd;
+        if (changePct > 0.20) {
+          _emitWallEvent(symbol, 'increased', cand, now);
+          cand._lastSizeEventTs = now;
+        } else if (changePct < -0.20) {
+          _emitWallEvent(symbol, 'decreased', cand, now);
+          cand._lastSizeEventTs = now;
+        }
+      }
     } else {
-      // Wall absent or below threshold this tick — start/extend absence timer.
-      // Confirmed walls get a longer grace period to survive brief disappearances
-      // (spoofing / iceberg / market-maker repositioning).
+      // Wall absent or below adaptive threshold this tick — start/extend absence timer.
       if (cand.missingSinceTs === null) cand.missingSinceTs = now;
       const absentMs = now - cand.missingSinceTs;
-      const graceMs = cand.status === 'confirmed'
+      const graceMs  = cand.status === 'confirmed'
         ? FUTURES_CONFIRMED_WALL_ABSENCE_GRACE_MS
         : FUTURES_WALL_ABSENCE_GRACE_MS;
       if (absentMs > graceMs) {
@@ -293,9 +598,10 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
         ` presence=${Math.round(cand.accumulatedPresenceMs / 1000)}s` +
         ` usd=${Math.round(cand.maxUsdValue).toLocaleString()}`,
       );
+      _emitWallEvent(symbol, 'confirmed', cand, now);
     }
 
-    // Promote confirmed → persistent once additional presence milestone reached
+    // Promote confirmed → persistent
     if (cand.status === 'confirmed' && cand.accumulatedPresenceMs >= FUTURES_WALL_PERSISTENT_MS) {
       cand.status = 'persistent';
       console.log(
@@ -303,10 +609,15 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
         ` presence=${Math.round(cand.accumulatedPresenceMs / 1000)}s` +
         ` usd=${Math.round(cand.maxUsdValue).toLocaleString()}`,
       );
+      _emitWallEvent(symbol, 'persistent', cand, now);
     }
 
-    // Compute scores each tick (lightweight)
-    _computeScores(cand, getFuturesWallThreshold(symbol), now);
+    // Compute scores (v2 quality + v3 wallPower)
+    const prevSpoof = cand.isSuspiciousSpoof;
+    _computeScores(cand, staticThreshold, now);
+    if (!prevSpoof && cand.isSuspiciousSpoof) {
+      _emitWallEvent(symbol, 'suspicious_spoof', cand, now);
+    }
   }
 
   // ── Add newly seen levels as candidates ─────────────────────────
@@ -325,12 +636,18 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
         now,
       );
 
+      // Populate v3 fields immediately from the first scan
+      cand.lastP95Usd             = level.p95Usd;
+      cand.lastLocalMedianUsd     = level.localMedianUsd;
+      cand.lastSimilarLevelsCount = level.similarLevelsCount;
+      cand.lastAdaptiveThreshold  = level.adaptiveThreshold;
+
       // Restore accumulated presence from memory if the same wall was recently dropped
       const mem = pmSym?.get(wallKey);
       if (mem && (now - mem.droppedAt) < PRESENCE_MEMORY_TTL_MS) {
         cand.accumulatedPresenceMs = mem.accMs;
         cand.maxUsdValue = Math.max(mem.maxUsdValue, level.usdValue);
-        pmSym.delete(wallKey); // consume memory entry
+        pmSym.delete(wallKey);
         console.log(
           `[futures-walls] ${symbol}: resumed — ${level.side} @ ${level.price}` +
           ` restored=${Math.round(mem.accMs / 1000)}s usd=${Math.round(level.usdValue).toLocaleString()}`,
@@ -340,14 +657,12 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
           `[futures-walls] ${symbol}: new candidate — ${level.side} @ ${level.price}` +
           ` usd=${Math.round(level.usdValue).toLocaleString()} dist=${level.distancePct.toFixed(2)}%`,
         );
+        _emitWallEvent(symbol, 'new', cand, now);
       }
-
       symMap.set(wallKey, cand);
     }
   }
 }
-
-// ─── Scoring ────────────────────────────────────────────────────────
 
 /**
  * Compute quality / bounce / breakout / spoof scores in-place on a candidate.
@@ -402,6 +717,23 @@ function _computeScores(cand, threshold, now) {
   // High if: wall usd has been declining (being absorbed), only 1 side keeps showing
   const usdDecline   = cand.maxUsdValue > 0 ? Math.max(0, (cand.maxUsdValue - cand.currentUsdValue) / cand.maxUsdValue) : 0;
   cand.breakoutScore = Math.min(Math.round(usdDecline * 80) + (cand.absorptionUsd > threshold ? 20 : 0), 100);
+
+  // ── v3 wallPower (0–1.0) and wallCategory ────────────────────────
+  // Computed only for confirmed/persistent walls; candidates get 0/null.
+  if (cand.status === 'confirmed' || cand.status === 'persistent') {
+    cand.wallPower = _computeWallPower({
+      usdValue:           cand.currentUsdValue,
+      p95Usd:             cand.lastP95Usd            ?? 0,
+      localMedianUsd:     cand.lastLocalMedianUsd     ?? 0,
+      distancePct:        cand.distancePct,
+      lifetimeMs:         now - cand.firstSeenTs,
+      similarLevelsCount: cand.lastSimilarLevelsCount ?? 0,
+    });
+    cand.wallCategory = _getWallCategory(cand.wallPower);
+  } else {
+    cand.wallPower    = 0;
+    cand.wallCategory = null;
+  }
 }
 
 // ─── Additional accessors ────────────────────────────────────────────────────
@@ -454,35 +786,72 @@ function buildPublicWallsPayload(symbol, midPrice, now = Date.now(), metadata = 
   const confirmed = getConfirmedWalls(symbol);
 
   const walls = confirmed.map(c => ({
-    side:          c.side,
-    price:         c.price,
-    size:          c.currentSize,
-    usdValue:      c.currentUsdValue,
-    distancePct:   parseFloat(c.distancePct.toFixed(4)),
-    strength:      parseFloat((c.currentUsdValue / threshold).toFixed(2)),
-    deepWall:      c.deepWall ?? false,
-    firstSeenTs:   c.firstSeenTs,
-    lastSeenTs:    c.lastSeenTs,
-    lifetimeMs:    now - c.firstSeenTs,
-    accPresenceMs: c.accumulatedPresenceMs,
-    status:        c.status,
-    qualityScore:  c.qualityScore  ?? 0,
-    bounceScore:   c.bounceScore   ?? 0,
-    breakoutScore: c.breakoutScore ?? 0,
-    spoofScore:    c.spoofScore    ?? 0,
-    isSuspiciousSpoof: c.isSuspiciousSpoof ?? false,
-    refillCount:   c.refillCount   ?? 0,
-    sourceUniverse: c.sourceUniverse ?? 'futures',
+    // Core identity
+    wallId:             `${symbol}:${c.side}:${c.price}`,
+    side:               c.side,
+    price:              c.price,
+    // Size fields (aliased for compatibility)
+    size:               c.currentSize,
+    qty:                c.currentSize,
+    usdValue:           c.currentUsdValue,
+    sizeUsd:            c.currentUsdValue,
+    distancePct:        parseFloat(c.distancePct.toFixed(4)),
+    // v3 adaptive analytics
+    wallPower:          c.wallPower          ?? 0,
+    wallCategory:       c.wallCategory       ?? null,
+    p95Ratio:           c.lastP95Usd > 0 ? parseFloat((c.currentUsdValue / c.lastP95Usd).toFixed(3)) : 0,
+    localRatio:         c.lastLocalMedianUsd > 0 ? parseFloat((c.currentUsdValue / c.lastLocalMedianUsd).toFixed(3)) : 0,
+    similarLevelsCount: c.lastSimilarLevelsCount ?? 0,
+    adaptiveThreshold:  Math.round(c.lastAdaptiveThreshold ?? 0),
+    localMedianUsd:     Math.round(c.lastLocalMedianUsd    ?? 0),
+    sideP95Usd:         Math.round(c.lastP95Usd            ?? 0),
+    // Legacy fields kept for backward compatibility
+    strength:           parseFloat((c.currentUsdValue / threshold).toFixed(2)),
+    deepWall:           c.deepWall ?? false,
+    firstSeenAt:        c.firstSeenTs,
+    lastSeenAt:         c.lastSeenTs,
+    firstSeenTs:        c.firstSeenTs,
+    lastSeenTs:         c.lastSeenTs,
+    lifetimeMs:         now - c.firstSeenTs,
+    accPresenceMs:      c.accumulatedPresenceMs,
+    status:             c.status,
+    qualityScore:       c.qualityScore       ?? 0,
+    bounceScore:        c.bounceScore        ?? 0,
+    breakoutScore:      c.breakoutScore      ?? 0,
+    spoofScore:         c.spoofScore         ?? 0,
+    isSuspiciousSpoof:  c.isSuspiciousSpoof  ?? false,
+    refillCount:        c.refillCount        ?? 0,
+    sourceUniverse:     c.sourceUniverse     ?? 'futures',
   }));
 
-  walls.sort((a, b) => b.usdValue - a.usdValue);
+  // Top-level aggregates for universe builder + DensityCoinList
+  const totalConfirmedCount  = walls.length;          // all confirmed/persistent (for debug)
+  const candidateCount       = getCandidates(symbol).filter(c => c.status === 'candidate').length;
+  const significantWalls     = walls.filter(w => w.wallPower >= WALL_POWER_STRONG_MIN);
+  const significantWallCount = significantWalls.length;
+  const sortedByPower        = [...walls].sort((a, b) => b.wallPower - a.wallPower);
+  const bestWallEntry        = sortedByPower[0] ?? null;
+
+  // ── Filter public walls to only those with meaningful wallPower ────────────
+  // Walls below WALL_POWER_SOFT_MIN are confirmed by lifecycle but not anomalous
+  // enough to display. This prevents clusters of similar-sized levels from
+  // inflating the public wall count (e.g. BTC W=40 should be W=0-3).
+  const visibleWalls = walls.filter(w => w.wallPower >= WALL_POWER_SOFT_MIN);
+
+  // Sort for display: highest USD first
+  visibleWalls.sort((a, b) => b.usdValue - a.usdValue);
 
   return {
     symbol,
     marketType:           'futures',
     midPrice,
-    wallThresholds:       { base: threshold, source: 'symbol-fixed-threshold' },
-    walls,
+    wallThresholds:       { base: threshold, source: 'adaptive' },
+    walls:                visibleWalls,
+    totalConfirmedCount,
+    candidateCount,
+    significantWallCount,
+    bestWallPower:        bestWallEntry?.wallPower ?? 0,
+    bestWallUsd:          bestWallEntry?.usdValue  ?? 0,
     updatedAt:            now,
     minVisibleLifetimeMs: FUTURES_MIN_WALL_LIFETIME_MS,
     scanIntervalMs:       FUTURES_WALL_SCAN_MS,
@@ -613,6 +982,84 @@ function restorePresenceMemory(symbol, internalPayload, now = Date.now()) {
   if (count > 0) console.log(`[futures-walls] ${symbol}: restored presence memory for ${count} dropped wall(s) from Redis`);
 }
 
+// ─── v3 Stats / Best-wall payload builders ────────────────────────────────
+
+/**
+ * Return the per-side orderbook statistics payload written to density:wallStats:{symbol}.
+ * Returns null if no scan has been performed for this symbol yet.
+ *
+ * @param {string} symbol
+ * @returns {object|null}
+ */
+function buildWallStatsPayload(symbol) {
+  const s = wallStatsMap.get(symbol);
+  if (!s) return null;
+  return {
+    symbol,
+    bid: {
+      medianOrderUsd:    Math.round(s.bid.p50),
+      p75OrderUsd:       Math.round(s.bid.p75),
+      p90OrderUsd:       Math.round(s.bid.p90),
+      p95OrderUsd:       Math.round(s.bid.p95),
+      maxOrderUsd:       Math.round(s.bid.max),
+      levelCount:        s.bid.levelCount,
+      adaptiveThreshold: Math.round(s.bidAdaptiveThresh),
+    },
+    ask: {
+      medianOrderUsd:    Math.round(s.ask.p50),
+      p75OrderUsd:       Math.round(s.ask.p75),
+      p90OrderUsd:       Math.round(s.ask.p90),
+      p95OrderUsd:       Math.round(s.ask.p95),
+      maxOrderUsd:       Math.round(s.ask.max),
+      levelCount:        s.ask.levelCount,
+      adaptiveThreshold: Math.round(s.askAdaptiveThresh),
+    },
+    avgDepthNear1PctUsd: Math.round(s.avgDepthNear1Pct),
+    updatedAt:           s.updatedAt,
+  };
+}
+
+/**
+ * Return the best (highest wallPower) confirmed wall for the symbol.
+ * Only walls with a non-null wallCategory are considered.
+ * Returns null if no qualifying wall exists.
+ *
+ * @param {string} symbol
+ * @param {number} midPrice
+ * @param {number} [now]
+ * @returns {object|null}
+ */
+function buildBestWallPayload(symbol, midPrice, now = Date.now()) {
+  const confirmed = getConfirmedWalls(symbol);
+  if (!confirmed.length) return null;
+
+  let bestCand = null;
+  for (const c of confirmed) {
+    if ((c.wallPower ?? 0) > 0 && (!bestCand || c.wallPower > bestCand.wallPower)) {
+      bestCand = c;
+    }
+  }
+  if (!bestCand || !bestCand.wallCategory) return null;
+
+  return {
+    symbol,
+    side:               bestCand.side,
+    price:              bestCand.price,
+    sizeUsd:            bestCand.currentUsdValue,
+    distancePct:        parseFloat(bestCand.distancePct.toFixed(4)),
+    wallPower:          bestCand.wallPower,
+    category:           bestCand.wallCategory,
+    p95Ratio:           bestCand.lastP95Usd > 0
+      ? parseFloat((bestCand.currentUsdValue / bestCand.lastP95Usd).toFixed(3)) : 0,
+    localRatio:         bestCand.lastLocalMedianUsd > 0
+      ? parseFloat((bestCand.currentUsdValue / bestCand.lastLocalMedianUsd).toFixed(3)) : 0,
+    similarLevelsCount: bestCand.lastSimilarLevelsCount ?? 0,
+    adaptiveThreshold:  bestCand.lastAdaptiveThreshold  ?? 0,
+    lifetimeMs:         now - bestCand.firstSeenTs,
+    updatedAt:          now,
+  };
+}
+
 module.exports = {
   getFuturesWallThreshold,
   setTickSize,
@@ -622,8 +1069,11 @@ module.exports = {
   getPersistentWalls,
   getCandidates,
   getDroppedRecent,
+  getAndClearPendingEvents,
   buildPublicWallsPayload,
   buildInternalWallsPayload,
+  buildWallStatsPayload,
+  buildBestWallPayload,
   clearSymbol,
   restoreConfirmedWalls,
   restorePresenceMemory,

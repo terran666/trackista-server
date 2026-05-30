@@ -65,8 +65,8 @@ async function processVote(db, { postId, userId, vote }) {
     // Re-sync counters from source of truth
     const [[counts]] = await conn.query(
       `SELECT
-         SUM(vote_type = 'like')    AS likes,
-         SUM(vote_type = 'dislike') AS dislikes
+         SUM(CASE WHEN vote_type = 'like'    THEN 1 ELSE 0 END) AS likes,
+         SUM(CASE WHEN vote_type = 'dislike' THEN 1 ELSE 0 END) AS dislikes
        FROM alert_votes WHERE post_id = ?`,
       [postId],
     );

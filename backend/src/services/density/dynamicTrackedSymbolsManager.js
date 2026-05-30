@@ -114,13 +114,17 @@ async function runRefresh(redis) {
     pipeline.get(`signal:${sym}`);
   }
   const results = await pipeline.exec();
+  if (!results) {
+    console.error('[dynamicTrackedSymbols] pipeline returned no result (connection lost?)');
+    return;
+  }
 
   // 3. Score every symbol
   const scored = [];
   for (let i = 0; i < universe.length; i++) {
     const sym     = universe[i];
-    const metrics = safeParse(results[i * 2][1]);
-    const signal  = safeParse(results[i * 2 + 1][1]);
+    const metrics = safeParse(results[i * 2]?.[1]);
+    const signal  = safeParse(results[i * 2 + 1]?.[1]);
 
     // Skip symbols with no data (collector hasn't warmed up for them yet)
     if (!metrics && !signal) continue;

@@ -1,5 +1,7 @@
 'use strict';
 
+const { safeSymbol } = require('../utils/parseClamp');
+
 // ─── GET /api/futures-walls-debug ─────────────────────────────────
 //
 // Debug endpoint for inspecting futures wall lifecycle state.
@@ -32,12 +34,12 @@
 
 function createFuturesWallsDebugHandler(redis) {
   return async function futuresWallsDebugHandler(req, res) {
-    const symbol = (req.query.symbol || '').toUpperCase().trim();
+    const symbol = safeSymbol(req.query.symbol);
 
     if (!symbol) {
       return res.status(400).json({
         success: false,
-        error:   'Query param "symbol" is required (e.g. ?symbol=BTCUSDT)',
+        error:   'Query param "symbol" is required and must match /^[A-Z0-9]{3,20}$/',
       });
     }
 

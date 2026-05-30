@@ -41,7 +41,19 @@ function createWallWatchlistHandler(redis) {
     const symbolsParam = (req.query.symbols    || '').trim() || undefined;
     const marketType   = (req.query.marketType || 'spot').toLowerCase();
     const limitRaw     = parseInt(req.query.limit || '0', 10);
-    const limit        = limitRaw > 0 ? limitRaw : undefined;
+    // Cap user-supplied limit so a malicious client can't pin us to a huge
+    // pipeline. The builder still defaults to "all tracked" when omitted.
+    const limit        = limitRaw > 0 ? Math.min(limitRaw, 500) : undefined;
+
+    // Reject pathologically long `symbols` lists outright \u2014 they would force
+    // us to allocate state for thousands of pairs even before the limit
+    // intersection runs.
+    if (symbolsParam && symbolsParam.split(',').length > 500) {
+      return res.status(400).json({
+        success: false,
+        error:   'Query param "symbols" must contain no more than 500 entries',
+      });
+    }
 
     if (marketType !== 'spot' && marketType !== 'futures') {
       return res.status(400).json({

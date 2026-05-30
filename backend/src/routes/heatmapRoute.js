@@ -15,6 +15,9 @@ const express               = require('express');
 const { WebSocketServer,
         WebSocket }         = require('ws');
 const { createRateLimiter } = require('../middleware/rateLimiters');
+const { parseIntClamp,
+        parseFloatClamp,
+        safeSymbol }        = require('../utils/parseClamp');
 
 // ─── Wire-format helpers (ТЗ format) ─────────────────────────────
 
@@ -79,12 +82,12 @@ function createHeatmapRouter(redis, heatmapService) {
   //   { meta: { bucketSize, pricePrecision, rangePercent },
   //     snapshots: [{ time, midPrice, prices: { key: { bid, ask } } }] }
   router.get('/history', historyLimiter(redis), async (req, res) => {
-    const symbol     = (req.query.symbol || '').toUpperCase();
-    const minutes    = Math.min(parseInt(req.query.minutes || '30', 10), 60);
-    const rangeParam = req.query.range ? parseFloat(req.query.range) : null;
+    const symbol     = safeSymbol(req.query.symbol);
+    const minutes    = parseIntClamp(req.query.minutes, 30, 1, 60);
+    const rangeParam = req.query.range != null ? parseFloatClamp(req.query.range, null, 0.1, 100) : null;
 
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
     if (!heatmapService.isSymbolActive(symbol)) {
       return res.status(404).json({
@@ -126,9 +129,9 @@ function createHeatmapRouter(redis, heatmapService) {
   // ─── GET /api/heatmap/live ────────────────────────────────────
   // Returns the single latest snapshot. Prefer WS scope=heatmap over polling this.
   router.get('/live', async (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
+    const symbol = safeSymbol(req.query.symbol);
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
     if (!heatmapService.isSymbolActive(symbol)) {
       return res.status(404).json({ success: false, error: 'heatmap_not_enabled_for_symbol', symbol });
@@ -149,11 +152,11 @@ function createHeatmapRouter(redis, heatmapService) {
   // ─── GET /api/heatmap/orderbook ───────────────────────────────
   // Returns current orderbook for the side-panel ladder.
   router.get('/orderbook', async (req, res) => {
-    const symbol = (req.query.symbol || '').toUpperCase();
-    const levels = Math.min(parseInt(req.query.levels || '50', 10), 200);
+    const symbol = safeSymbol(req.query.symbol);
+    const levels = parseIntClamp(req.query.levels, 50, 1, 200);
 
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
     if (!heatmapService.isSymbolActive(symbol)) {
       return res.status(404).json({ success: false, error: 'heatmap_not_enabled_for_symbol', symbol });
@@ -169,14 +172,15 @@ function createHeatmapRouter(redis, heatmapService) {
   // ─── POST /api/heatmap/activate ───────────────────────────────
   // Activates heatmap collection for a symbol on demand.
   // Symbol stays active until server restart (or deactivate is called).
-  router.post('/activate', (req, res) => {
-    const symbol = ((req.body?.symbol || req.query.symbol || '') + '').toUpperCase().trim();
+  const activateLimiter = createRateLimiter({
+    max:       parseInt(process.env.RATE_LIMIT_ACTIVATE_MAX        || '20', 10) || 20,
+    windowSec: parseInt(process.env.RATE_LIMIT_ACTIVATE_WINDOW_SEC || '60', 10) || 60,
+    keyPrefix: 'heatmap-activate',
+  });
+  router.post('/activate', activateLimiter(redis), (req, res) => {
+    const symbol = safeSymbol(req.body?.symbol || req.query.symbol);
     if (!symbol) {
-      return res.status(400).json({ success: false, error: 'symbol is required' });
-    }
-    // Basic symbol validation — alphanumeric only
-    if (!/^[A-Z0-9]{3,20}$/.test(symbol)) {
-      return res.status(400).json({ success: false, error: 'Invalid symbol format' });
+      return res.status(400).json({ success: false, error: 'symbol is required or invalid' });
     }
 
     const result = heatmapService.activateSymbol(symbol);

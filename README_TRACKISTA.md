@@ -258,6 +258,32 @@ Trackista Core хранит уровни поддержки/сопротивле
 | `id` | BIGINT | Primary key |
 | `symbol` | VARCHAR(32) | Торговая пара |
 | `price` | DECIMAL(20,8) | Цена уровня |
+
+---
+
+## Upgrades — Запланированные улучшения
+
+### TestPage: fallback из бар-агрегатора при пробелах в klines
+
+**Проблема:**  
+`KlineV10TestChart` (TestPage) использует `binanceProxyRoute` → сырые Binance klines.  
+Binance не возвращает бары для периодов с нулевой торговой активностью (новые листинги),
+поэтому на графике появляются визуальные разрывы.
+
+**Торговый терминал** использует `GET /api/bars/:symbol` → Redis (бар-агрегатор).  
+Коллектор синтезирует непрерывные свечи — пробелов нет.
+
+**Что нужно сделать:**  
+В `KlineV10TestChart` добавить fallback: если `binanceProxyRoute` возвращает историю
+с разрывами (пропущенные периоды), дозаполнять их данными из `/api/bars/:symbol`.
+
+- Детектировать пробелы: соседние бары с `∆t > interval` (например `> 60 000 ms` для `1m`)
+- Запросить `/api/bars/:symbol?from=gapStart&to=gapEnd` для каждого пробела
+- Смержить полученные бары в итоговый массив перед рендером
+
+**Файлы для изменения:**  
+- `C:\work\trackista.live-v2\src\klinecharts-v10\KlineV10TestChart.jsx` — логика fetch + merge  
+- `C:\work\trackista-server\backend\src\routes\barsRoute.js` — уже готов, поддерживает `from`/`to`
 | `type` | VARCHAR(32) | Тип уровня |
 | `source` | VARCHAR(32) | Источник уровня |
 | `strength` | INT | Сила уровня (0-100) |

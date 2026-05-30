@@ -50,14 +50,26 @@ function createPreEventService(redis, moveService) {
     const pipeline = redis.pipeline();
     for (const sym of symbols) pipeline.get(`walls:${sym}`);
     const results = await pipeline.exec();
+    if (!results) {
+      console.error('[preEvent] refreshWalls pipeline returned no result');
+      return;
+    }
     for (let i = 0; i < symbols.length; i++) {
-      const parsed = tryParse(results[i][1]);
+      const entry = results[i];
+      if (!entry) continue;
+      const parsed = tryParse(entry[1]);
       if (parsed) wallCache.set(symbols[i], parsed);
     }
   }
 
+  let _tickRunning = false;
   async function tick() {
     if (!isRunning) return;
+    // Re-entry guard: setInterval can fire while a prior `await` is still in
+    // flight (Redis pipeline / wall fetch). Skipping overlaps avoids piling up
+    // pipelines and keeps per-loop metrics meaningful.
+    if (_tickRunning) return;
+    _tickRunning = true;
     const nowMs  = Date.now();
     const tickTs = nowMs;
     runCount++;
@@ -81,6 +93,10 @@ function createPreEventService(redis, moveService) {
         pipeline.get(`derivatives:${sym}`);
       }
       const results = await pipeline.exec();
+      if (!results) {
+        console.error('[preEvent] tick read pipeline returned no result');
+        return;
+      }
 
       const preSignals    = [];
       const writePipeline = redis.pipeline();
@@ -199,6 +215,8 @@ function createPreEventService(redis, moveService) {
         lastErrorMessage: err.message,
         status          : 'warning',
       }), 'EX', 120).catch(() => {});
+    } finally {
+      _tickRunning = false;
     }
   }
 

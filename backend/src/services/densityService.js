@@ -110,6 +110,9 @@ function getOrCreate(symbol) {
       lastDomUpdatedAt: 0,
       // footprint[tf] → Map<barTime, BarState>
       footprint: Object.fromEntries(TIMEFRAMES.map(tf => [tf, new Map()])),
+      // dirty bars to persist on next flush: Set<"tf:barTime">
+      dirtyBars: new Set(),
+      lastTradeDirty: false,
     });
   }
   return symbolStates.get(symbol);
@@ -187,37 +190,46 @@ function processTrade(state, event) {
     if (price < bar.low)   bar.low   = price;
     bar.close = priceKey;
 
+    // Mark this bar dirty so flushToRedis only persists what changed.
+    state.dirtyBars.add(`${tf}:${bt}`);
+
     // Keep at most MAX_HISTORY_BARS closed bars + the open one
     if (bars.size > MAX_HISTORY_BARS + 2) {
       const oldest = [...bars.keys()].sort((a, b) => a - b)[0];
       bars.delete(oldest);
+      state.dirtyBars.delete(`${tf}:${oldest}`);
     }
   }
 
+  state.lastTradeDirty = true;
   _pendingPersist.add(sym);
 
   if (_eventBus) {
-    // lastTrade — lightweight, per trade
-    _eventBus.emit('density:lastTrade', { symbol: sym, trade: state.lastTrade });
+    // lastTrade — lightweight, per trade. Skip when nobody is subscribed.
+    if (_eventBus.listenerCount('density:lastTrade') > 0) {
+      _eventBus.emit('density:lastTrade', { symbol: sym, trade: state.lastTrade });
+    }
 
     // footprint cell update — only emit for 1m (most commonly subscribed)
-    const bt1m = barTime(ts, '1m');
-    const bar1m = state.footprint['1m'].get(bt1m);
-    if (bar1m) {
-      const cell = bar1m.prices.get(priceKey);
-      if (cell) {
-        _eventBus.emit('density:footprint', {
-          symbol:        sym,
-          tf:            '1m',
-          barTime:       bt1m,
-          price:         priceKey,
-          buyQty:        cell.buyQty,
-          sellQty:       cell.sellQty,
-          deltaQty:      cell.deltaQty,
-          buyNotional:   cell.buyNotional,
-          sellNotional:  cell.sellNotional,
-          deltaNotional: cell.deltaNotional,
-        });
+    if (_eventBus.listenerCount('density:footprint') > 0) {
+      const bt1m = barTime(ts, '1m');
+      const bar1m = state.footprint['1m'].get(bt1m);
+      if (bar1m) {
+        const cell = bar1m.prices.get(priceKey);
+        if (cell) {
+          _eventBus.emit('density:footprint', {
+            symbol:        sym,
+            tf:            '1m',
+            barTime:       bt1m,
+            price:         priceKey,
+            buyQty:        cell.buyQty,
+            sellQty:       cell.sellQty,
+            deltaQty:      cell.deltaQty,
+            buyNotional:   cell.buyNotional,
+            sellNotional:  cell.sellNotional,
+            deltaNotional: cell.deltaNotional,
+          });
+        }
       }
     }
   }
@@ -266,18 +278,30 @@ async function flushToRedis() {
   const symbols = [..._pendingPersist];
   _pendingPersist.clear();
   const pipe = _redis.pipeline();
+  let writes = 0;
 
   for (const sym of symbols) {
     const state = symbolStates.get(sym);
     if (!state) continue;
     const dec = tickDec(sym);
 
-    if (state.lastTrade) {
+    if (state.lastTradeDirty && state.lastTrade) {
       pipe.set(`trade:last:${sym}`, JSON.stringify(state.lastTrade), 'EX', 30);
+      state.lastTradeDirty = false;
+      writes++;
     }
 
-    for (const tf of TIMEFRAMES) {
-      for (const [bt, bar] of state.footprint[tf]) {
+    // Persist only bars touched since last flush.
+    if (state.dirtyBars && state.dirtyBars.size > 0) {
+      const dirty = state.dirtyBars;
+      state.dirtyBars = new Set();
+      for (const key of dirty) {
+        const idx = key.indexOf(':');
+        if (idx < 0) continue;
+        const tf = key.slice(0, idx);
+        const bt = Number(key.slice(idx + 1));
+        const bar = state.footprint[tf]?.get(bt);
+        if (!bar) continue;
         const data = {
           symbol:        sym,
           timeframe:     tf,
@@ -293,16 +317,33 @@ async function flushToRedis() {
           updatedAt:     Date.now(),
         };
         pipe.set(`footprint:${sym}:${tf}:${bt}`, JSON.stringify(data), 'EX', BAR_TTL_SEC);
+        writes++;
       }
     }
   }
 
-  pipe.exec().catch(err => console.error('[density] Redis flush error:', err.message));
+  if (writes === 0) return;
+  pipe.exec()
+    .then(results => {
+      if (!results) {
+        console.error('[density] Redis flush pipeline returned no result (connection lost?)');
+        return;
+      }
+      for (const [pErr] of results) {
+        if (pErr) { console.error('[density] Redis flush pipeline cmd error:', pErr.message); break; }
+      }
+    })
+    .catch(err => console.error('[density] Redis flush error:', err.message));
 }
 
 // ─── DOM polling (reads collector orderbook, emits density:dom) ───
 async function pollDom() {
   if (!_redis || !_eventBus) return;
+  // Skip work entirely if nobody is listening on density:dom (gateway listener
+  // is attached only when a density subscriber exists; the listener short-circuits
+  // when there are zero subs).
+  const hasListeners = _eventBus.listenerCount('density:dom') > 0;
+  if (!hasListeners) return;
   for (const [sym, state] of symbolStates) {
     if (state.deactivated) continue;
     try {
@@ -379,11 +420,17 @@ async function getDomSnapshot(symbol, tf, bars) {
     const pipeline = _redis.pipeline();
     for (let i = 0; i < bars; i++) pipeline.get(`footprint:${sym}:${tf}:${latestBt - i * tfMs}`);
     const results = await pipeline.exec();
-    for (const [, v] of results) {
-      if (!v) continue;
-      try { footprintBars.push(JSON.parse(v)); } catch (_) {}
+    if (results) {
+      for (const entry of results) {
+        if (!entry) continue;
+        const [, v] = entry;
+        if (!v) continue;
+        try { footprintBars.push(JSON.parse(v)); } catch (e) { console.warn('[density] footprint parse:', e.message); }
+      }
+      footprintBars.sort((a, b) => a.barTime - b.barTime);
+    } else {
+      console.error('[density] footprint pipeline returned no result');
     }
-    footprintBars.sort((a, b) => a.barTime - b.barTime);
   }
 
   const lastTrade = getLastTrade(sym);
@@ -543,6 +590,7 @@ async function getUnifiedSnapshot(symbol, tf, levelsAbove = 40, levelsBelow = 40
     bestAsk        : normPrice(bestAskNum, tick),
     midPrice       : midKey,
     updatedAt,
+    lastTradeTs,
     stale          : { dom: staleDom, trades: staleTrades },
     poc            : pocPrice,
     priceLevels,

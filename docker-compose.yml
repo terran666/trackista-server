@@ -101,6 +101,14 @@ services:
       PRICE_SURGE_ENABLED: "true"
       PRICE_SURGE_MOVE_PCT: "5.0"
       PRICE_SURGE_COOLDOWN_SEC: "300"
+      # ── Impulse multi-window triggers (TEMP: lowered for testing on quiet market)
+      IMPULSE_TRIGGER_1S_PCT: "0.05"
+      IMPULSE_TRIGGER_5S_PCT: "0.1"
+      IMPULSE_TRIGGER_15S_PCT: "0.2"
+      IMPULSE_TRIGGER_60S_PCT: "0.3"
+      # ── Impulse 24h liquidity gate (coin excluded if below either)
+      IMPULSE_MIN_VOL_24H_USD: "40000000"
+      IMPULSE_MIN_TRADES_24H: "500000"
       # ── Heatmap orderbook history
       HEATMAP_ENABLED: "true"
       HEATMAP_MAX_SYMBOLS: "20"
@@ -234,7 +242,7 @@ services:
       - backend
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/nginx-health"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/nginx-health"]
       interval: 30s
       timeout: 10s
       retries: 3

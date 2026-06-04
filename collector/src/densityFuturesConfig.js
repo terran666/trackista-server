@@ -66,7 +66,10 @@ const FUTURES_FILTER_MAX_QUOTE_VOLUME_24H = parseFloat(process.env.FUTURES_FILTE
 
 // ─── Universe filtering (TestPage-aligned lower-bound filters) ────────────────
 // Minimum 24h quoteVolume (USDT) for a symbol to enter the tracked universe.
-const TRACK_MIN_VOLUME_24H_USD  = parseFloat(process.env.TRACK_MIN_VOLUME_24H_USD  || '100000000');
+const TRACK_MIN_VOLUME_24H_USD  = parseFloat(process.env.TRACK_MIN_VOLUME_24H_USD  || '50000000');
+// Minimum 24h trade count for a symbol to enter the tracked universe (AND-gated
+// together with TRACK_MIN_VOLUME_24H_USD). 0 = disabled.
+const TRACK_MIN_TRADE_COUNT_24H = parseInt(process.env.TRACK_MIN_TRADE_COUNT_24H  || '600000', 10);
 // Minimum spot activityScore for the symbol to be included. 0 = no spot activity gate.
 const TRACK_MIN_ACTIVITY_SCORE  = parseFloat(process.env.TRACK_MIN_ACTIVITY_SCORE  || '0');
 // If true, spot orderbook is also monitored for each tracked futures symbol.
@@ -74,7 +77,7 @@ const INCLUDE_SPOT_FOR_TRACKED_FUTURES = process.env.INCLUDE_SPOT_FOR_TRACKED_FU
 // If true, symbols with spot but no futures-pairing can be added (off by default).
 const INCLUDE_SPOT_ONLY         = process.env.INCLUDE_SPOT_ONLY === 'true';
 // How often (ms) the tracked universe is rebuilt. Default 60s.
-const TRACKED_UNIVERSE_REFRESH_MS = parseInt(process.env.TRACKED_UNIVERSE_REFRESH_MS || '60000', 10);
+const TRACKED_UNIVERSE_REFRESH_MS = parseInt(process.env.TRACKED_UNIVERSE_REFRESH_MS || '30000', 10);
 
 // ─── Force-include whitelist ──────────────────────────────────────
 // These symbols are always tracked regardless of filter conditions.
@@ -138,6 +141,62 @@ const FUTURES_ALL_TICKERS_KEY = 'futures:tickers:all'; // written by collector, 
 // ─── Orderbook flush ─────────────────────────────────────────────
 const FUTURES_ORDERBOOK_FLUSH_MS = parseInt(process.env.FUTURES_ORDERBOOK_FLUSH_MS || '2000', 10);
 const FUTURES_TOP_LEVELS         = 200;
+
+// ─── Combined-WS depth transport (anti-ban scaling) ───────────────
+//
+// Instead of one WebSocket per symbol, depth streams are multiplexed onto a
+// small number of combined connections (wss://fstream.binance.com/stream?
+// streams=a@depth@100ms/b@depth@100ms/…). Binance allows up to 1024 streams
+// per connection; we keep a conservative per-connection cap so a single socket
+// failure only affects a bounded slice of symbols. This drastically reduces the
+// number of TCP/WS handshakes (a key ban-risk signal) and lets us track far
+// more symbols safely.
+//
+const FUTURES_WS_STREAMS_PER_CONN = Math.min(
+  Math.max(parseInt(process.env.FUTURES_WS_STREAMS_PER_CONN || '50', 10), 1),
+  1024,
+);
+// Per-symbol stagger (ms) applied to the initial REST snapshot burst when a
+// combined connection opens, so N symbols on one socket don't fire N snapshots
+// at once.
+const FUTURES_WS_OPEN_SNAPSHOT_STAGGER_MS = parseInt(
+  process.env.FUTURES_WS_OPEN_SNAPSHOT_STAGGER_MS || '250', 10,
+);
+
+// ─── Public walls display cap (per side) ──────────────────────────
+//
+// Max walls shown per side (bid / ask) in the public payload consumed by the
+// density list AND the chart overlay. Walls are picked by a combined score of
+// relative size (how big vs the rest of that side's book) and proximity to
+// price, so the few "biggest + nearest" walls survive and clutter is removed.
+//
+const FUTURES_PUBLIC_WALLS_PER_SIDE = Math.max(
+  parseInt(process.env.FUTURES_PUBLIC_WALLS_PER_SIDE || '2', 10), 1,
+);
+
+// ─── Relative-mode walls for heavily-traded coins ─────────────────
+//
+// A coin like GENIUS can be top of the trades24h list (1.4M trades) yet have
+// its biggest order (~$277k) sit BELOW the absolute $400k _default wall floor,
+// so no wall ever surfaces. For such liquid books the absolute USD floor is the
+// wrong gate — the order is genuinely large RELATIVE to the rest of that book.
+//
+// When a coin's 24h trade count >= DENSITY_WALL_RELATIVE_MIN_TRADES_24H (and it
+// has no explicit per-symbol threshold like BTC/ETH), the absolute floor is
+// lowered to DENSITY_WALL_RELATIVE_FLOOR_USD so the adaptive/relative gates
+// (p95×1.5, median×4, local-median×3, similar-levels, wallPower) decide what is
+// a wall. These coins also show up to FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE
+// walls per side instead of the normal cap.
+//
+const DENSITY_WALL_RELATIVE_MIN_TRADES_24H = parseInt(
+  process.env.DENSITY_WALL_RELATIVE_MIN_TRADES_24H || '500000', 10,
+);
+const DENSITY_WALL_RELATIVE_FLOOR_USD = parseInt(
+  process.env.DENSITY_WALL_RELATIVE_FLOOR_USD || '50000', 10,
+);
+const FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE = Math.max(
+  parseInt(process.env.FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE || '3', 10), 1,
+);
 
 // ─── Misc ─────────────────────────────────────────────────────────
 const FUTURES_RECONNECT_DELAY_MS     = 5000;
@@ -252,6 +311,40 @@ const DENSITY_VOLATILITY_BREAKOUT_1H_PCT     = parseFloat(process.env.DENSITY_VO
 const DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT    = parseFloat(process.env.DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT    || '1.0');
 const DENSITY_VOLUME_SPIKE_OVERRIDE          = parseFloat(process.env.DENSITY_VOLUME_SPIKE_OVERRIDE          || '3.0');
 
+// ─── Activity gate (pump / dump / high-volatility OR-gate) ────────────────────
+//
+// After the AND-gate (24h volume >= TRACK_MIN_VOLUME_24H_USD AND 24h trades >=
+// TRACK_MIN_TRADE_COUNT_24H), a symbol must ALSO satisfy at least ONE activity
+// signal to enter the list:
+//   • pump  — 24h price change >= +DENSITY_ACTIVITY_PUMP_PCT_24H  (or recent 15m up-move)
+//   • dump  — 24h price change <= -DENSITY_ACTIVITY_DUMP_PCT_24H  (or recent 15m down-move)
+//   • highVol — 24h or 4h high-low range >= DENSITY_ACTIVITY_VOLATILITY_PCT
+// Force-include symbols bypass the gate. Toggle the whole gate via
+// DENSITY_ACTIVITY_GATE_ENABLED (default on). All thresholds are env-tunable so
+// the UI can expose them as filter options later.
+//
+const DENSITY_ACTIVITY_GATE_ENABLED      = process.env.DENSITY_ACTIVITY_GATE_ENABLED !== 'false';
+const DENSITY_ACTIVITY_PUMP_PCT_24H      = parseFloat(process.env.DENSITY_ACTIVITY_PUMP_PCT_24H      || '5');
+const DENSITY_ACTIVITY_DUMP_PCT_24H      = parseFloat(process.env.DENSITY_ACTIVITY_DUMP_PCT_24H      || '5');
+const DENSITY_ACTIVITY_VOLATILITY_PCT    = parseFloat(process.env.DENSITY_ACTIVITY_VOLATILITY_PCT    || '4');
+const DENSITY_ACTIVITY_PRICE_MOVE_15M_PCT = parseFloat(process.env.DENSITY_ACTIVITY_PRICE_MOVE_15M_PCT || '2');
+// Override: the top-N coins by 24h trade count always bypass the activity /
+// low-volatility gates. The most heavily-traded books are exactly where large
+// resting walls (e.g. XLM 447k) matter — we want them tracked even when the
+// coin is not pumping/dumping. 0 = disabled.
+const DENSITY_ACTIVITY_KEEP_TOP_TRADED   = parseInt(process.env.DENSITY_ACTIVITY_KEEP_TOP_TRADED   || '40', 10);
+// Override: a coin carrying a significant confirmed wall bypasses the gates too,
+// so a fresh big order keeps the coin in the universe regardless of price action.
+const DENSITY_ACTIVITY_KEEP_WALL_COINS   = process.env.DENSITY_ACTIVITY_KEEP_WALL_COINS !== 'false';
+// Floor: if the final universe is smaller than this, progressively relax the
+// filtering until the floor is reached. Two layers, applied in order:
+//   1. volume relax (step 2b)  — admit the most-traded coins that failed the
+//      volume / trade-count AND-gate (handles a genuinely thin market).
+//   2. gate relax  (step 4f-ter) — re-admit the most-traded coins dropped by the
+//      activity / low-volatility gates (handles a quiet but liquid market).
+// Guarantees there is always a normal number of coins to surface wall info.
+const DENSITY_MIN_UNIVERSE_SIZE          = parseInt(process.env.DENSITY_MIN_UNIVERSE_SIZE          || '20', 10);
+
 // ─── Tier 1 always-live symbols ───────────────────────────────────
 //
 // These symbols are always in CORE regardless of volume/momentum score.
@@ -322,6 +415,7 @@ module.exports = {
   FUTURES_FILTER_MAX_TRADE_COUNT_24H,
   FUTURES_FILTER_MAX_QUOTE_VOLUME_24H,
   TRACK_MIN_VOLUME_24H_USD,
+  TRACK_MIN_TRADE_COUNT_24H,
   FUTURES_FORCE_INCLUDE,
   FUTURES_WALL_THRESHOLDS,
   FUTURES_MAX_WALL_DISTANCE_PCT,
@@ -348,6 +442,12 @@ module.exports = {
   FUTURES_ALL_TICKERS_KEY,
   FUTURES_ORDERBOOK_FLUSH_MS,
   FUTURES_TOP_LEVELS,
+  FUTURES_WS_STREAMS_PER_CONN,
+  FUTURES_WS_OPEN_SNAPSHOT_STAGGER_MS,
+  FUTURES_PUBLIC_WALLS_PER_SIDE,
+  FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE,
+  DENSITY_WALL_RELATIVE_MIN_TRADES_24H,
+  DENSITY_WALL_RELATIVE_FLOOR_USD,
   FUTURES_RECONNECT_DELAY_MS,
   FUTURES_STATS_LOG_INTERVAL_MS,
   FUTURES_VOLUME_REFRESH_MS,
@@ -396,6 +496,15 @@ module.exports = {
   DENSITY_VOLATILITY_BREAKOUT_1H_PCT,
   DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT,
   DENSITY_VOLUME_SPIKE_OVERRIDE,
+  // Activity gate (pump/dump/volatility)
+  DENSITY_ACTIVITY_GATE_ENABLED,
+  DENSITY_ACTIVITY_PUMP_PCT_24H,
+  DENSITY_ACTIVITY_DUMP_PCT_24H,
+  DENSITY_ACTIVITY_VOLATILITY_PCT,
+  DENSITY_ACTIVITY_PRICE_MOVE_15M_PCT,
+  DENSITY_ACTIVITY_KEEP_TOP_TRADED,
+  DENSITY_ACTIVITY_KEEP_WALL_COINS,
+  DENSITY_MIN_UNIVERSE_SIZE,
   // Tier 1 symbols
   DENSITY_TIER1_SYMBOLS,
   // Hot candidates

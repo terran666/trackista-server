@@ -1,0 +1,153 @@
+{
+    "success":  true,
+    "strategy":  "ALL",
+    "mode":  "raw",
+    "count":  1,
+    "items":  [
+                  {
+                      "id":  "HYPEUSDT_5m_DOUBLE_TOP",
+                      "symbol":  "HYPEUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "DOUBLE_TOP",
+                      "direction":  "SHORT",
+                      "status":  "APPROACHING",
+                      "score":  77,
+                      "price":  72.777,
+                      "neckline":  67.802,
+                      "distancePct":  7.3375416654375885,
+                      "breakLevel":  67.802,
+                      "supportLevel":  null,
+                      "supportSource":  null,
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  null,
+                      "strength":  null,
+                      "breakdownPct":  null,
+                      "scoreBreakdown":  null,
+                      "pattern":  {
+                                      "patternType":  "DOUBLE_TOP",
+                                      "topA":  74.061,
+                                      "topB":  73.7,
+                                      "lowA":  null,
+                                      "lowB":  null,
+                                      "neckline":  67.802,
+                                      "topDistancePct":  0.48982360922659995,
+                                      "lowDistancePct":  null,
+                                      "necklinePrice":  67.802,
+                                      "patternQuality":  77
+                                  },
+                      "strategy":  "doubleExtreme",
+                      "updatedAt":  1780466370547,
+                      "createdAt":  1780466129894,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "patternEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  }
+              ],
+    "data":  [
+                 {
+                     "id":  "HYPEUSDT_5m_DOUBLE_TOP",
+                     "symbol":  "HYPEUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "DOUBLE_TOP",
+                     "direction":  "SHORT",
+                     "status":  "APPROACHING",
+                     "score":  77,
+                     "price":  72.777,
+                     "neckline":  67.802,
+                     "distancePct":  7.3375416654375885,
+                     "breakLevel":  67.802,
+                     "supportLevel":  null,
+                     "supportSource":  null,
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  null,
+                     "strength":  null,
+                     "breakdownPct":  null,
+                     "scoreBreakdown":  null,
+                     "pattern":  {
+                                     "patternType":  "DOUBLE_TOP",
+                                     "topA":  74.061,
+                                     "topB":  73.7,
+                                     "lowA":  null,
+                                     "lowB":  null,
+                                     "neckline":  67.802,
+                                     "topDistancePct":  0.48982360922659995,
+                                     "lowDistancePct":  null,
+                                     "necklinePrice":  67.802,
+                                     "patternQuality":  77
+                                 },
+                     "strategy":  "doubleExtreme",
+                     "updatedAt":  1780466370547,
+                     "createdAt":  1780466129894,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "patternEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 }
+             ],
+    "formations":  [
+                       {
+                           "id":  "HYPEUSDT_5m_DOUBLE_TOP",
+                           "symbol":  "HYPEUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "DOUBLE_TOP",
+                           "direction":  "SHORT",
+                           "status":  "APPROACHING",
+                           "score":  77,
+                           "price":  72.777,
+                           "neckline":  67.802,
+                           "distancePct":  7.3375416654375885,
+                           "breakLevel":  67.802,
+                           "supportLevel":  null,
+                           "supportSource":  null,
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  null,
+                           "strength":  null,
+                           "breakdownPct":  null,
+                           "scoreBreakdown":  null,
+                           "pattern":  {
+                                           "patternType":  "DOUBLE_TOP",
+                                           "topA":  74.061,
+                                           "topB":  73.7,
+                                           "lowA":  null,
+                                           "lowB":  null,
+                                           "neckline":  67.802,
+                                           "topDistancePct":  0.48982360922659995,
+                                           "lowDistancePct":  null,
+                                           "necklinePrice":  67.802,
+                                           "patternQuality":  77
+                                       },
+                           "strategy":  "doubleExtreme",
+                           "updatedAt":  1780466370547,
+                           "createdAt":  1780466129894,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "patternEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       }
+                   ],
+    "debug":  {
+                  "totalRawFormations":  11,
+                  "afterFilters":  1,
+                  "afterUniqueSymbol":  1
+              },
+    "generatedAt":  1780466371100
+}

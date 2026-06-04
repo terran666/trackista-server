@@ -29,7 +29,7 @@
  *   market_backoff_active   — in-process IP-ban guard blocked the call
  */
 
-const { binanceFetch, buildSummary, getBackoffState } = require('../utils/binanceRestLogger');
+const { binanceFetch, buildSummary, getBackoffState, clearBackoff } = require('../utils/binanceRestLogger');
 const { authRequired } = require('../middleware/authRequired');
 
 const SPOT_BASE     = 'https://api.binance.com/api';
@@ -60,6 +60,32 @@ const CACHE_TTL_MS = {
   '/v3/aggTrades':     1_500,
 };
 const DEFAULT_CACHE_TTL_MS = 30 * 1000;
+
+// Closed historical bars are immutable, so a klines window that ends in the past
+// (endTime older than one interval ago) never changes and can be cached for hours.
+// This neutralises the formations page's backward pagination (each page has a
+// distinct endTime → unique cache key → would otherwise hit Binance every time),
+// which is the main driver of the futures weight budget exhaustion / 429 bans.
+const KLINES_HISTORICAL_TTL_MS = 6 * 60 * 60 * 1000;  // 6 h
+
+const INTERVAL_MS = {
+  '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
+  '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
+  '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000, '3d': 259_200_000,
+  '1w': 604_800_000,
+};
+
+// Decide the klines cache TTL: long for fully-closed historical windows, short
+// (default 60s) for windows that still include the live/forming candle.
+function klinesCacheTtl(query, pathKey) {
+  const endTime = parseInt(query.endTime, 10);
+  if (Number.isFinite(endTime)) {
+    const intervalMs = INTERVAL_MS[query.interval] ?? 60_000;
+    // The candle covering endTime has fully closed → response is immutable.
+    if (endTime < Date.now() - intervalMs) return KLINES_HISTORICAL_TTL_MS;
+  }
+  return CACHE_TTL_MS[pathKey] ?? DEFAULT_CACHE_TTL_MS;
+}
 
 // ── aggTrades per-symbol throttle ────────────────────────────────────────────
 // /fapi/v1/aggTrades costs weight=20 per call. At 2 req/s × 60s = 2400 weight/min
@@ -480,13 +506,18 @@ function makeProxy(targetBase, market) {
             'binanceProxy',
             symbol,
             pathKey,
+            // Chart klines are cheap + cacheable: let them through a precautionary
+            // soft (weight) pause so the UI never blanks out. A real IP ban still blocks.
+            { critical: isKlines },
           );
           
           const body = await upstreamRes.text();
           const headers = extractHeaders(upstreamRes);
           
           if (upstreamRes.ok) {
-            const ttlMs = CACHE_TTL_MS[pathKey] ?? DEFAULT_CACHE_TTL_MS;
+            const ttlMs = isKlines
+              ? klinesCacheTtl(req.query, pathKey)
+              : (CACHE_TTL_MS[pathKey] ?? DEFAULT_CACHE_TTL_MS);
             setCached(cacheKey, body, upstreamRes.status, headers, ttlMs);
             // Remember last successful aggTrades response for UI throttle fallback
             if (isAggTrades && aggThrottleKey) {
@@ -519,6 +550,7 @@ function makeProxy(targetBase, market) {
         'binanceProxy',
         symbol,
         pathKey,
+        { critical: isKlines },
       );
 
       // Intercept upstream rate-limit responses
@@ -679,6 +711,28 @@ function createBinanceProxyRouter() {
       requestCounts:      proxyStats.requestCounts,
       binanceRestSummary: buildSummary(),
     });
+  });
+
+  // POST /api/binance/debug/clear-ban?market=all|spot|futures
+  // Manually lift the in-process + Redis IP backoff so Binance calls resume.
+  // Use only when Binance is confirmed to no longer be rate-limiting this IP —
+  // a genuine upstream 429/418 will simply re-arm the backoff on the next call.
+  router.post('/debug/clear-ban', authRequired, async (req, res) => {
+    try {
+      const market = ['all', 'spot', 'futures'].includes(req.query.market)
+        ? req.query.market
+        : 'all';
+      const result = await clearBackoff(market);
+      return res.json({
+        success: true,
+        message: `Binance IP backoff cleared for: ${result.cleared.join(', ')}`,
+        before:  result.before,
+        after:   getBackoffState(),
+      });
+    } catch (err) {
+      console.error('[binance-proxy] clear-ban error:', err.message);
+      return res.status(500).json({ success: false, error: 'Failed to clear backoff' });
+    }
   });
 
   return router;

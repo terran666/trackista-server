@@ -23,6 +23,7 @@
 
 const {
   TRACK_MIN_VOLUME_24H_USD,
+  TRACK_MIN_TRADE_COUNT_24H,
   TRACK_MIN_ACTIVITY_SCORE,
   INCLUDE_SPOT_FOR_TRACKED_FUTURES,
   FUTURES_ALL_TICKERS_KEY,
@@ -31,6 +32,7 @@ const {
   TRACKED_UNIVERSE_REFRESH_MS,
   FUTURES_FORCE_INCLUDE,
   FUTURES_WALL_THRESHOLDS,
+  WALL_POWER_SOFT_MIN,
   // Category limits
   DENSITY_CORE_LIMIT,
   DENSITY_WALL_ANOMALY_LIMIT,
@@ -63,6 +65,15 @@ const {
   DENSITY_VOLATILITY_BREAKOUT_1H_PCT,
   DENSITY_PRICE_MOVE_BREAKOUT_15M_PCT,
   DENSITY_VOLUME_SPIKE_OVERRIDE,
+  // Activity gate (pump/dump/volatility)
+  DENSITY_ACTIVITY_GATE_ENABLED,
+  DENSITY_ACTIVITY_PUMP_PCT_24H,
+  DENSITY_ACTIVITY_DUMP_PCT_24H,
+  DENSITY_ACTIVITY_VOLATILITY_PCT,
+  DENSITY_ACTIVITY_PRICE_MOVE_15M_PCT,
+  DENSITY_ACTIVITY_KEEP_TOP_TRADED,
+  DENSITY_ACTIVITY_KEEP_WALL_COINS,
+  DENSITY_MIN_UNIVERSE_SIZE,
   // Tier + hot candidates
   DENSITY_TIER1_SYMBOLS,
   HOT_CANDIDATE_EXPIRY_MS,
@@ -246,6 +257,8 @@ async function buildAndPersistUniverse(redis) {
   const stableBlacklistSet = new Set(DENSITY_STABLE_BASE_BLACKLIST);
   const stableExcluded     = [];   // symbols excluded by stable blacklist
   const volatilityExcluded = [];   // symbols excluded by low-volatility filter
+  const activityExcluded   = [];   // symbols excluded by pump/dump/volatility gate
+  const heldOut            = new Map(); // symbol → full item removed by a gate (for min-size relax fallback)
 
   // ── 1. Load futures tickers ───────────────────────────────────────────────
   const tickersRaw = await redis.get(FUTURES_ALL_TICKERS_KEY);
@@ -263,16 +276,19 @@ async function buildAndPersistUniverse(redis) {
     }
   }
 
-  // ── 2. Filter by 24h volume lower-bound ──────────────────────────────────
+  // ── 2. Filter by 24h volume + trade-count lower-bounds (AND-gate) ─────────
   const volumeQualified = [];
+  const belowThreshold  = [];   // eligible coins that fail ONLY the volume/trade thresholds — parked for the min-universe volume relax (2b)
   const STALE_TICKER_MS = 4 * 60 * 60 * 1000; // 4 hours — SETTLING/DELIVERING contracts have stale closeTime
   for (const [sym, t] of tickerMap) {
-    const quoteVol = parseFloat(t.quoteVolume || '0');
-    const isForce  = forceSet.has(sym);
+    const quoteVol   = parseFloat(t.quoteVolume || '0');
+    const tradeCount = parseInt(t.count || '0', 10);
+    const isForce    = forceSet.has(sym);
     // Skip contracts that stopped trading (SETTLING, DELIVERING) — their ticker is stale
     if (!isForce && t.closeTime && Number(t.closeTime) < now - STALE_TICKER_MS) continue;
-    if (!isForce && quoteVol < TRACK_MIN_VOLUME_24H_USD) continue;
-    // Stable blacklist — always exclude, no override (even force-include cannot bypass)
+    // Stable blacklist — always exclude, no override (even force-include cannot
+    // bypass). Checked BEFORE the threshold so stable coins never leak into the
+    // belowThreshold relax pool.
     const baseAsset = sym.replace(/USDT$/, '');
     if (stableBlacklistSet.has(baseAsset)) {
       const hi   = parseFloat(t.highPrice || '0');
@@ -290,17 +306,50 @@ async function buildAndPersistUniverse(redis) {
       });
       continue;
     }
-    volumeQualified.push({
+    const candidate = {
       symbol:          sym,
       quoteVol24h:     quoteVol,
-      tradeCount24h:   parseInt(t.count || '0', 10),
+      tradeCount24h:   tradeCount,
       isForce,
       // Ticker fields needed for momentumScore
       priceChangePct24h: parseFloat(t.priceChangePercent || '0'),
       highPrice24h:      parseFloat(t.highPrice   || '0'),
       lowPrice24h:       parseFloat(t.lowPrice    || '0'),
       openPrice24h:      parseFloat(t.openPrice   || '0'),
-    });
+    };
+    // AND-gate: both 24h volume and 24h trade count must clear their minimums.
+    // Coins that fail are NOT discarded — they are parked in belowThreshold so
+    // the min-universe volume relax (2b) can pull the most-traded ones back in
+    // when the market is too thin to reach DENSITY_MIN_UNIVERSE_SIZE.
+    const belowVol   = !isForce && quoteVol   < TRACK_MIN_VOLUME_24H_USD;
+    const belowTrade = !isForce && TRACK_MIN_TRADE_COUNT_24H > 0 && tradeCount < TRACK_MIN_TRADE_COUNT_24H;
+    if (belowVol || belowTrade) {
+      belowThreshold.push(candidate);
+      continue;
+    }
+    volumeQualified.push(candidate);
+  }
+
+  // ── 2b. Min-universe volume relax (layer 1) ───────────────────────────────
+  //
+  // If the strict AND-gate qualified fewer than DENSITY_MIN_UNIVERSE_SIZE coins
+  // (genuinely thin / quiet market), reduce filtering: admit the most-traded
+  // sub-threshold coins until the floor is reached. They flow through the full
+  // enrichment + scoring pipeline like any other candidate and are flagged
+  // (_relaxedVolume) so the downstream activity / volatility gates keep them in
+  // rather than dropping them again.
+  if (volumeQualified.length < DENSITY_MIN_UNIVERSE_SIZE && belowThreshold.length > 0) {
+    const need    = DENSITY_MIN_UNIVERSE_SIZE - volumeQualified.length;
+    const relaxIn = belowThreshold
+      .sort((a, b) => (b.tradeCount24h ?? 0) - (a.tradeCount24h ?? 0))
+      .slice(0, need);
+    for (const item of relaxIn) {
+      item._relaxedVolume = true;
+      volumeQualified.push(item);
+    }
+    if (relaxIn.length > 0) {
+      console.log(`[universe] volume relax: only ${volumeQualified.length - relaxIn.length} coins cleared the volume/trade AND-gate — admitted ${relaxIn.length} top-traded sub-threshold coins to reach floor=${DENSITY_MIN_UNIVERSE_SIZE} (${relaxIn.map(i => i.symbol).join(',')})`);
+    }
   }
 
   // ── 3. Load spot metrics for activity gate (if configured) ────────────────
@@ -322,7 +371,7 @@ async function buildAndPersistUniverse(redis) {
   for (const item of volumeQualified) {
     const m = metricsMap.get(item.symbol);
     const activityScore = m?.activityScore ?? null;
-    if (TRACK_MIN_ACTIVITY_SCORE > 0 && !item.isForce && activityScore !== null && activityScore < TRACK_MIN_ACTIVITY_SCORE) {
+    if (TRACK_MIN_ACTIVITY_SCORE > 0 && !item.isForce && !item._relaxedVolume && activityScore !== null && activityScore < TRACK_MIN_ACTIVITY_SCORE) {
       continue;
     }
     passed.push({
@@ -334,8 +383,8 @@ async function buildAndPersistUniverse(redis) {
       hasSpot:        true,   // all USDT futures chains have a corresponding spot pair in most cases
       monitorFutures: true,
       monitorSpot:    INCLUDE_SPOT_FOR_TRACKED_FUTURES,
-      passesVolumeFilter: true,
-      passesActivityFilter: item.isForce || TRACK_MIN_ACTIVITY_SCORE === 0 || (activityScore !== null ? activityScore >= TRACK_MIN_ACTIVITY_SCORE : true),
+      passesVolumeFilter: !item._relaxedVolume,
+      passesActivityFilter: item.isForce || item._relaxedVolume || TRACK_MIN_ACTIVITY_SCORE === 0 || (activityScore !== null ? activityScore >= TRACK_MIN_ACTIVITY_SCORE : true),
       status:         'tracked',
       source:         'universe-builder',
       includedAt:     now,
@@ -472,6 +521,35 @@ async function buildAndPersistUniverse(redis) {
     }
   }
 
+  // ── 4e-bis. Override sets — top-traded coins & big-wall coins bypass gates ──
+  //
+  // The two gates below (low-volatility 4f, activity 4f-bis) must NOT drop a
+  // coin that is either:
+  //   • among the top-N by 24h trade count (most actively traded books — where
+  //     large resting walls like XLM's 447k order are most relevant), or
+  //   • currently carrying a significant confirmed wall.
+  // Force-includes are always exempt as well.
+  const topTradedSet = new Set(
+    [...passed]
+      .sort((a, b) => (b.tradeCount24h ?? 0) - (a.tradeCount24h ?? 0))
+      .slice(0, Math.max(0, DENSITY_ACTIVITY_KEEP_TOP_TRADED))
+      .map(i => i.symbol),
+  );
+
+  const _wallThreshold = (sym) => FUTURES_WALL_THRESHOLDS[sym] ?? FUTURES_WALL_THRESHOLDS._default;
+  const _hasSignificantWall = (item) =>
+    DENSITY_ACTIVITY_KEEP_WALL_COINS && (
+      (item._significantWallCount ?? 0) > 0 ||
+      (item._bestWallPower ?? 0) >= WALL_POWER_SOFT_MIN ||
+      (item._bestWallUsd ?? 0) >= _wallThreshold(item.symbol)
+    );
+
+  // True when a coin must survive the gates regardless of price action.
+  // _relaxedVolume coins were admitted specifically to fill the min-universe
+  // floor (step 2b) — they must not be dropped again by the gates below.
+  const _isGateExempt = (item) =>
+    item.isForce || item._relaxedVolume || topTradedSet.has(item.symbol) || _hasSignificantWall(item);
+
   // ── 4f. Low-volatility filter ─────────────────────────────────────────────
   //
   // Exclude when BOTH 4h AND 24h volatility are below their minimums.
@@ -480,8 +558,8 @@ async function buildAndPersistUniverse(redis) {
   {
     const stillPassed = [];
     for (const item of passed) {
-      if (item.isForce) {
-        item.volatilityStatus = 'ACTIVE';
+      if (_isGateExempt(item)) {
+        item.volatilityStatus = item._relaxedVolume ? 'RELAXED' : 'ACTIVE';
         stillPassed.push(item);
         continue;
       }
@@ -505,6 +583,7 @@ async function buildAndPersistUniverse(redis) {
         stillPassed.push(item);
       } else {
         item.volatilityStatus = 'LOW_VOLATILITY';
+        heldOut.set(item.symbol, item);
         volatilityExcluded.push({
           symbol:           item.symbol,
           reason:           'LOW_VOLATILITY',
@@ -516,6 +595,92 @@ async function buildAndPersistUniverse(redis) {
       }
     }
     passed.splice(0, passed.length, ...stillPassed);
+  }
+
+  // ── 4f-bis. Activity gate (pump OR dump OR high-volatility) ───────────────
+  //
+  // After the AND-gate (volume + trade count) a symbol must show at least ONE
+  // sign of being "in play":
+  //   • pump   — 24h change >= +PUMP_PCT  OR  recent 15m up-move >= MOVE_15M_PCT
+  //   • dump   — 24h change <= -DUMP_PCT  OR  recent 15m down-move >= MOVE_15M_PCT
+  //   • highVol — 24h or 4h high-low range >= VOLATILITY_PCT
+  // Force-include symbols bypass the gate. Disable via DENSITY_ACTIVITY_GATE_ENABLED=false.
+  //
+  if (DENSITY_ACTIVITY_GATE_ENABLED) {
+    const stillPassed = [];
+    for (const item of passed) {
+      // Exemptions: force-include, top-traded, or coins carrying a big wall
+      // always stay in — they bypass the pump/dump/volatility requirement.
+      if (_isGateExempt(item)) {
+        item.activityStatus = item.isForce
+          ? 'ACTIVE'
+          : item._relaxedVolume
+            ? 'RELAXED'
+            : (_hasSignificantWall(item) ? 'HAS_WALL' : 'TOP_TRADED');
+        stillPassed.push(item);
+        continue;
+      }
+
+      const chg24h   = item.priceChangePct24h ?? 0;
+      const move15m  = item._priceMove15mPct ?? 0;
+      const vol24h   = item.volatility24hPct ?? 0;
+      const vol4h    = item.volatility4hPct;
+
+      const isPump   = chg24h >=  DENSITY_ACTIVITY_PUMP_PCT_24H || move15m >= DENSITY_ACTIVITY_PRICE_MOVE_15M_PCT;
+      const isDump   = chg24h <= -DENSITY_ACTIVITY_DUMP_PCT_24H;
+      const isHighVol = vol24h >= DENSITY_ACTIVITY_VOLATILITY_PCT
+        || (vol4h !== null && vol4h >= DENSITY_ACTIVITY_VOLATILITY_PCT);
+
+      if (isPump || isDump || isHighVol) {
+        item.activityStatus = isPump ? 'PUMP' : (isDump ? 'DUMP' : 'HIGH_VOLATILITY');
+        stillPassed.push(item);
+      } else {
+        item.activityStatus = 'INACTIVE';
+        heldOut.set(item.symbol, item);
+        activityExcluded.push({
+          symbol:           item.symbol,
+          reason:           'NO_ACTIVITY',
+          priceChangePct24h: chg24h,
+          priceMove15mPct:   move15m,
+          volatility4hPct:   vol4h,
+          volatility24hPct:  vol24h,
+          updatedAt:         now,
+        });
+      }
+    }
+    passed.splice(0, passed.length, ...stillPassed);
+  }
+
+  // ── 4f-ter. Min-universe relax fallback ───────────────────────────────────
+  //
+  // If the gates left fewer than DENSITY_MIN_UNIVERSE_SIZE coins, re-admit the
+  // most-traded coins that were just dropped (low-vol / no-activity) until the
+  // floor is reached. Guarantees there are always enough coins to surface wall
+  // info even on a quiet market.
+  if (passed.length < DENSITY_MIN_UNIVERSE_SIZE && heldOut.size > 0) {
+    const passedSet = new Set(passed.map(i => i.symbol));
+    const need      = DENSITY_MIN_UNIVERSE_SIZE - passed.length;
+    const readmit   = [...heldOut.values()]
+      .filter(i => !passedSet.has(i.symbol))
+      .sort((a, b) => (b.tradeCount24h ?? 0) - (a.tradeCount24h ?? 0))
+      .slice(0, need);
+    if (readmit.length > 0) {
+      const readmitSet = new Set(readmit.map(i => i.symbol));
+      for (const item of readmit) {
+        item.activityStatus   = 'RELAXED';
+        item.volatilityStatus = item.volatilityStatus === 'LOW_VOLATILITY' ? 'RELAXED' : item.volatilityStatus;
+        passed.push(item);
+      }
+      // Drop re-admitted symbols from the debug-exclude lists so a coin never
+      // appears as both tracked and excluded.
+      for (let i = volatilityExcluded.length - 1; i >= 0; i--) {
+        if (readmitSet.has(volatilityExcluded[i].symbol)) volatilityExcluded.splice(i, 1);
+      }
+      for (let i = activityExcluded.length - 1; i >= 0; i--) {
+        if (readmitSet.has(activityExcluded[i].symbol)) activityExcluded.splice(i, 1);
+      }
+      console.log(`[universe] relax fallback: re-admitted ${readmit.length} top-traded coins to reach floor=${DENSITY_MIN_UNIVERSE_SIZE} (${readmit.map(i => i.symbol).join(',')})`);
+    }
   }
 
   // ── 4g. densityScore + reason per symbol ──────────────────────────────────
@@ -663,6 +828,7 @@ async function buildAndPersistUniverse(redis) {
       volatility4hPct:     item.volatility4hPct  ?? null,
       volatility24hPct:    item.volatility24hPct ?? null,
       volatilityStatus:    item.volatilityStatus ?? 'ACTIVE',
+      activityStatus:      item.activityStatus   ?? 'ACTIVE',
     };
   }
 
@@ -672,7 +838,12 @@ async function buildAndPersistUniverse(redis) {
     symbols:   futuresSymbols,
     filters: {
       minVolume24h:     TRACK_MIN_VOLUME_24H_USD,
+      minTradeCount24h: TRACK_MIN_TRADE_COUNT_24H,
       minActivityScore: TRACK_MIN_ACTIVITY_SCORE,
+      activityGate:     DENSITY_ACTIVITY_GATE_ENABLED,
+      keepTopTraded:    DENSITY_ACTIVITY_KEEP_TOP_TRADED,
+      keepWallCoins:    DENSITY_ACTIVITY_KEEP_WALL_COINS,
+      minUniverseSize:  DENSITY_MIN_UNIVERSE_SIZE,
       maxSymbols,
     },
   });
@@ -697,7 +868,7 @@ async function buildAndPersistUniverse(redis) {
   }
 
   // 5a-bis. Write excluded symbols debug list (stable + low-volatility)
-  const allExcluded = [...stableExcluded, ...volatilityExcluded];
+  const allExcluded = [...stableExcluded, ...volatilityExcluded, ...activityExcluded];
   if (allExcluded.length > 0) {
     mainPipeline.set(
       'density:universe:excluded',
@@ -787,7 +958,7 @@ async function buildAndPersistUniverse(redis) {
 
   console.log(
     `[universe] built — qualified=${volumeQualified.length} passed=${passed.length}` +
-    ` stableExcluded=${stableExcluded.length} volatilityExcluded=${volatilityExcluded.length}` +
+    ` stableExcluded=${stableExcluded.length} volatilityExcluded=${volatilityExcluded.length} activityExcluded=${activityExcluded.length}` +
     ` core=${coreList.length} walls=${wallAnomalyList.length} momentum=${momentumList.length} liq=${liquidityList.length}` +
     ` total=${futuresSymbols.length}` +
     ` topWalls=[${topByWall.join(',')}]` +

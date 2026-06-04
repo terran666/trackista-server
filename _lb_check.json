@@ -1,0 +1,1071 @@
+{
+    "success":  true,
+    "strategy":  "levelBased",
+    "mode":  "raw",
+    "count":  9,
+    "items":  [
+                  {
+                      "id":  "XRPUSDT_15m_SUPPORT_BREAKDOWN",
+                      "symbol":  "XRPUSDT",
+                      "tf":  "15m",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "CONFIRMED",
+                      "score":  96,
+                      "price":  1.2307,
+                      "neckline":  1.3336,
+                      "distancePct":  -7.716,
+                      "breakLevel":  1.3336,
+                      "supportLevel":  1.3336,
+                      "supportSource":  "extreme-cluster",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  4,
+                      "strength":  4,
+                      "breakdownPct":  7.716,
+                      "scoreBreakdown":  {
+                                             "total":  96,
+                                             "touchesScore":  27,
+                                             "strengthScore":  28,
+                                             "distanceScore":  29,
+                                             "clusterScore":  12
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849228,
+                      "createdAt":  1780465838859,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "ZECUSDT_5m_RESISTANCE_BREAKOUT",
+                      "symbol":  "ZECUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "RESISTANCE_BREAKOUT",
+                      "direction":  "LONG",
+                      "status":  "CONFIRMED",
+                      "score":  88,
+                      "price":  615.63,
+                      "neckline":  583.12,
+                      "distancePct":  5.5752,
+                      "breakLevel":  583.12,
+                      "supportLevel":  null,
+                      "supportSource":  null,
+                      "resistanceLevel":  583.12,
+                      "resistanceSource":  "autolevels",
+                      "touches":  4,
+                      "strength":  4,
+                      "breakdownPct":  null,
+                      "scoreBreakdown":  {
+                                             "total":  88,
+                                             "touchesScore":  27,
+                                             "strengthScore":  28,
+                                             "distanceScore":  21,
+                                             "clusterScore":  12
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849227,
+                      "createdAt":  1780465838858,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "1000PEPEUSDT_1h_SUPPORT_BREAKDOWN",
+                      "symbol":  "1000PEPEUSDT",
+                      "tf":  "1h",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "CONFIRMED",
+                      "score":  79,
+                      "price":  0.0031736,
+                      "neckline":  0.0032751,
+                      "distancePct":  -3.0991,
+                      "breakLevel":  0.0032751,
+                      "supportLevel":  0.0032751,
+                      "supportSource":  "autolevels",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  4,
+                      "strength":  4,
+                      "breakdownPct":  3.0991,
+                      "scoreBreakdown":  {
+                                             "total":  79,
+                                             "touchesScore":  27,
+                                             "strengthScore":  28,
+                                             "distanceScore":  12,
+                                             "clusterScore":  12
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849232,
+                      "createdAt":  1780465838863,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "APRUSDT_5m_RESISTANCE_BREAKOUT",
+                      "symbol":  "APRUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "RESISTANCE_BREAKOUT",
+                      "direction":  "LONG",
+                      "status":  "CONFIRMED",
+                      "score":  77,
+                      "price":  0.24104,
+                      "neckline":  0.23684,
+                      "distancePct":  1.7733,
+                      "breakLevel":  0.23684,
+                      "supportLevel":  null,
+                      "supportSource":  null,
+                      "resistanceLevel":  0.23684,
+                      "resistanceSource":  "extreme-cluster",
+                      "touches":  5,
+                      "strength":  5,
+                      "breakdownPct":  null,
+                      "scoreBreakdown":  {
+                                             "total":  77,
+                                             "touchesScore":  28,
+                                             "strengthScore":  28,
+                                             "distanceScore":  7,
+                                             "clusterScore":  14
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849230,
+                      "createdAt":  1780465838861,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "ETHUSDT_15m_SUPPORT_BREAKDOWN",
+                      "symbol":  "ETHUSDT",
+                      "tf":  "15m",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "CONFIRMED",
+                      "score":  61,
+                      "price":  1867.61,
+                      "neckline":  1965.89,
+                      "distancePct":  -4.9993,
+                      "breakLevel":  1965.89,
+                      "supportLevel":  1965.89,
+                      "supportSource":  "autolevels",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  3,
+                      "strength":  3,
+                      "breakdownPct":  4.9993,
+                      "scoreBreakdown":  {
+                                             "total":  61,
+                                             "touchesScore":  18,
+                                             "strengthScore":  24,
+                                             "distanceScore":  19,
+                                             "clusterScore":  0
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849232,
+                      "createdAt":  1780465838863,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "BSBUSDT_1h_SUPPORT_BREAKDOWN",
+                      "symbol":  "BSBUSDT",
+                      "tf":  "1h",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "BREAKDOWN",
+                      "score":  54,
+                      "price":  0.25836,
+                      "neckline":  0.2613417154553872,
+                      "distancePct":  -1.1409,
+                      "breakLevel":  0.2613417154553872,
+                      "supportLevel":  0.2613417154553872,
+                      "supportSource":  "extreme-cluster",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  3,
+                      "strength":  3,
+                      "breakdownPct":  1.1409,
+                      "scoreBreakdown":  {
+                                             "total":  54,
+                                             "touchesScore":  18,
+                                             "strengthScore":  24,
+                                             "distanceScore":  4,
+                                             "clusterScore":  8
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849229,
+                      "createdAt":  1780465838860,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "BEATUSDT_5m_SUPPORT_BREAKDOWN",
+                      "symbol":  "BEATUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "CONFIRMED",
+                      "score":  53,
+                      "price":  1.1337,
+                      "neckline":  1.2245,
+                      "distancePct":  -7.4153,
+                      "breakLevel":  1.2245,
+                      "supportLevel":  1.2245,
+                      "supportSource":  "autolevels",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  2,
+                      "strength":  2,
+                      "breakdownPct":  7.4153,
+                      "scoreBreakdown":  {
+                                             "total":  53,
+                                             "touchesScore":  9,
+                                             "strengthScore":  16,
+                                             "distanceScore":  28,
+                                             "clusterScore":  0
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849233,
+                      "createdAt":  1780465838864,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "SKYAIUSDT_5m_RESISTANCE_BREAKOUT",
+                      "symbol":  "SKYAIUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "RESISTANCE_BREAKOUT",
+                      "direction":  "LONG",
+                      "status":  "CONFIRMED",
+                      "score":  49,
+                      "price":  0.20585,
+                      "neckline":  0.19342,
+                      "distancePct":  6.4264,
+                      "breakLevel":  0.19342,
+                      "supportLevel":  null,
+                      "supportSource":  null,
+                      "resistanceLevel":  0.19342,
+                      "resistanceSource":  "autolevels",
+                      "touches":  2,
+                      "strength":  2,
+                      "breakdownPct":  null,
+                      "scoreBreakdown":  {
+                                             "total":  49,
+                                             "touchesScore":  9,
+                                             "strengthScore":  16,
+                                             "distanceScore":  24,
+                                             "clusterScore":  0
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849229,
+                      "createdAt":  1780465838860,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  },
+                  {
+                      "id":  "RIVERUSDT_15m_SUPPORT_BREAKDOWN",
+                      "symbol":  "RIVERUSDT",
+                      "tf":  "15m",
+                      "market":  "futures",
+                      "patternType":  "SUPPORT_BREAKDOWN",
+                      "direction":  "SHORT",
+                      "status":  "CONFIRMED",
+                      "score":  47,
+                      "price":  5.272,
+                      "neckline":  5.54,
+                      "distancePct":  -4.8375,
+                      "breakLevel":  5.54,
+                      "supportLevel":  5.54,
+                      "supportSource":  "extreme-cluster",
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  2,
+                      "strength":  2,
+                      "breakdownPct":  4.8375,
+                      "scoreBreakdown":  {
+                                             "total":  47,
+                                             "touchesScore":  9,
+                                             "strengthScore":  16,
+                                             "distanceScore":  18,
+                                             "clusterScore":  4
+                                         },
+                      "strategy":  "levelBased",
+                      "updatedAt":  1780465849228,
+                      "createdAt":  1780465838859,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "levelBasedEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  }
+              ],
+    "data":  [
+                 {
+                     "id":  "XRPUSDT_15m_SUPPORT_BREAKDOWN",
+                     "symbol":  "XRPUSDT",
+                     "tf":  "15m",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "CONFIRMED",
+                     "score":  96,
+                     "price":  1.2307,
+                     "neckline":  1.3336,
+                     "distancePct":  -7.716,
+                     "breakLevel":  1.3336,
+                     "supportLevel":  1.3336,
+                     "supportSource":  "extreme-cluster",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  4,
+                     "strength":  4,
+                     "breakdownPct":  7.716,
+                     "scoreBreakdown":  {
+                                            "total":  96,
+                                            "touchesScore":  27,
+                                            "strengthScore":  28,
+                                            "distanceScore":  29,
+                                            "clusterScore":  12
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849228,
+                     "createdAt":  1780465838859,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "ZECUSDT_5m_RESISTANCE_BREAKOUT",
+                     "symbol":  "ZECUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "RESISTANCE_BREAKOUT",
+                     "direction":  "LONG",
+                     "status":  "CONFIRMED",
+                     "score":  88,
+                     "price":  615.63,
+                     "neckline":  583.12,
+                     "distancePct":  5.5752,
+                     "breakLevel":  583.12,
+                     "supportLevel":  null,
+                     "supportSource":  null,
+                     "resistanceLevel":  583.12,
+                     "resistanceSource":  "autolevels",
+                     "touches":  4,
+                     "strength":  4,
+                     "breakdownPct":  null,
+                     "scoreBreakdown":  {
+                                            "total":  88,
+                                            "touchesScore":  27,
+                                            "strengthScore":  28,
+                                            "distanceScore":  21,
+                                            "clusterScore":  12
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849227,
+                     "createdAt":  1780465838858,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "1000PEPEUSDT_1h_SUPPORT_BREAKDOWN",
+                     "symbol":  "1000PEPEUSDT",
+                     "tf":  "1h",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "CONFIRMED",
+                     "score":  79,
+                     "price":  0.0031736,
+                     "neckline":  0.0032751,
+                     "distancePct":  -3.0991,
+                     "breakLevel":  0.0032751,
+                     "supportLevel":  0.0032751,
+                     "supportSource":  "autolevels",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  4,
+                     "strength":  4,
+                     "breakdownPct":  3.0991,
+                     "scoreBreakdown":  {
+                                            "total":  79,
+                                            "touchesScore":  27,
+                                            "strengthScore":  28,
+                                            "distanceScore":  12,
+                                            "clusterScore":  12
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849232,
+                     "createdAt":  1780465838863,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "APRUSDT_5m_RESISTANCE_BREAKOUT",
+                     "symbol":  "APRUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "RESISTANCE_BREAKOUT",
+                     "direction":  "LONG",
+                     "status":  "CONFIRMED",
+                     "score":  77,
+                     "price":  0.24104,
+                     "neckline":  0.23684,
+                     "distancePct":  1.7733,
+                     "breakLevel":  0.23684,
+                     "supportLevel":  null,
+                     "supportSource":  null,
+                     "resistanceLevel":  0.23684,
+                     "resistanceSource":  "extreme-cluster",
+                     "touches":  5,
+                     "strength":  5,
+                     "breakdownPct":  null,
+                     "scoreBreakdown":  {
+                                            "total":  77,
+                                            "touchesScore":  28,
+                                            "strengthScore":  28,
+                                            "distanceScore":  7,
+                                            "clusterScore":  14
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849230,
+                     "createdAt":  1780465838861,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "ETHUSDT_15m_SUPPORT_BREAKDOWN",
+                     "symbol":  "ETHUSDT",
+                     "tf":  "15m",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "CONFIRMED",
+                     "score":  61,
+                     "price":  1867.61,
+                     "neckline":  1965.89,
+                     "distancePct":  -4.9993,
+                     "breakLevel":  1965.89,
+                     "supportLevel":  1965.89,
+                     "supportSource":  "autolevels",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  3,
+                     "strength":  3,
+                     "breakdownPct":  4.9993,
+                     "scoreBreakdown":  {
+                                            "total":  61,
+                                            "touchesScore":  18,
+                                            "strengthScore":  24,
+                                            "distanceScore":  19,
+                                            "clusterScore":  0
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849232,
+                     "createdAt":  1780465838863,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "BSBUSDT_1h_SUPPORT_BREAKDOWN",
+                     "symbol":  "BSBUSDT",
+                     "tf":  "1h",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "BREAKDOWN",
+                     "score":  54,
+                     "price":  0.25836,
+                     "neckline":  0.2613417154553872,
+                     "distancePct":  -1.1409,
+                     "breakLevel":  0.2613417154553872,
+                     "supportLevel":  0.2613417154553872,
+                     "supportSource":  "extreme-cluster",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  3,
+                     "strength":  3,
+                     "breakdownPct":  1.1409,
+                     "scoreBreakdown":  {
+                                            "total":  54,
+                                            "touchesScore":  18,
+                                            "strengthScore":  24,
+                                            "distanceScore":  4,
+                                            "clusterScore":  8
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849229,
+                     "createdAt":  1780465838860,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "BEATUSDT_5m_SUPPORT_BREAKDOWN",
+                     "symbol":  "BEATUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "CONFIRMED",
+                     "score":  53,
+                     "price":  1.1337,
+                     "neckline":  1.2245,
+                     "distancePct":  -7.4153,
+                     "breakLevel":  1.2245,
+                     "supportLevel":  1.2245,
+                     "supportSource":  "autolevels",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  2,
+                     "strength":  2,
+                     "breakdownPct":  7.4153,
+                     "scoreBreakdown":  {
+                                            "total":  53,
+                                            "touchesScore":  9,
+                                            "strengthScore":  16,
+                                            "distanceScore":  28,
+                                            "clusterScore":  0
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849233,
+                     "createdAt":  1780465838864,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "SKYAIUSDT_5m_RESISTANCE_BREAKOUT",
+                     "symbol":  "SKYAIUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "RESISTANCE_BREAKOUT",
+                     "direction":  "LONG",
+                     "status":  "CONFIRMED",
+                     "score":  49,
+                     "price":  0.20585,
+                     "neckline":  0.19342,
+                     "distancePct":  6.4264,
+                     "breakLevel":  0.19342,
+                     "supportLevel":  null,
+                     "supportSource":  null,
+                     "resistanceLevel":  0.19342,
+                     "resistanceSource":  "autolevels",
+                     "touches":  2,
+                     "strength":  2,
+                     "breakdownPct":  null,
+                     "scoreBreakdown":  {
+                                            "total":  49,
+                                            "touchesScore":  9,
+                                            "strengthScore":  16,
+                                            "distanceScore":  24,
+                                            "clusterScore":  0
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849229,
+                     "createdAt":  1780465838860,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 },
+                 {
+                     "id":  "RIVERUSDT_15m_SUPPORT_BREAKDOWN",
+                     "symbol":  "RIVERUSDT",
+                     "tf":  "15m",
+                     "market":  "futures",
+                     "patternType":  "SUPPORT_BREAKDOWN",
+                     "direction":  "SHORT",
+                     "status":  "CONFIRMED",
+                     "score":  47,
+                     "price":  5.272,
+                     "neckline":  5.54,
+                     "distancePct":  -4.8375,
+                     "breakLevel":  5.54,
+                     "supportLevel":  5.54,
+                     "supportSource":  "extreme-cluster",
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  2,
+                     "strength":  2,
+                     "breakdownPct":  4.8375,
+                     "scoreBreakdown":  {
+                                            "total":  47,
+                                            "touchesScore":  9,
+                                            "strengthScore":  16,
+                                            "distanceScore":  18,
+                                            "clusterScore":  4
+                                        },
+                     "strategy":  "levelBased",
+                     "updatedAt":  1780465849228,
+                     "createdAt":  1780465838859,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "levelBasedEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 }
+             ],
+    "formations":  [
+                       {
+                           "id":  "XRPUSDT_15m_SUPPORT_BREAKDOWN",
+                           "symbol":  "XRPUSDT",
+                           "tf":  "15m",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "CONFIRMED",
+                           "score":  96,
+                           "price":  1.2307,
+                           "neckline":  1.3336,
+                           "distancePct":  -7.716,
+                           "breakLevel":  1.3336,
+                           "supportLevel":  1.3336,
+                           "supportSource":  "extreme-cluster",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  4,
+                           "strength":  4,
+                           "breakdownPct":  7.716,
+                           "scoreBreakdown":  {
+                                                  "total":  96,
+                                                  "touchesScore":  27,
+                                                  "strengthScore":  28,
+                                                  "distanceScore":  29,
+                                                  "clusterScore":  12
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849228,
+                           "createdAt":  1780465838859,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "ZECUSDT_5m_RESISTANCE_BREAKOUT",
+                           "symbol":  "ZECUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "RESISTANCE_BREAKOUT",
+                           "direction":  "LONG",
+                           "status":  "CONFIRMED",
+                           "score":  88,
+                           "price":  615.63,
+                           "neckline":  583.12,
+                           "distancePct":  5.5752,
+                           "breakLevel":  583.12,
+                           "supportLevel":  null,
+                           "supportSource":  null,
+                           "resistanceLevel":  583.12,
+                           "resistanceSource":  "autolevels",
+                           "touches":  4,
+                           "strength":  4,
+                           "breakdownPct":  null,
+                           "scoreBreakdown":  {
+                                                  "total":  88,
+                                                  "touchesScore":  27,
+                                                  "strengthScore":  28,
+                                                  "distanceScore":  21,
+                                                  "clusterScore":  12
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849227,
+                           "createdAt":  1780465838858,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "1000PEPEUSDT_1h_SUPPORT_BREAKDOWN",
+                           "symbol":  "1000PEPEUSDT",
+                           "tf":  "1h",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "CONFIRMED",
+                           "score":  79,
+                           "price":  0.0031736,
+                           "neckline":  0.0032751,
+                           "distancePct":  -3.0991,
+                           "breakLevel":  0.0032751,
+                           "supportLevel":  0.0032751,
+                           "supportSource":  "autolevels",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  4,
+                           "strength":  4,
+                           "breakdownPct":  3.0991,
+                           "scoreBreakdown":  {
+                                                  "total":  79,
+                                                  "touchesScore":  27,
+                                                  "strengthScore":  28,
+                                                  "distanceScore":  12,
+                                                  "clusterScore":  12
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849232,
+                           "createdAt":  1780465838863,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "APRUSDT_5m_RESISTANCE_BREAKOUT",
+                           "symbol":  "APRUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "RESISTANCE_BREAKOUT",
+                           "direction":  "LONG",
+                           "status":  "CONFIRMED",
+                           "score":  77,
+                           "price":  0.24104,
+                           "neckline":  0.23684,
+                           "distancePct":  1.7733,
+                           "breakLevel":  0.23684,
+                           "supportLevel":  null,
+                           "supportSource":  null,
+                           "resistanceLevel":  0.23684,
+                           "resistanceSource":  "extreme-cluster",
+                           "touches":  5,
+                           "strength":  5,
+                           "breakdownPct":  null,
+                           "scoreBreakdown":  {
+                                                  "total":  77,
+                                                  "touchesScore":  28,
+                                                  "strengthScore":  28,
+                                                  "distanceScore":  7,
+                                                  "clusterScore":  14
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849230,
+                           "createdAt":  1780465838861,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "ETHUSDT_15m_SUPPORT_BREAKDOWN",
+                           "symbol":  "ETHUSDT",
+                           "tf":  "15m",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "CONFIRMED",
+                           "score":  61,
+                           "price":  1867.61,
+                           "neckline":  1965.89,
+                           "distancePct":  -4.9993,
+                           "breakLevel":  1965.89,
+                           "supportLevel":  1965.89,
+                           "supportSource":  "autolevels",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  3,
+                           "strength":  3,
+                           "breakdownPct":  4.9993,
+                           "scoreBreakdown":  {
+                                                  "total":  61,
+                                                  "touchesScore":  18,
+                                                  "strengthScore":  24,
+                                                  "distanceScore":  19,
+                                                  "clusterScore":  0
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849232,
+                           "createdAt":  1780465838863,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "BSBUSDT_1h_SUPPORT_BREAKDOWN",
+                           "symbol":  "BSBUSDT",
+                           "tf":  "1h",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "BREAKDOWN",
+                           "score":  54,
+                           "price":  0.25836,
+                           "neckline":  0.2613417154553872,
+                           "distancePct":  -1.1409,
+                           "breakLevel":  0.2613417154553872,
+                           "supportLevel":  0.2613417154553872,
+                           "supportSource":  "extreme-cluster",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  3,
+                           "strength":  3,
+                           "breakdownPct":  1.1409,
+                           "scoreBreakdown":  {
+                                                  "total":  54,
+                                                  "touchesScore":  18,
+                                                  "strengthScore":  24,
+                                                  "distanceScore":  4,
+                                                  "clusterScore":  8
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849229,
+                           "createdAt":  1780465838860,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "BEATUSDT_5m_SUPPORT_BREAKDOWN",
+                           "symbol":  "BEATUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "CONFIRMED",
+                           "score":  53,
+                           "price":  1.1337,
+                           "neckline":  1.2245,
+                           "distancePct":  -7.4153,
+                           "breakLevel":  1.2245,
+                           "supportLevel":  1.2245,
+                           "supportSource":  "autolevels",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  2,
+                           "strength":  2,
+                           "breakdownPct":  7.4153,
+                           "scoreBreakdown":  {
+                                                  "total":  53,
+                                                  "touchesScore":  9,
+                                                  "strengthScore":  16,
+                                                  "distanceScore":  28,
+                                                  "clusterScore":  0
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849233,
+                           "createdAt":  1780465838864,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "SKYAIUSDT_5m_RESISTANCE_BREAKOUT",
+                           "symbol":  "SKYAIUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "RESISTANCE_BREAKOUT",
+                           "direction":  "LONG",
+                           "status":  "CONFIRMED",
+                           "score":  49,
+                           "price":  0.20585,
+                           "neckline":  0.19342,
+                           "distancePct":  6.4264,
+                           "breakLevel":  0.19342,
+                           "supportLevel":  null,
+                           "supportSource":  null,
+                           "resistanceLevel":  0.19342,
+                           "resistanceSource":  "autolevels",
+                           "touches":  2,
+                           "strength":  2,
+                           "breakdownPct":  null,
+                           "scoreBreakdown":  {
+                                                  "total":  49,
+                                                  "touchesScore":  9,
+                                                  "strengthScore":  16,
+                                                  "distanceScore":  24,
+                                                  "clusterScore":  0
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849229,
+                           "createdAt":  1780465838860,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       },
+                       {
+                           "id":  "RIVERUSDT_15m_SUPPORT_BREAKDOWN",
+                           "symbol":  "RIVERUSDT",
+                           "tf":  "15m",
+                           "market":  "futures",
+                           "patternType":  "SUPPORT_BREAKDOWN",
+                           "direction":  "SHORT",
+                           "status":  "CONFIRMED",
+                           "score":  47,
+                           "price":  5.272,
+                           "neckline":  5.54,
+                           "distancePct":  -4.8375,
+                           "breakLevel":  5.54,
+                           "supportLevel":  5.54,
+                           "supportSource":  "extreme-cluster",
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  2,
+                           "strength":  2,
+                           "breakdownPct":  4.8375,
+                           "scoreBreakdown":  {
+                                                  "total":  47,
+                                                  "touchesScore":  9,
+                                                  "strengthScore":  16,
+                                                  "distanceScore":  18,
+                                                  "clusterScore":  4
+                                              },
+                           "strategy":  "levelBased",
+                           "updatedAt":  1780465849228,
+                           "createdAt":  1780465838859,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "levelBasedEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       }
+                   ],
+    "debug":  {
+                  "totalRawFormations":  9,
+                  "afterFilters":  9,
+                  "afterUniqueSymbol":  9
+              },
+    "generatedAt":  1780465849988
+}

@@ -38,6 +38,8 @@ const {
   FUTURES_ALL_TICKERS_KEY,
   FUTURES_ORDERBOOK_FLUSH_MS,
   FUTURES_TOP_LEVELS,
+  FUTURES_WS_STREAMS_PER_CONN,
+  FUTURES_WS_OPEN_SNAPSHOT_STAGGER_MS,
   FUTURES_RECONNECT_DELAY_MS,
   FUTURES_STATS_LOG_INTERVAL_MS,
   FUTURES_VOLUME_REFRESH_MS,
@@ -167,7 +169,16 @@ async function drainSnapshotQueue() {
 
       lastSnapshotAt = Date.now();
       const ok = await syncBook(state);
-      if (!ok && !state.deactivated) state.ws?.terminate();
+      // With combined-WS transport the socket is shared by many symbols, so a
+      // failed snapshot must NOT tear down the connection. Instead re-queue a
+      // soft snapshot retry for this symbol once its per-symbol backoff clears.
+      if (!ok && !state.deactivated && !state.synced) {
+        const retryDelay = Math.max(
+          FUTURES_SNAPSHOT_MIN_GAP_MS,
+          (state.rateLimitBackoffUntilMs || 0) - Date.now(),
+        );
+        setTimeout(() => requestSnapshot(state, false), retryDelay);
+      }
     }
   } finally {
     snapshotRunning = false;
@@ -207,7 +218,7 @@ function getOrCreateBook(symbol) {
       rateLimitCount:          0,
       rateLimitBackoffUntilMs: 0,
       deactivated:             false,
-      ws:                      null,
+      poolId:                  null,
     });
   }
   return bookStates.get(symbol);
@@ -265,6 +276,13 @@ async function refreshTickers(redis) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const tickers = await res.json();
     await redis.set(FUTURES_ALL_TICKERS_KEY, JSON.stringify(tickers));
+    // Feed 24h trade counts into the wall detector so heavily-traded coins can
+    // switch into relative-mode wall detection (lower absolute floor).
+    if (Array.isArray(tickers)) {
+      for (const t of tickers) {
+        if (t && t.symbol) wallDetector.setSymbolTradeCount(t.symbol, t.count);
+      }
+    }
     console.log(`[futures-ob] ticker cache written — ${tickers.length} futures symbols`);
   } catch (err) {
     console.error('[futures-ob] ticker refresh failed:', err.message);
@@ -514,11 +532,28 @@ async function syncBook(state) {
     for (const [p, s] of snapshot.asks) { const sz = parseFloat(s); if (sz > 0) state.asks.set(p, sz); }
     state.lastUpdateId = snapId;
 
+    // Futures (USD-M) order-book reconciliation rules (differ from Spot!):
+    //   1. Drop any buffered event whose final id `u` is < snapshot id.
+    //   2. The FIRST processed event must straddle the snapshot id: U <= snapId <= u.
+    //   3. Every subsequent event must chain via `pu` (previous final id):
+    //      event.pu === lastUpdateId, otherwise there is a real gap → resync.
     let dropped = 0, applied = 0;
+    let firstApplied = false;
     for (const event of state.buffer) {
-      if (event.u <= snapId) { dropped++; continue; }
-      if (event.U > state.lastUpdateId + 1) {
-        console.warn(`[futures-ob] ${sym}: sequence gap in buffer (U=${event.U} > lastUpdateId+1=${state.lastUpdateId + 1}), resyncing...`);
+      if (event.u < snapId) { dropped++; continue; }
+      if (!firstApplied) {
+        if (event.U > snapId) {
+          console.warn(`[futures-ob] ${sym}: no buffered event straddles snapshot id (U=${event.U} > snapId=${snapId}), resyncing...`);
+          state.buffer = [];
+          return false;
+        }
+        applyEvent(state, event);
+        firstApplied = true;
+        applied++;
+        continue;
+      }
+      if (event.pu !== undefined && event.pu !== state.lastUpdateId) {
+        console.warn(`[futures-ob] ${sym}: sequence gap in buffer (pu=${event.pu} != lastUpdateId=${state.lastUpdateId}), resyncing...`);
         state.buffer = [];
         return false;
       }
@@ -566,80 +601,218 @@ async function syncBook(state) {
   }
 }
 
-// ─── WebSocket connection per symbol ───────────────────────────────
+// ─── Combined-WS connection pools ──────────────────────────────────
+//
+// Depth streams for many symbols are multiplexed onto a small number of
+// combined WebSocket connections (wss://fstream.binance.com/stream). Each pool
+// holds up to FUTURES_WS_STREAMS_PER_CONN symbols and uses Binance's
+// SUBSCRIBE / UNSUBSCRIBE control frames to add/remove symbols without opening
+// a new socket. This minimises TCP/WS handshakes (a key ban-risk signal) and
+// lets us track far more symbols safely.
+//
+// pool = {
+//   id, ws, ready, deactivated,
+//   symbols: Set<string>,   // symbols assigned to this pool (UPPERCASE)
+//   reqId,                  // monotonic id for SUBSCRIBE/UNSUBSCRIBE frames
+// }
+const wsPools = [];
+let _poolSeq  = 0;
 
-function connectOrderbook(symbol) {
-  const state = getOrCreateBook(symbol);
-  if (state.deactivated) return;
+const streamName = sym => `${sym.toLowerCase()}@depth@100ms`;
 
+function getBookBySymbol(sym) {
+  return bookStates.get(sym) || null;
+}
+
+// Shared depth-message handler — routes by the depthUpdate `s` (symbol) field.
+function handleDepthMessage(msg) {
+  if (!msg || msg.e !== 'depthUpdate') return;
+  const sym = (msg.s || '').toUpperCase();
+  if (!sym) return;
+  const state = getBookBySymbol(sym);
+  if (!state || state.deactivated) return;
+
+  if (!state.synced) {
+    state.buffer.push(msg);
+    // Apply speculatively while waiting for resync so Redis stays fresh.
+    if (!state.syncing) applyEvent(state, msg);
+    return;
+  }
+  if (msg.u <= state.lastUpdateId) return;
+
+  // Futures continuity check: each live event's `pu` (previous final update id)
+  // must equal the last applied `u`. Spot's `U === lastUpdateId + 1` rule does
+  // NOT hold for USD-M futures and produced constant false gaps → endless resync.
+  if (msg.pu !== undefined && msg.pu !== state.lastUpdateId) {
+    const now         = Date.now();
+    const msSinceLast = now - (state.lastResyncAt || 0);
+
+    if (msSinceLast < FUTURES_RESYNC_COOLDOWN_MS && state.lastResyncAt !== 0) {
+      state.resyncSkippedCooldown = (state.resyncSkippedCooldown || 0) + 1;
+      // Apply speculatively despite the gap so the book stays live; a periodic
+      // full resync (after cooldown) reconciles any drift.
+      applyEvent(state, msg);
+      return;
+    }
+
+    state.resyncCount  = (state.resyncCount || 0) + 1;
+    state.synced       = false;
+    state.buffer       = [msg];
+    state.lastResyncAt = now;
+
+    const delay = Math.max(0, FUTURES_RESYNC_COOLDOWN_MS - msSinceLast);
+    console.warn(`[futures-ob] ${sym}: live gap (pu=${msg.pu} expected=${state.lastUpdateId}) resync#${state.resyncCount} in ${delay}ms`);
+    setTimeout(() => requestSnapshot(state, false), delay);
+    return;
+  }
+
+  applyEvent(state, msg);
+}
+
+// Send a SUBSCRIBE / UNSUBSCRIBE control frame for one stream on an open pool.
+function sendPoolControl(pool, method, sym) {
+  if (!pool.ws || pool.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    pool.ws.send(JSON.stringify({
+      method,
+      params: [streamName(sym)],
+      id:     ++pool.reqId,
+    }));
+  } catch (err) {
+    console.error(`[futures-ob] pool#${pool.id}: ${method} ${sym} send failed — ${err.message}`);
+  }
+}
+
+// Trigger a (staggered) REST snapshot for one symbol, marking it for re-sync.
+function snapshotSymbol(state, staggerIndex = 0) {
+  if (!state || state.deactivated) return;
   state.synced = false;
   state.buffer = [];
+  const delay = staggerIndex * FUTURES_WS_OPEN_SNAPSHOT_STAGGER_MS;
+  if (delay <= 0) requestSnapshot(state, true);
+  else setTimeout(() => requestSnapshot(state, true), delay);
+}
 
-  const url = `${BINANCE_WS_BASE}/stream?streams=${symbol.toLowerCase()}@depth@100ms`;
-  console.log(`[futures-ob] ${symbol}: connecting WS...`);
+function connectPool(pool) {
+  if (pool.deactivated) return;
+
+  const url = `${BINANCE_WS_BASE}/stream`;
+  console.log(`[futures-ob] pool#${pool.id}: connecting combined WS (${pool.symbols.size} streams)...`);
   const ws = new WebSocket(url);
-  state.ws = ws;
+  pool.ws    = ws;
+  pool.ready = false;
 
   ws.on('open', () => {
-    console.log(`[futures-ob] ${symbol}: WS open — buffering events, requesting REST snapshot...`);
-    requestSnapshot(state, true);
+    pool.ready = true;
+    const syms = [...pool.symbols];
+    console.log(`[futures-ob] pool#${pool.id}: WS open — subscribing ${syms.length} streams`);
+    // Subscribe to all assigned streams in one (or chunked) control frame.
+    if (syms.length > 0) {
+      try {
+        ws.send(JSON.stringify({
+          method: 'SUBSCRIBE',
+          params: syms.map(streamName),
+          id:     ++pool.reqId,
+        }));
+      } catch (err) {
+        console.error(`[futures-ob] pool#${pool.id}: bulk SUBSCRIBE failed — ${err.message}`);
+      }
+    }
+    // Request a REST snapshot per symbol, staggered to avoid a burst.
+    syms.forEach((sym, i) => snapshotSymbol(getOrCreateBook(sym), i));
   });
 
   ws.on('message', (raw) => {
-    let msg;
-    try { const e = JSON.parse(raw); msg = e.data || e; }
-    catch (err) { console.error(`[futures-ob] ${symbol}: JSON parse error:`, err.message); return; }
-
+    let envelope;
+    try { envelope = JSON.parse(raw); }
+    catch (err) { console.error(`[futures-ob] pool#${pool.id}: JSON parse error: ${err.message}`); return; }
+    // Combined-stream envelope: { stream, data }. Control replies: { result, id }.
+    const msg = envelope.data || envelope;
     if (!msg || msg.e !== 'depthUpdate') return;
-
-    if (!state.synced) {
-      state.buffer.push(msg);
-      // Apply speculatively while waiting for resync so Redis stays fresh (flush every 2s).
-      // The authoritative snapshot in syncBook will reconcile any drift afterwards.
-      if (!state.syncing) applyEvent(state, msg);
-      return;
-    }
-    if (msg.u <= state.lastUpdateId) return;
-
-    if (msg.U > state.lastUpdateId + 1) {
-      const now         = Date.now();
-      const msSinceLast = now - (state.lastResyncAt || 0);
-
-      if (msSinceLast < FUTURES_RESYNC_COOLDOWN_MS && state.lastResyncAt !== 0) {
-        state.resyncSkippedCooldown = (state.resyncSkippedCooldown || 0) + 1;
-        // Apply the event speculatively despite the gap: this advances lastUpdateId
-        // so that subsequent events are sequential and the orderbook stays live.
-        // A periodic full resync (after cooldown expires) reconciles any drift.
-        applyEvent(state, msg);
-        return;
-      }
-
-      state.resyncCount = (state.resyncCount || 0) + 1;
-      state.synced      = false;
-      state.buffer      = [msg];
-      state.lastResyncAt = now;
-
-      const delay = Math.max(0, FUTURES_RESYNC_COOLDOWN_MS - msSinceLast);
-      console.warn(`[futures-ob] ${symbol}: live gap (U=${msg.U} expected=${state.lastUpdateId + 1}) resync#${state.resyncCount} in ${delay}ms`);
-      setTimeout(() => requestSnapshot(state, false), delay);
-      return;
-    }
-
-    applyEvent(state, msg);
+    handleDepthMessage(msg);
   });
 
-  ws.on('error', err => console.error(`[futures-ob] ${symbol}: WS error — ${err.message}`));
+  ws.on('error', err => console.error(`[futures-ob] pool#${pool.id}: WS error — ${err.message}`));
 
   ws.on('close', code => {
-    if (state.deactivated) return;
-    const perSymBackoff   = Math.max(0, (state.rateLimitBackoffUntilMs || 0) - Date.now());
+    pool.ready = false;
+    if (pool.deactivated) return;
+    if (pool.symbols.size === 0) { removePool(pool); return; }
     const globalRemaining = Math.max(0, globalBackoff.until - Date.now());
-    const baseDelay       = Math.max(FUTURES_RECONNECT_DELAY_MS, perSymBackoff, globalRemaining);
-    const jitter          = globalRemaining > 0 ? Math.floor(Math.random() * 3000) : 0;
+    const baseDelay       = Math.max(FUTURES_RECONNECT_DELAY_MS, globalRemaining);
+    const jitter          = Math.floor(Math.random() * 3000);
     const reconnectDelay  = baseDelay + jitter;
-    console.warn(`[futures-ob] ${symbol}: WS closed (code=${code}), reconnecting in ${Math.ceil(reconnectDelay / 1000)}s...`);
-    setTimeout(() => connectOrderbook(symbol), reconnectDelay);
+    console.warn(`[futures-ob] pool#${pool.id}: WS closed (code=${code}, ${pool.symbols.size} streams), reconnecting in ${Math.ceil(reconnectDelay / 1000)}s...`);
+    setTimeout(() => { if (!pool.deactivated) connectPool(pool); }, reconnectDelay);
   });
+}
+
+function createPool() {
+  const pool = {
+    id:          ++_poolSeq,
+    ws:          null,
+    ready:       false,
+    deactivated: false,
+    symbols:     new Set(),
+    reqId:       0,
+  };
+  wsPools.push(pool);
+  return pool;
+}
+
+function removePool(pool) {
+  pool.deactivated = true;
+  try { pool.ws?.terminate(); } catch (_) {}
+  const idx = wsPools.indexOf(pool);
+  if (idx !== -1) wsPools.splice(idx, 1);
+}
+
+// Find a pool with a free slot, or create one.
+function getAvailablePool() {
+  for (const pool of wsPools) {
+    if (!pool.deactivated && pool.symbols.size < FUTURES_WS_STREAMS_PER_CONN) return pool;
+  }
+  const pool = createPool();
+  connectPool(pool);
+  return pool;
+}
+
+// Add a symbol: assign to a pool, subscribe (if pool open), snapshot.
+function addSymbol(symbol) {
+  const sym   = symbol.toUpperCase();
+  const state = getOrCreateBook(sym);
+  if (state.poolId) return; // already assigned
+  state.deactivated = false;
+
+  const pool = getAvailablePool();
+  pool.symbols.add(sym);
+  state.poolId = pool.id;
+
+  // If the pool socket is already open, subscribe + snapshot immediately.
+  // Otherwise the pool's 'open' handler will subscribe + snapshot all symbols.
+  if (pool.ready && pool.ws && pool.ws.readyState === WebSocket.OPEN) {
+    console.log(`[futures-ob] pool#${pool.id}: adding ${sym}`);
+    sendPoolControl(pool, 'SUBSCRIBE', sym);
+    snapshotSymbol(state, 0);
+  }
+}
+
+// Remove a symbol: unsubscribe, drop state, free the slot.
+function removeSymbol(symbol) {
+  const sym   = symbol.toUpperCase();
+  const state = bookStates.get(sym);
+  if (!state) return;
+  state.deactivated = true;
+
+  const pool = wsPools.find(p => p.id === state.poolId);
+  if (pool) {
+    sendPoolControl(pool, 'UNSUBSCRIBE', sym);
+    pool.symbols.delete(sym);
+    // Tear down empty pools to avoid idle sockets.
+    if (pool.symbols.size === 0) removePool(pool);
+  }
+  bookStates.delete(sym);
+  wallDetector.clearSymbol(sym);
 }
 
 // ─── Universe builder timer ─────────────────────────────────────────────────
@@ -705,13 +878,10 @@ function startSymbolWatcher(redis) {
 
       const trackedSet = new Set(data.symbols);
 
-      for (const [sym, state] of bookStates.entries()) {
+      for (const [sym] of bookStates.entries()) {
         if (!trackedSet.has(sym)) {
-          state.deactivated = true;
-          state.ws?.terminate();
-          bookStates.delete(sym);
-          wallDetector.clearSymbol(sym);
           console.log(`[futures-ob] symbol watcher: disconnecting ${sym}`);
+          removeSymbol(sym);
         }
       }
 
@@ -723,13 +893,13 @@ function startSymbolWatcher(redis) {
         .slice(0, slotsAvailable);
       if (newSymbols.length === 0) return;
 
-      console.log(`[futures-ob] symbol watcher: queuing ${newSymbols.length} new symbol(s) (stagger=${FUTURES_STARTUP_STAGGER_MS}ms, total=${bookStates.size + pendingSymbols.size + newSymbols.length}/${MAX_BOOK_SYMBOLS})`);
+      console.log(`[futures-ob] symbol watcher: queuing ${newSymbols.length} new symbol(s) (stagger=${FUTURES_STARTUP_STAGGER_MS}ms, total=${bookStates.size + pendingSymbols.size + newSymbols.length}/${MAX_BOOK_SYMBOLS}, pools=${wsPools.length})`);
 
       newSymbols.forEach((sym, i) => {
         pendingSymbols.add(sym);
         setTimeout(() => {
           pendingSymbols.delete(sym);
-          if (!isSafeModeActive()) { console.log(`[futures-ob] symbol watcher: connecting ${sym}`); connectOrderbook(sym); }
+          if (!isSafeModeActive()) { console.log(`[futures-ob] symbol watcher: connecting ${sym}`); addSymbol(sym); }
         }, i * FUTURES_STARTUP_STAGGER_MS);
       });
 
@@ -746,7 +916,7 @@ function startStatsLogger() {
     const wsConnectedCount = [...bookStates.values()].filter(s => s.synced).length;
     console.log(
       `[futures-ob:stats] tracked=${bookStates.size}/${MAX_BOOK_SYMBOLS}` +
-      ` wsConnected=${wsConnectedCount} confirmedWalls=${confirmedWalls} candidateWalls=${candidateWalls}` +
+      ` pools=${wsPools.length} wsConnected=${wsConnectedCount} confirmedWalls=${confirmedWalls} candidateWalls=${candidateWalls}` +
       ` safeMode=${_safeModeActive} snapshotQueueLen=${snapshotQueue.length} rlEvents5m=${rlEventTimestamps.length}`,
     );
     for (const [sym, state] of bookStates.entries()) {
@@ -802,6 +972,18 @@ async function start(redis) {
     console.log(`[futures-ob] restored global IP backoff — remaining ${Math.ceil((globalBackoff.until - Date.now()) / 1000)}s`);
   }
 
+  // Reconcile any stale safe-mode flag in Redis with our actual (fresh) state.
+  // checkSafeModeExit() only clears the flag while _safeModeActive is true, so a
+  // crash/restart that happened while the flag was '1' would leave it stuck —
+  // which makes the backend's dynamicTrackedSymbolsManager skip tracked-list
+  // rotation forever (frozen universe → new big-wall coins never get collected).
+  // On a fresh boot _safeModeActive is false, so clear the persisted flag to match.
+  if (!_safeModeActive) {
+    redis.del(SAFE_MODE_REDIS_KEY)
+      .then(n => { if (n > 0) console.log('[futures-ob] cleared stale density:futures:safe-mode flag on startup'); })
+      .catch(() => {});
+  }
+
   loadTickSizes().catch(err => console.error('[futures-ob] loadTickSizes error (non-fatal):', err.message));
 
   const symbols = await getWatchlistSymbols(redis);
@@ -817,8 +999,12 @@ async function start(redis) {
   await restoreWallsFromRedis(redis, symbols);
 
   const startupSymbols = symbols.slice(0, MAX_BOOK_SYMBOLS);
-  console.log(`[futures-ob] connecting ${startupSymbols.length}/${symbols.length} symbols (cap=${MAX_BOOK_SYMBOLS}, stagger=${FUTURES_STARTUP_STAGGER_MS}ms each)...`);
-  startupSymbols.forEach((sym, i) => setTimeout(() => connectOrderbook(sym), i * FUTURES_STARTUP_STAGGER_MS));
+  const poolCount = Math.ceil(startupSymbols.length / FUTURES_WS_STREAMS_PER_CONN) || 0;
+  console.log(`[futures-ob] connecting ${startupSymbols.length}/${symbols.length} symbols across ~${poolCount} combined WS pool(s) (cap=${MAX_BOOK_SYMBOLS}, streamsPerConn=${FUTURES_WS_STREAMS_PER_CONN})...`);
+  // Assign symbols to pools. getAvailablePool() opens a pool socket once it is
+  // first needed; each pool subscribes + REST-snapshots its symbols (staggered)
+  // in its own 'open' handler, so no per-symbol connect stagger is needed here.
+  for (const sym of startupSymbols) addSymbol(sym);
 }
 
 module.exports = { start };

@@ -60,6 +60,30 @@ function writeStore(store) {
   fs.renameSync(tmp, DATA_FILE);
 }
 
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function derivePrice(rec) {
+  const direct = numOrNull(rec?.price);
+  if (direct != null && direct > 0) return direct;
+  const pts = Array.isArray(rec?.points) ? rec.points : [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i] || {};
+    const v = numOrNull(p.value ?? p.price);
+    if (v != null && v > 0) return v;
+  }
+  return null;
+}
+
+function normalizeStrengthTouch(v, source) {
+  const n = numOrNull(v);
+  if (n != null && n > 0) return n;
+  if (source === 'extremes' || source === 'vertical-extremes') return 1;
+  return 0;
+}
+
 // ─── Public API ───────────────────────────────────────────────────
 
 /**
@@ -110,6 +134,9 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
   const created = extremes.map(e => {
     const k    = lineKey(e.side, e.points);
     const prev = k ? prevByKey.get(k) : null;
+    const price = derivePrice(e);
+    const strength = normalizeStrengthTouch(e.strength, source);
+    const touches = normalizeStrengthTouch(e.touches, source);
     return {
       id:           store.nextId++,
       userId:       userId ?? (prev?.userId ?? null),
@@ -119,10 +146,10 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
       source,
       side:         e.side,
       type:         e.type         || null,
-      price:        e.price        != null ? parseFloat(e.price) : null,
+      price,
       points:       e.points       || null,
-      strength:     e.strength     != null ? parseFloat(e.strength) : null,
-      touches:      e.touches      != null ? parseInt(e.touches, 10) : null,
+      strength,
+      touches,
       alertEnabled: prev?.alertEnabled ?? false,
       tracked:      prev?.tracked      ?? false,
       createdAt:    prev?.createdAt    ?? now,

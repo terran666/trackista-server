@@ -30,12 +30,22 @@
 
 const { WebSocketServer, WebSocket } = require('ws');
 const { randomUUID }                  = require('crypto');
+const jwt                             = require('jsonwebtoken');
 const { getDelta }                    = require('../services/screenerAggregationService');
 const registry                        = require('../services/wsSubscriptionRegistry');
 const eventBus                        = require('../services/wsEventBus');
 const metrics                         = require('../services/livePollingMetrics');
 const densityService                  = require('../services/densityService');
 const { normalizeWall }               = require('../utils/normalizeWall');
+const { safeSymbol }                  = require('../utils/parseClamp');
+const {
+  buildFormationsView,
+  normalizeDirection,
+  normalizePatternType,
+  normalizeTf,
+  normalizeMarket,
+} = require('../formations/formationView');
+const { VISIBLE_STATUSES }            = require('../formations/formationTypes');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,6 +57,37 @@ const MSG_RATE_MAX            = 50;       // max client messages per window
 const MAX_SINCE_AGE_MS        = 2 * 60 * 1000; // cursor older than 2 min → full resync
 const GET_DELTA_TIMEOUT_MS    = 5_000;    // cap per-client getDelta() to keep flush loop alive
 
+// Optional WS authentication. Disabled by default to preserve the existing
+// (token-less) frontend contract; set WS_REQUIRE_AUTH=1 to enforce a valid JWT
+// on the /ws/live upgrade. The token may be supplied as `?token=<jwt>` or via
+// the `Sec-WebSocket-Protocol` header.
+const WS_REQUIRE_AUTH = process.env.WS_REQUIRE_AUTH === '1' || process.env.WS_REQUIRE_AUTH === 'true';
+const JWT_SECRET      = process.env.JWT_SECRET;
+
+/**
+ * Extract and verify a JWT from a WS upgrade request.
+ * @returns {object|null} decoded payload, or null if missing/invalid.
+ */
+function _verifyUpgradeToken(req) {
+  if (!JWT_SECRET) return null;
+  let token = null;
+  const qIdx = (req.url || '').indexOf('?');
+  if (qIdx !== -1) {
+    const params = new URLSearchParams(req.url.slice(qIdx + 1));
+    token = params.get('token');
+  }
+  if (!token) {
+    const proto = req.headers['sec-websocket-protocol'];
+    if (proto) token = String(proto).split(',')[0].trim();
+  }
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+  } catch (_) {
+    return null;
+  }
+}
+
 /** Flush cadence per scope (ms). */
 const FLUSH_CADENCE = {
   screener : 500,
@@ -56,7 +97,9 @@ const FLUSH_CADENCE = {
   watch    : 2000,
   heatmap  : 1000,
   density  : 400,
-  robobot  : 5000,
+  robobot     : 5000,
+  impulse     : 1000,
+  formations  : 1000,
 };
 
 const VALID_SCOPES = new Set(Object.keys(FLUSH_CADENCE));
@@ -193,6 +236,18 @@ function handleSubscribe(connId, state, msg) {
   const params         =
     (scope === 'heatmap' && msg.symbol && !rawParams.symbol)
       ? { ...rawParams, symbol: msg.symbol } :
+    (scope === 'formations')
+      ? {
+          ...rawParams,
+          strategy: rawParams.strategy ?? msg.strategy,
+          tf: rawParams.tf ?? msg.tf,
+          direction: rawParams.direction ?? msg.direction,
+          market: rawParams.market ?? msg.market,
+          pattern: rawParams.pattern ?? msg.pattern,
+          uniqueSymbol: rawParams.uniqueSymbol ?? msg.uniqueSymbol,
+          limit: rawParams.limit ?? msg.limit,
+          symbol: rawParams.symbol ?? msg.symbol,
+        } :
     (scope === 'density' && (msg.symbol || msg.timeframe))
       ? {
           ...rawParams,
@@ -214,6 +269,22 @@ function handleSubscribe(connId, state, msg) {
       message : `scope must be one of: ${[...VALID_SCOPES].join(', ')}`,
     });
     return;
+  }
+
+  // Validate symbol for scopes that interpolate it into Redis keys / activate
+  // streaming services. Reject malformed symbols early instead of binding a
+  // junk symbol that spawns useless activations or empty Redis lookups.
+  if ((scope === 'heatmap' || scope === 'density') && params.symbol) {
+    const clean = safeSymbol(params.symbol);
+    if (!clean) {
+      safeSend(state.ws, {
+        type    : 'error',
+        code    : 'INVALID_SYMBOL',
+        message : 'symbol must be 3–20 alphanumeric chars',
+      });
+      return;
+    }
+    params.symbol = clean;
   }
 
   // For density scope: detect symbol switch (same subscriptionId, different symbol).
@@ -331,8 +402,12 @@ function _runFlush(scope) {
     _flushHeatmap().catch(err => console.error('[liveWsGateway] flushHeatmap:', err.message));
   } else if (scope === 'density') {
     _flushDensity().catch(err => console.error('[liveWsGateway] flushDensity:', err.message));
+  } else if (scope === 'formations') {
+    _flushFormations().catch(err => console.error('[liveWsGateway] flushFormations:', err.message));
   } else if (scope === 'robobot') {
     _flushRobobot();
+  } else if (scope === 'impulse') {
+    _flushImpulse().catch(err => console.error('[liveWsGateway] flushImpulse:', err.message));
   } else {
     _flushScreenerScope(scope).catch(err =>
       console.error(`[liveWsGateway] flushScope(${scope}):`, err.message),
@@ -595,8 +670,10 @@ async function _flushDensity() {
 
       // Dedupe signature — must change when DOM updates, when POC moves, when
       // stale flags flip, AND when new trades land (footprint cells change).
+      // Guard `snap.stale` — a snapshot missing the field must not throw and
+      // abort the whole group's flush for the remaining subscribers.
       const sig =
-        `${snap.updatedAt}|${snap.poc}|${snap.stale.dom?1:0}|${snap.stale.trades?1:0}|${snap.lastTradeTs ?? 0}`;
+        `${snap.updatedAt}|${snap.poc}|${snap.stale?.dom?1:0}|${snap.stale?.trades?1:0}|${snap.lastTradeTs ?? 0}`;
       if (sub.lastDensitySig === sig) {
         // Still emit heartbeat so client knows the link is alive
         safeSend(state.ws, {
@@ -798,6 +875,109 @@ async function _flushDensity() {
   }
 }
 
+// ─── Formations flush ───────────────────────────────────────────────────────
+//
+// Reads all active formation blobs from Redis once per tick, filters by
+// subscription params (symbol, patternType, tf, marketType), signature-dedupes
+// per subscription, and sends a full `formations:snapshot` when anything changed.
+// Visible statuses are shared with HTTP view-model filtering.
+const _FORMATIONS_VISIBLE = VISIBLE_STATUSES;
+
+function _formationMatchesSubscriptionScope(formation, params = {}) {
+  const symbolFilter = params.symbol ? String(params.symbol).trim().toUpperCase() : null;
+  const strategyFilter = String(params.strategy || params.strategies || 'ALL').trim();
+  const tfFilter = normalizeTf(params.tf || 'ALL');
+  const directionFilter = normalizeDirection(params.direction || 'ALL') || 'ALL';
+  const marketFilter = normalizeMarket(params.market || params.marketType || 'ALL');
+  const patternFilter = normalizePatternType(params.pattern || params.patternType || 'ALL');
+
+  const symbol = String(formation.symbol || '').toUpperCase();
+  const strategy = String(formation.strategy || '');
+  const tf = String(formation.tf || '');
+  const direction = normalizeDirection(formation.direction || 'ALL') || 'ALL';
+  const market = String(formation.marketType || formation.market || '').toLowerCase();
+  const pattern = normalizePatternType(formation.patternType || 'ALL');
+
+  if (symbolFilter && symbol !== symbolFilter) return false;
+  if (strategyFilter !== 'ALL' && strategyFilter !== '*' && strategy !== strategyFilter) return false;
+  if (tfFilter && tfFilter !== 'ALL' && tf !== tfFilter) return false;
+  if (directionFilter !== 'ALL' && direction !== directionFilter) return false;
+  if (marketFilter && marketFilter !== 'ALL' && market !== marketFilter) return false;
+  if (patternFilter && patternFilter !== 'ALL' && pattern !== patternFilter) return false;
+  return true;
+}
+
+async function _flushFormations() {
+  const subs = registry.getSubscriptionsByScope('formations');
+  if (subs.length === 0) return;
+  const now = Date.now();
+
+  // Read all active IDs then pipeline-fetch blobs — one round-trip.
+  let allFormations;
+  try {
+    const ids = await _redis.smembers('formations:scalping:active');
+    if (!ids.length) {
+      allFormations = [];
+    } else {
+      const pipe = _redis.pipeline();
+      for (const id of ids) pipe.get(`formations:scalping:id:${id}`);
+      const res = await pipe.exec();
+      allFormations = res
+        .map(r => { try { return JSON.parse(r?.[1]); } catch (_) { return null; } })
+        .filter(Boolean);
+    }
+  } catch (err) {
+    console.error('[liveWsGateway] _flushFormations read err:', err.message);
+    return;
+  }
+
+  for (const sub of subs) {
+    const state = connections.get(sub.connectionId);
+    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+
+    const params = sub.params || {};
+    const view = buildFormationsView(allFormations, {
+      strategy: params.strategy,
+      symbol: params.symbol,
+      tf: params.tf,
+      direction: params.direction,
+      market: params.market || params.marketType,
+      pattern: params.pattern || params.patternType,
+      uniqueSymbol: params.uniqueSymbol,
+      limit: params.limit,
+    });
+    const data = view.items;
+
+    // Signature: sorted by id so order changes don't trigger false positives.
+    const sig = data
+      .slice()
+      .sort((a, b) => (a.id < b.id ? -1 : 1))
+      .map(f => `${f.id}:${f.updatedAt}`)
+      .join('|');
+
+    if (sub._lastFormationsSig === sig) {
+      safeSend(state.ws, {
+        type: 'heartbeat', scope: 'formations',
+        subscriptionId: sub.subscriptionId, cursor: now, serverTime: now,
+      });
+      metrics.recordWsHeartbeat();
+      continue;
+    }
+    sub._lastFormationsSig = sig;
+
+    safeSend(state.ws, {
+      type           : 'formations:snapshot',
+      subscriptionId : sub.subscriptionId,
+      mode           : view.mode,
+      cursor         : now,
+      serverTime     : now,
+      count          : data.length,
+      items          : data,
+      data,
+    });
+  }
+}
+
 // ─── Robobot flush (heartbeat only — real updates pushed via eventBus) ───────
 
 function _flushRobobot() {
@@ -816,6 +996,79 @@ function _flushRobobot() {
 }
 
 // ─── Alerts flush ─────────────────────────────────────────────────────────────
+
+// ─── Impulse scope flush ──────────────────────────────────────────────────────
+// Broadcasts all active impulse coins (activeUntil > now) to impulse-scope subscribers.
+async function _flushImpulse() {
+  const subs = registry.getSubscriptionsByScope('impulse');
+  if (subs.length === 0) return;
+
+  const now = Date.now();
+
+  // Read active symbol list, then pipeline-fetch all impulse signals
+  const rawSymbols = await _redis.get('symbols:active:usdt');
+  if (!rawSymbols) {
+    for (const sub of subs) {
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+      safeSend(state.ws, { type: 'heartbeat', scope: 'impulse', subscriptionId: sub.subscriptionId, cursor: now, serverTime: now });
+      metrics.recordWsHeartbeat();
+    }
+    return;
+  }
+
+  let symbols;
+  try { symbols = JSON.parse(rawSymbols); } catch (_) { return; }
+
+  const pipeline = _redis.pipeline();
+  for (const sym of symbols) pipeline.get(`impulse:signal:${sym}`);
+  const results = await pipeline.exec();
+  if (!results) return;
+
+  const activeItems = [];
+  for (const [, raw] of results) {
+    if (!raw) continue;
+    try {
+      const item = JSON.parse(raw);
+      if (item && item.activeUntil && item.activeUntil > now) activeItems.push(item);
+    } catch (_) {}
+  }
+
+  // Stable order: by entry time (detectedAt ASC) so coins keep their slot and
+  // do not jump as their impulseScore fluctuates.
+  activeItems.sort((a, b) => {
+    const tDiff = (a.detectedAt ?? a.activeUntil ?? 0) - (b.detectedAt ?? b.activeUntil ?? 0);
+    if (tDiff !== 0) return tDiff;
+    return (a.symbol ?? '').localeCompare(b.symbol ?? '');
+  });
+
+  // Signature: symbol + lastUpdateTs per active item (used for dedup)
+  const sig = activeItems.map(i => `${i.symbol}:${i.lastUpdateTs ?? i.updatedAt}`).join('|');
+
+  for (const sub of subs) {
+    const state = connections.get(sub.connectionId);
+    if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+
+    if (activeItems.length === 0) {
+      safeSend(state.ws, { type: 'heartbeat', scope: 'impulse', subscriptionId: sub.subscriptionId, cursor: now, serverTime: now });
+      metrics.recordWsHeartbeat();
+      continue;
+    }
+
+    // Skip if payload hasn't changed since last send
+    if (sub._lastImpulseSig === sig) continue;
+    sub._lastImpulseSig = sig;
+
+    safeSend(state.ws, {
+      type:           'impulse:update',
+      subscriptionId: sub.subscriptionId,
+      cursor:         now,
+      serverTime:     now,
+      count:          activeItems.length,
+      symbols:        activeItems,
+    });
+  }
+}
 
 async function _flushAlerts() {
   const subs = registry.getSubscriptionsByScope('alerts');
@@ -1150,6 +1403,96 @@ function _attachEventBusListeners() {
   eventBus.on('robobot:event', onRobobotEvent);
   _busHandlers.push(['robobot:event', onRobobotEvent]);
 
+  // Near-instant formation push — fired by formationScalpingService when a
+  // pattern is created or its status changes.  The flush loop is still the
+  // authoritative delivery path; this handler only reduces latency.
+  const onFormationUpdate = async (formation) => {
+    if (!formation) return;
+    const subs = registry.getSubscriptionsByScope('formations');
+    const now  = Date.now();
+
+    let symbolFormations = [];
+    try {
+      const sym = String(formation.symbol || '').toUpperCase();
+      if (sym) {
+        const ids = await _redis.smembers(`formations:scalping:symbol:${sym}`);
+        if (ids.length) {
+          const pipe = _redis.pipeline();
+          for (const id of ids) pipe.get(`formations:scalping:id:${id}`);
+          const res = await pipe.exec();
+          symbolFormations = res
+            .map(r => { try { return JSON.parse(r?.[1]); } catch (_) { return null; } })
+            .filter(Boolean);
+        }
+      }
+    } catch (err) {
+      console.error('[liveWsGateway] formation symbol refresh err:', err.message);
+      symbolFormations = [];
+    }
+
+    const fallbackId = formation.patternType && formation.symbol && formation.tf
+      ? `${formation.symbol}_${formation.tf}_${formation.patternType}`
+      : formation.id;
+
+    for (const sub of subs) {
+      const params    = sub.params || {};
+
+      const wantsRawList = String(params.uniqueSymbol ?? 'true').toLowerCase() === 'false';
+      const baseSource = symbolFormations.length ? symbolFormations : [formation];
+      const source = wantsRawList
+        ? baseSource.filter((f) => {
+          if (!f) return false;
+          if (formation.id && f.id) return String(f.id) === String(formation.id);
+          return (
+            String(f.symbol || '').toUpperCase() === String(formation.symbol || '').toUpperCase()
+            && String(f.tf || '') === String(formation.tf || '')
+            && String(f.patternType || '') === String(formation.patternType || '')
+          );
+        })
+        : baseSource;
+
+      const view = buildFormationsView(source, {
+        strategy: params.strategy,
+        symbol: params.symbol,
+        tf: params.tf,
+        direction: params.direction,
+        market: params.market || params.marketType,
+        pattern: params.pattern || params.patternType,
+        uniqueSymbol: params.uniqueSymbol,
+        limit: 1,
+      });
+
+      const state = connections.get(sub.connectionId);
+      if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+
+      if (!view.items.length || !_FORMATIONS_VISIBLE.has(String(formation.status || '').toUpperCase())) {
+        if (!_formationMatchesSubscriptionScope(formation, params)) {
+          continue;
+        }
+        safeSend(state.ws, {
+          type           : 'formations:update',
+          subscriptionId : sub.subscriptionId,
+          cursor         : formation.updatedAt ?? now,
+          serverTime     : now,
+          action         : 'delete',
+          id             : fallbackId,
+        });
+        continue;
+      }
+
+      safeSend(state.ws, {
+        type           : 'formations:update',
+        subscriptionId : sub.subscriptionId,
+        cursor         : formation.updatedAt ?? now,
+        serverTime     : now,
+        action         : 'upsert',
+        item           : view.items[0],
+      });
+    }
+  };
+  eventBus.on('formation:updated', onFormationUpdate);
+  _busHandlers.push(['formation:updated', onFormationUpdate]);
+
   // Immediate alert push to scope='alerts' subscribers (complements the flush loop)
   const onAlert = (alert) => {
     const subs = registry.getSubscriptionsByScope('alerts');
@@ -1289,6 +1632,17 @@ function attachLiveWsGateway(httpServer, redis) {
   httpServer.on('upgrade', (req, socket, head) => {
     const url = (req.url || '').split('?')[0];
     if (url !== WS_PATH) return; // leave for other handlers (Binance proxy)
+
+    // Optional JWT gate — only enforced when WS_REQUIRE_AUTH is set.
+    if (WS_REQUIRE_AUTH) {
+      const payload = _verifyUpgradeToken(req);
+      if (!payload || !payload.sub) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+    }
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });

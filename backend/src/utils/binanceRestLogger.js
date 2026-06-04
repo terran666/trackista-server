@@ -22,6 +22,13 @@ const REPORT_INTERVAL_MS = 60_000;
 //
 const backoff = { spot: 0, futures: 0 };
 
+// Preemptive "soft" pause set when used-weight approaches the limit. Unlike the
+// hard `backoff` (a real 418/429 IP ban), a soft pause only throttles HEAVY /
+// non-essential calls so used-weight can recover — cheap, cacheable, user-facing
+// reads (e.g. chart klines, flagged `critical`) are still allowed through so the
+// UI never blanks out with a 503 while we are merely being cautious.
+const softPause = { spot: 0, futures: 0 };
+
 // Redis reference stored on first syncBackoffFromRedis call —
 // used for persisting backend-detected bans to Redis and for periodic re-sync.
 let _redis = null;
@@ -36,6 +43,18 @@ function _marketKey(url) {
 
 function isGloballyBanned(url) {
   return Date.now() < backoff[_marketKey(url)];
+}
+
+function isSoftPaused(url) {
+  return Date.now() < softPause[_marketKey(url)];
+}
+
+function setSoftPause(durationMs, url) {
+  const key      = _marketKey(url);
+  const newUntil = Date.now() + durationMs;
+  if (newUntil > softPause[key]) {
+    softPause[key] = newUntil;
+  }
 }
 
 function setBackoff(durationMs, url) {
@@ -171,7 +190,8 @@ function extractEndpoint(url) {
  * @param {string}        [reason]
  * @returns {Promise<Response>}
  */
-async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
+async function binanceFetch(url, opts, service, symbol = '*', reason = '', options = {}) {
+  const { critical = false } = options;
   // ── Per-market IP-level backoff guard ────────────────────────────────────────────
   // Spot and futures track separate bans — a futures IP ban never blocks spot.
   if (isGloballyBanned(url)) {
@@ -179,6 +199,21 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
     const remainingMs = backoff[key] - Date.now();
     const err = new Error(
       `Binance ${key} IP ban active — skipping ${service} call for ${Math.ceil(remainingMs / 1000)}s`,
+    );
+    err.status = 418;
+    err.retryAfterMs = remainingMs;
+    throw err;
+  }
+
+  // ── Preemptive soft pause (used-weight high) ─────────────────────────────────────
+  // Block only heavy / non-critical calls so weight can recover. Critical reads
+  // (UI chart klines) are allowed through — they are cheap and cacheable, and
+  // keeping them alive prevents user-facing 503s during a precautionary pause.
+  if (!critical && isSoftPaused(url)) {
+    const key         = _marketKey(url);
+    const remainingMs = softPause[key] - Date.now();
+    const err = new Error(
+      `Binance ${key} weight high — soft pausing ${service} call for ${Math.ceil(remainingMs / 1000)}s`,
     );
     err.status = 418;
     err.retryAfterMs = remainingMs;
@@ -204,10 +239,10 @@ async function binanceFetch(url, opts, service, symbol = '*', reason = '') {
     const usedWeight = parseInt(res.headers.get('x-mbx-used-weight-1m') || '0', 10);
     const weightLimit = isFutures ? 2400 : 6000;
     if (usedWeight >= Math.floor(weightLimit * 0.83)) {
-      setBackoff(15_000, url);
+      setSoftPause(15_000, url);
       console.error(
         `[binance-rest/backend] ${isFutures ? 'futures' : 'spot'} weight CRITICAL ` +
-        `${usedWeight}/${weightLimit} — preemptive 15s pause`,
+        `${usedWeight}/${weightLimit} — preemptive 15s soft pause (heavy calls only)`,
       );
     } else if (usedWeight >= Math.floor(weightLimit * 0.60)) {
       console.warn(
@@ -249,4 +284,44 @@ function getBackoffState() {
   };
 }
 
-module.exports = { binanceFetch, buildSummary, syncBackoffFromRedis, getBackoffState };
+/**
+ * Manually clear the in-process IP backoff AND the persisted Redis ban so that
+ * Binance calls resume immediately. Use ONLY when Binance is confirmed to no
+ * longer be rate-limiting this IP (a real upstream ban will simply be re-set on
+ * the next 429/418). Clears the Redis key too — otherwise the 5s periodic
+ * re-sync would immediately restore the ban from Redis.
+ *
+ * @param {('spot'|'futures'|'all')} [market='all']
+ * @returns {Promise<{cleared: string[], before: object}>}
+ */
+async function clearBackoff(market = 'all') {
+  const before  = getBackoffState();
+  const markets = market === 'all' ? ['spot', 'futures'] : [market];
+
+  for (const m of markets) {
+    if (m === 'spot' || m === 'futures') backoff[m] = 0;
+    if (m === 'spot' || m === 'futures') softPause[m] = 0;
+  }
+  // Clear the persisted ban in Redis so the periodic re-sync cannot revive it.
+  if (_redis) {
+    try {
+      const raw = await _redis.get(REDIS_BAN_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        for (const m of markets) {
+          if (saved[m]) {
+            saved[m] = { ...saved[m], backoffUntilTs: 0, backoffDurationMs: 0, lastBackoffReason: 'manual_clear' };
+          }
+        }
+        await _redis.set(REDIS_BAN_KEY, JSON.stringify(saved), 'EX', 3600);
+      }
+    } catch (err) {
+      console.warn('[binance-rest/backend] clearBackoff Redis update failed:', err.message);
+    }
+  }
+
+  console.warn(`[binance-rest/backend] IP backoff manually cleared for: ${markets.join(', ')}`);
+  return { cleared: markets, before };
+}
+
+module.exports = { binanceFetch, buildSummary, syncBackoffFromRedis, getBackoffState, clearBackoff };

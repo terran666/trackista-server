@@ -14,6 +14,8 @@
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
+const { getPriceVelocity, computeEtaSec } = require('../utils/wallEta');
+
 const WALL_DEPTH_MIN_WALL_POWER        = parseFloat(process.env.WALL_DEPTH_MIN_WALL_POWER        || '0.65');
 const WALL_DEPTH_MAX_DISTANCE_PCT      = parseFloat(process.env.WALL_DEPTH_MAX_DISTANCE_PCT      || '5');
 const WALL_DEPTH_EXTREME_MAX_DIST_PCT  = parseFloat(process.env.WALL_DEPTH_EXTREME_MAX_DIST_PCT  || '10');
@@ -234,7 +236,8 @@ function _buildLevelsToWall(obLevels, side, midPrice, targetWall, symbol) {
 // ─── Wall formatter ───────────────────────────────────────────────────────────
 
 function _formatWall(w) {
-  const cat       = w.wallCategory ?? w.category ?? '';\n  const isMajor   = cat === 'STRONG_WALL' || cat === 'EXTREME_WALL'
+  const cat       = w.wallCategory ?? w.category ?? '';
+  const isMajor   = cat === 'STRONG_WALL' || cat === 'EXTREME_WALL'
                  || (w.wallPower != null && w.wallPower >= 0.65);
   const now       = Date.now();
   const createdAt = w.firstSeenAt  ?? w.firstSeenTs  ?? null;
@@ -300,16 +303,25 @@ async function _buildWallDepth(redis, symbol, debug = false) {
     ? _buildLevelsToWall(ob.asks || [], 'ask', midPrice, askResult.wall, symbol)
     : [];
 
+  // ── ETA to target walls ─────────────────────────────────────────
+  const velocity = (bidResult.wall || askResult.wall)
+    ? await getPriceVelocity(redis, symbol, 'futures')
+    : 0;
+  const bidTargetWall = bidResult.wall ? _formatWall(bidResult.wall) : null;
+  const askTargetWall = askResult.wall ? _formatWall(askResult.wall) : null;
+  if (bidTargetWall) bidTargetWall.etaSec = computeEtaSec(bidTargetWall.price, midPrice, velocity);
+  if (askTargetWall) askTargetWall.etaSec = computeEtaSec(askTargetWall.price, midPrice, velocity);
+
   const payload = {
     symbol,
     midPrice,
     updatedAt : now,
     bid : {
-      targetWall  : bidResult.wall ? _formatWall(bidResult.wall) : null,
+      targetWall  : bidTargetWall,
       levelsToWall: bidLevels,
     },
     ask : {
-      targetWall  : askResult.wall ? _formatWall(askResult.wall) : null,
+      targetWall  : askTargetWall,
       levelsToWall: askLevels,
     },
   };

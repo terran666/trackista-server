@@ -42,6 +42,10 @@ const {
   WALL_POWER_SOFT_MIN,
   WALL_POWER_STRONG_MIN,
   WALL_POWER_EXTREME_MIN,
+  FUTURES_PUBLIC_WALLS_PER_SIDE,
+  FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE,
+  DENSITY_WALL_RELATIVE_MIN_TRADES_24H,
+  DENSITY_WALL_RELATIVE_FLOOR_USD,
 } = require('./densityFuturesConfig');
 
 // ─── Threshold lookup ──────────────────────────────────────────────
@@ -54,6 +58,54 @@ const {
  */
 function getFuturesWallThreshold(symbol) {
   return FUTURES_WALL_THRESHOLDS[symbol] ?? FUTURES_WALL_THRESHOLDS._default;
+}
+
+// ─── Trade-count cache (relative-mode walls) ───────────────────────
+// Map<symbol, tradeCount24h:number>  — fed by the collector from the 24h ticker.
+const tradeCountCache = new Map();
+
+/**
+ * Store the 24h trade count for a symbol. Used to decide whether a coin's book
+ * is liquid enough to switch wall detection into "relative mode" (lower the
+ * absolute USD floor and let the adaptive gates govern).
+ */
+function setSymbolTradeCount(symbol, count) {
+  const n = typeof count === 'number' ? count : parseInt(count, 10);
+  if (Number.isFinite(n) && n >= 0) {
+    tradeCountCache.set(symbol, n);
+  }
+}
+
+/**
+ * True when a symbol trades heavily enough that the absolute wall floor should
+ * be relaxed in favour of relative (adaptive) detection. Symbols carrying an
+ * explicit per-symbol threshold (BTC/ETH/SOL/XRP/TRX) are excluded so their
+ * intentionally high floors are preserved.
+ *
+ * @param {string} symbol
+ * @returns {boolean}
+ */
+function _isRelativeMode(symbol) {
+  if (DENSITY_WALL_RELATIVE_MIN_TRADES_24H <= 0) return false;
+  if (Object.prototype.hasOwnProperty.call(FUTURES_WALL_THRESHOLDS, symbol)) return false;
+  const tc = tradeCountCache.get(symbol) ?? 0;
+  return tc >= DENSITY_WALL_RELATIVE_MIN_TRADES_24H;
+}
+
+/**
+ * Effective absolute USD floor used as the lower bound of the adaptive
+ * threshold. In relative mode the floor is lowered so genuinely large orders
+ * (relative to the book) surface even when below the per-symbol static floor.
+ *
+ * @param {string} symbol
+ * @returns {number}
+ */
+function _effectiveStaticFloor(symbol) {
+  const staticFloor = getFuturesWallThreshold(symbol);
+  if (_isRelativeMode(symbol)) {
+    return Math.min(staticFloor, DENSITY_WALL_RELATIVE_FLOOR_USD);
+  }
+  return staticFloor;
 }
 
 // ─── TickSize cache ────────────────────────────────────────────────
@@ -425,7 +477,10 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
     }
   }
 
-  const staticThreshold = getFuturesWallThreshold(symbol);
+  const staticThreshold = _effectiveStaticFloor(symbol);
+  // deepWall stays anchored to the real per-symbol floor so relative-mode coins
+  // don't over-tag deep walls (which would relax the max-distance cap).
+  const deepWallThreshold = getFuturesWallThreshold(symbol);
 
   // ── v3 Pre-pass: collect all levels within WALL_SCAN_DISTANCE_PCT ─────────
   // Build price-sorted arrays (closest-to-mid first) so local statistics can
@@ -505,7 +560,7 @@ function scanAndUpdate(symbol, bids, asks, midPrice, now = Date.now()) {
       const similarLevelsCount = _computeSimilarLevelsCount(sideArray, usdValue);
       if (similarLevelsCount > WALL_SIMILAR_LEVELS_LIMIT) continue;
 
-      const deepWall  = usdValue >= staticThreshold * FUTURES_DEEP_WALL_MULTIPLIER_FLAG;
+      const deepWall  = usdValue >= deepWallThreshold * FUTURES_DEEP_WALL_MULTIPLIER_FLAG;
       const normPrice = normalizePrice(price, symbol);
       const key       = `${symbol}:${side}:${normPrice}`;
 
@@ -772,6 +827,30 @@ function clearSymbol(symbol) {
 // ─── Payload builders ─────────────────────────────────────────────
 
 /**
+ * Select at most `maxPerSide` walls on each side (bid / ask).
+ *
+ * Ranking per side:
+ *   1. wallPower desc — biggest RELATIVE to the rest of that side's book
+ *   2. distancePct asc — among comparable walls, the nearest to price wins
+ *
+ * @param {object[]} walls       — array of wall objects with side/wallPower/distancePct
+ * @param {number}   maxPerSide  — max walls to keep per side
+ * @returns {object[]}           — trimmed array (bids + asks), unsorted
+ */
+function selectTopWallsPerSide(walls, maxPerSide) {
+  if (!Array.isArray(walls) || walls.length === 0) return [];
+  const cap = Math.max(1, maxPerSide | 0);
+  const rank = (a, b) => {
+    const dp = (b.wallPower ?? 0) - (a.wallPower ?? 0);
+    if (dp !== 0) return dp;
+    return (a.distancePct ?? Infinity) - (b.distancePct ?? Infinity);
+  };
+  const bids = walls.filter(w => w.side === 'bid').sort(rank).slice(0, cap);
+  const asks = walls.filter(w => w.side === 'ask').sort(rank).slice(0, cap);
+  return [...bids, ...asks];
+}
+
+/**
  * Build the public Redis payload written to futures:walls:${symbol}.
  * Contains only confirmed walls.
  *
@@ -838,15 +917,29 @@ function buildPublicWallsPayload(symbol, midPrice, now = Date.now(), metadata = 
   // inflating the public wall count (e.g. BTC W=40 should be W=0-3).
   const visibleWalls = walls.filter(w => w.wallPower >= WALL_POWER_SOFT_MIN);
 
+  // ── Cap public walls to N per side (biggest-relative + nearest) ────────────
+  // Show at most FUTURES_PUBLIC_WALLS_PER_SIDE bid + N ask walls. Selection is
+  // by relative bigness vs the rest of that side's book (wallPower already
+  // encodes "how big vs neighbours / p95 / median"), with proximity to price as
+  // tiebreaker so the few biggest-and-nearest walls survive. Aggregates above
+  // (significantWallCount/bestWallPower/bestWallUsd) are computed on the FULL
+  // set, so trimming only affects what is displayed in the list and the chart.
+  const displayWalls = selectTopWallsPerSide(
+    visibleWalls,
+    _isRelativeMode(symbol)
+      ? FUTURES_PUBLIC_WALLS_PER_SIDE_RELATIVE
+      : FUTURES_PUBLIC_WALLS_PER_SIDE,
+  );
+
   // Sort for display: highest USD first
-  visibleWalls.sort((a, b) => b.usdValue - a.usdValue);
+  displayWalls.sort((a, b) => b.usdValue - a.usdValue);
 
   return {
     symbol,
     marketType:           'futures',
     midPrice,
     wallThresholds:       { base: threshold, source: 'adaptive' },
-    walls:                visibleWalls,
+    walls:                displayWalls,
     totalConfirmedCount,
     candidateCount,
     significantWallCount,
@@ -1063,6 +1156,7 @@ function buildBestWallPayload(symbol, midPrice, now = Date.now()) {
 module.exports = {
   getFuturesWallThreshold,
   setTickSize,
+  setSymbolTradeCount,
   normalizePrice,
   scanAndUpdate,
   getConfirmedWalls,

@@ -7,6 +7,7 @@ const mysql   = require('mysql2/promise');
 const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
+const { createDebugExtremesLevelsHandler } = require('./routes/debugExtremesLevelsRoute');
 const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete, patchHandler: manualLevelsPatchFactory } = require('./routes/manualLevelsRoute');
 const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
@@ -95,9 +96,11 @@ const { createSynthRouter }             = require('./routes/synthRoute');
 const { attachLiveWsGateway, stopGateway: stopLiveWsGateway } = require('./routes/liveWsGateway');
 const { createHeatmapRouter, attachHeatmapWs } = require('./routes/heatmapRoute');
 const { createDensityDomRouter }        = require('./routes/densityDomRoute');
+const { createFormationsCompareSourceHandler } = require('./routes/formationsCompareSourceRoute');
 const heatmapService                    = require('./services/heatmapService');
 const densityService                    = require('./services/densityService');
 const wsEventBus                        = require('./services/wsEventBus');
+const { createFormationsModule }        = require('./formations');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -244,6 +247,10 @@ heatmapService.start(redis, wsEventBus)
 
 densityService.start(redis, wsEventBus)
   .catch(err => console.error('[density] start error:', err.message));
+
+// ─── Formations (isolated breakout-scanner module) ───────────────
+const formations = createFormationsModule({ redis });
+formations.service.start();
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -496,10 +503,12 @@ async function fetchAllImpulseSignals() {
   return signals;
 }
 
-// GET /api/market/impulse?limit=20&direction=up|down|mixed|all
+// GET /api/market/impulse?limit=20&direction=up|down|mixed|all&minVolume=0&search=BTC
 app.get('/api/market/impulse', async (req, res) => {
-  const limit     = Math.min(parseInt(req.query.limit || '20', 10), 500);
-  const direction = (req.query.direction || 'all').toLowerCase();
+  const limit      = Math.min(parseInt(req.query.limit || '20', 10), 500);
+  const direction  = (req.query.direction || 'all').toLowerCase();
+  const minVolume  = parseFloat(req.query.minVolume || '0');
+  const search     = typeof req.query.search === 'string' ? req.query.search.trim().toUpperCase() : '';
 
   try {
     const signals = await fetchAllImpulseSignals();
@@ -507,52 +516,60 @@ app.get('/api/market/impulse', async (req, res) => {
       return res.status(503).json({ success: false, error: 'Symbol list not available yet', count: 0, items: [] });
     }
 
-    let filtered;
-    if (direction === 'all') {
-      filtered = signals;
-    } else if (direction === 'mixed') {
-      // mixed = UP + DOWN (excludes NEUTRAL)
-      filtered = signals.filter(s => {
-        const d = (s.impulseDirection || 'NEUTRAL').toUpperCase();
-        return d === 'UP' || d === 'DOWN';
-      });
-    } else {
-      filtered = signals.filter(s => (s.impulseDirection || 'NEUTRAL').toLowerCase() === direction);
+    const now = Date.now();
+    let filtered = signals;
+
+    // Only return coins that are currently in the active impulse list
+    filtered = filtered.filter(s => s.activeUntil && s.activeUntil > now);
+
+    // Direction filter (case-insensitive, supports up/down/mixed/all)
+    if (direction !== 'all') {
+      filtered = filtered.filter(s => (s.impulseDirection ?? 'neutral').toLowerCase() === direction);
     }
 
-    // Primary: impulseScore DESC; secondary: volumeSpikeRatio15s DESC; tertiary: tradeAcceleration DESC
+    // Volume filter
+    if (minVolume > 0) {
+      filtered = filtered.filter(s => (s.volumeUsdt60s ?? 0) >= minVolume);
+    }
+
+    // Symbol search filter
+    if (search) {
+      filtered = filtered.filter(s => (s.symbol ?? '').includes(search));
+    }
+
+    // Stable order: by entry time (detectedAt ASC) so coins keep their slot
+    // and do not jump as their impulseScore fluctuates. New coins append at
+    // the bottom; tie-break by symbol for deterministic ordering.
     filtered.sort((a, b) => {
-      const scoreDiff = (b.impulseScore ?? 0) - (a.impulseScore ?? 0);
-      if (scoreDiff !== 0) return scoreDiff;
-      const vsrDiff = (b.volumeSpikeRatio15s ?? 0) - (a.volumeSpikeRatio15s ?? 0);
-      if (vsrDiff !== 0) return vsrDiff;
-      return (b.tradeAcceleration ?? 0) - (a.tradeAcceleration ?? 0);
+      const tDiff = (a.detectedAt ?? a.activeUntil ?? 0) - (b.detectedAt ?? b.activeUntil ?? 0);
+      if (tDiff !== 0) return tDiff;
+      return (a.symbol ?? '').localeCompare(b.symbol ?? '');
     });
 
     const items = filtered.slice(0, limit).map(s => ({
-      symbol:                s.symbol                ?? '',
-      impulseScore:          s.impulseScore          ?? 0,
-      impulseDirection:      s.impulseDirection      ?? 'NEUTRAL',
-      volumeSpikeRatio15s:   s.volumeSpikeRatio15s   ?? 0,
-      tradeAcceleration:     s.tradeAcceleration     ?? 0,
-      tradesPerSec:          s.tradesPerSec          ?? 0,
-      avgTradesPerSec60s:    s.avgTradesPerSec60s    ?? 0,
-      // Volume panel fields
-      volumeUsdt1s:          s.volumeUsdt1s          ?? 0,
-      volumeUsdt5s:          s.volumeUsdt5s          ?? 0,
-      volumeUsdt15s:         s.volumeUsdt15s         ?? 0,
-      volumeUsdt60s:         s.volumeUsdt60s         ?? 0,
-      // Delta panel fields
-      deltaImbalancePct60s:  s.deltaImbalancePct60s  ?? 0,
-      deltaUsdt60s:          s.deltaUsdt60s          ?? 0,
-      openInterestChangePct: s.openInterestChangePct ?? 0,
-      domBidPct:             s.domBidPct             ?? 0,
-      domAskPct:             s.domAskPct             ?? 0,
-      domImbalancePct:       s.domImbalancePct       ?? 0,
-      priceVelocity60s:      s.priceVelocity60s      ?? 0,
-      signalConfidence:      s.signalConfidence      ?? 0,
-      baselineReady:         s.baselineReady         ?? false,
-      updatedAt:             s.updatedAt             ?? 0,
+      symbol:              s.symbol              ?? '',
+      price:               s.price               ?? 0,
+      impulseDirection:    s.impulseDirection    ?? 'neutral',
+      impulseWindow:       s.impulseWindow       ?? null,
+      impulseMovePct:      s.impulseMovePct      ?? null,
+      move1sPct:           s.move1sPct           ?? null,
+      move5sPct:           s.move5sPct           ?? null,
+      move15sPct:          s.move15sPct          ?? null,
+      move60sPct:          s.move60sPct          ?? null,
+      volumeSpikeRatio15s: s.volumeSpikeRatio15s ?? 0,
+      tradeAcceleration:   s.tradeAcceleration   ?? 0,
+      deltaUsdt60s:        s.deltaUsdt60s        ?? 0,
+      oiChangePct:         s.oiChangePct         ?? (s.openInterestChangePct ?? 0),
+      domBidPct:           s.domBidPct           ?? 50,
+      domAskPct:           s.domAskPct           ?? 50,
+      impulseScore:        s.impulseScore        ?? 0,
+      detectedAt:          s.detectedAt          ?? null,
+      activeUntil:         s.activeUntil         ?? null,
+      lastUpdateTs:        s.lastUpdateTs        ?? (s.updatedAt ?? 0),
+      // backward-compat
+      volumeUsdt60s:       s.volumeUsdt60s       ?? 0,
+      baselineReady:       s.baselineReady       ?? false,
+      updatedAt:           s.updatedAt           ?? 0,
     }));
 
     return res.json({ success: true, count: items.length, items });
@@ -706,6 +723,10 @@ app.get('/api/levels', levelsHandler);
 // GET /api/autolevels — AutoLevels engine (pivot grid clustering)
 console.log('[backend] registering /api/autolevels route');
 app.get('/api/autolevels', autoLevelsHandler);
+
+// GET /api/debug/extremes-levels?symbol=SLXUSDT&tf=5m&marketType=futures
+console.log('[backend] registering /api/debug/extremes-levels route');
+app.get('/api/debug/extremes-levels', authRequired, createDebugExtremesLevelsHandler());
 
 // ─── Manual levels endpoints ──────────────────────────────────────
 console.log('[backend] registering /api/manual-levels routes');
@@ -1474,6 +1495,11 @@ app.use('/api/heatmap', createHeatmapRouter(redis, heatmapService));
 
 console.log('[backend] registering /api/density routes');
 app.use('/api/density', createDensityDomRouter(redis, densityService));
+
+console.log('[backend] registering /api/formations routes');
+app.use('/api/formations/scalping', formations.router);
+app.use('/api/formations/debug', formations.debugRouter);
+app.get('/api/formations/compare-source', createFormationsCompareSourceHandler({ service: formations.service }));
 
 // Density chart / orderbook / depth / symbols / appearance (new density page)
 const { createDensityChartRouter } = require('./routes/densityChartRoute');

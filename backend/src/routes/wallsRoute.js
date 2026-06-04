@@ -1,5 +1,7 @@
 'use strict';
 
+const { getPriceVelocity, computeEtaSec } = require('../utils/wallEta');
+
 // ─── GET /api/walls ───────────────────────────────────────────────
 //
 // Query params:
@@ -121,6 +123,21 @@ function createWallsHandler(redis) {
           walls = walls.filter(w => !(w.isSuspiciousSpoof ?? false));
         }
         parsed.walls = walls;
+
+        // ── ETA to wall ───────────────────────────────────────────
+        // etaSec = |wallPrice - midPrice| / priceVelocity, where velocity is
+        // the mean |close-to-close| move/sec over the last N 1m bars. Null when
+        // the price is effectively standing or ETA exceeds the 24h cap.
+        const midPrice = parsed.midPrice
+          ?? (parsed.bestBid != null && parsed.bestAsk != null
+                ? (parsed.bestBid + parsed.bestAsk) / 2
+                : null);
+        if (midPrice != null && walls.length > 0) {
+          const velocity = await getPriceVelocity(redis, symbol, marketType);
+          for (const w of walls) {
+            w.etaSec = computeEtaSec(w.price, midPrice, velocity);
+          }
+        }
       }
 
       return res.json({ success: true, symbol, marketType, tracked: true, walls: parsed });

@@ -24,6 +24,15 @@ class LivePollingMetrics {
     this.fullResyncCount         = 0;
     this.tooFrequentPollingCount = 0;
 
+    // ── WS counters (used by liveWsGateway) ───────────────────────────────
+    this.wsConnects       = 0;
+    this.wsDisconnects    = 0;
+    this.wsSubscriptions  = 0;
+    this.wsUnsubscribes   = 0;
+    this.wsHeartbeats     = 0;
+    this.wsFullResyncs    = 0;
+    this.wsAlertsSent     = 0;
+
     // ── Latency accumulators ───────────────────────────────────────────────
     this._snapshotLatencySum   = 0;
     this._snapshotLatencyCount = 0;
@@ -92,6 +101,36 @@ class LivePollingMetrics {
     }
 
     if (scope) this.scopeCounts[scope] = (this.scopeCounts[scope] || 0) + 1;
+  }
+
+  // ─── WS record helpers (called by liveWsGateway) ─────────────────────────
+
+  recordWsConnect() {
+    this.wsConnects++;
+  }
+
+  recordWsDisconnect() {
+    this.wsDisconnects++;
+  }
+
+  recordWsSubscribe() {
+    this.wsSubscriptions++;
+  }
+
+  recordWsUnsubscribe() {
+    this.wsUnsubscribes++;
+  }
+
+  recordWsHeartbeat() {
+    this.wsHeartbeats++;
+  }
+
+  recordWsFullResync() {
+    this.wsFullResyncs++;
+  }
+
+  recordWsAlertSent() {
+    this.wsAlertsSent++;
   }
 
   /**
@@ -195,6 +234,13 @@ class LivePollingMetrics {
       avgDeltaPayloadSize      : this.getAvgPayloadSize(),
       tooFrequentPollingCount  : this.tooFrequentPollingCount,
       fullResyncCount          : this.fullResyncCount,
+      wsConnects               : this.wsConnects,
+      wsDisconnects            : this.wsDisconnects,
+      wsSubscriptions          : this.wsSubscriptions,
+      wsUnsubscribes           : this.wsUnsubscribes,
+      wsHeartbeats             : this.wsHeartbeats,
+      wsFullResyncs            : this.wsFullResyncs,
+      wsAlertsSent             : this.wsAlertsSent,
       trackedSymbolsCount      : cacheStats?.rowCount   ?? null,
       hotScopes                : this.getHotScopes(),
       cacheStats,

@@ -344,6 +344,16 @@ const RELAY_LOG_EVERY_N_MSGS       = 1_000;
 // Log relay stats periodically regardless of message count
 const RELAY_STATS_INTERVAL_MS      = 60_000;
 
+// Hard cap on simultaneous proxied (non-kline) Binance upstream sessions. Each
+// such client opens a dedicated upstream WS to Binance, so an unbounded count
+// is both a local resource-exhaustion vector and a fast path to a Binance IP
+// ban. Kline streams are served from Redis pub/sub and are NOT counted here.
+const MAX_PROXY_CONNECTIONS = parseInt(process.env.WS_PROXY_MAX_CONNECTIONS || '500', 10) || 500;
+
+// Allowed Binance stream-name shape, e.g. btcusdt@aggTrade, ethusdt@depth20@100ms.
+// Prevents arbitrary path injection into the upstream URL.
+const STREAM_NAME_RE = /^[a-z0-9]{2,20}@[a-z0-9_]+(@[a-z0-9]+)?$/i;
+
 // ── Connection registry ───────────────────────────────────────────────────────
 // Tracks every active proxy session for diagnostics.
 // Map<connId, ConnectionInfo>
@@ -488,6 +498,22 @@ function attachBinanceWsProxy(httpServer) {
       }
 
       // ── All other streams → proxy to Binance ──────────────────────────────
+      // Validate the stream name before it is interpolated into the upstream
+      // URL — reject anything that is not a canonical Binance stream token.
+      if (!STREAM_NAME_RE.test(streamName)) {
+        console.warn(`[binance-ws-proxy] rejected malformed stream name: ${streamName.slice(0, 64)}`);
+        clientWs.close(1008, 'invalid stream name');
+        return;
+      }
+
+      // Cap simultaneous upstream proxy sessions to protect local resources and
+      // the shared Binance IP reputation.
+      if (activeConnections.size >= MAX_PROXY_CONNECTIONS) {
+        console.warn(`[binance-ws-proxy] at capacity (${activeConnections.size}) — rejecting ${streamName}`);
+        clientWs.close(1013, 'proxy at capacity');
+        return;
+      }
+
       // Workaround: Binance USD-M futures @aggTrade is currently silent for many
       // symbols (handshake OK, zero frames). Transparently substitute @trade
       // upstream and rewrite the event name back to "aggTrade" on the way out.

@@ -24,5 +24,264 @@
   <body>
     <div id="root"></div>
 
+    <script>
+      (function () {
+        function isTestPage() {
+          var p = String(window.location.pathname || '').toLowerCase();
+          var h = String(window.location.hash || '').toLowerCase();
+          return p.indexOf('/testpage') >= 0 || h.indexOf('/testpage') >= 0;
+        }
+
+        function el(tag, attrs, text) {
+          var node = document.createElement(tag);
+          if (attrs) {
+            Object.keys(attrs).forEach(function (k) {
+              if (k === 'style') {
+                Object.assign(node.style, attrs[k]);
+              } else {
+                node.setAttribute(k, attrs[k]);
+              }
+            });
+          }
+          if (text != null) node.textContent = text;
+          return node;
+        }
+
+        function getInitial(name, fallback) {
+          var url = new URL(window.location.href);
+          var q = url.searchParams.get(name);
+          if (q) return q;
+          return fallback;
+        }
+
+        function makeUi() {
+          var wrap = el('div', {
+            id: 'tp-debug-overlay',
+            style: {
+              position: 'fixed',
+              right: '12px',
+              bottom: '12px',
+              zIndex: '2147483647',
+              width: '340px',
+              maxWidth: 'calc(100vw - 24px)',
+              background: 'rgba(12, 18, 26, 0.94)',
+              color: '#e6edf3',
+              border: '1px solid rgba(130, 149, 168, 0.35)',
+              borderRadius: '8px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+              fontSize: '12px',
+              lineHeight: '1.35',
+              overflow: 'hidden'
+            }
+          });
+
+          var header = el('div', {
+            style: {
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '8px',
+              background: 'rgba(26, 35, 48, 0.95)',
+              padding: '8px 10px',
+              borderBottom: '1px solid rgba(130, 149, 168, 0.22)'
+            }
+          });
+
+          var title = el('strong', null, 'TestPage Debug');
+          var closeBtn = el('button', {
+            type: 'button',
+            style: {
+              border: '1px solid rgba(130,149,168,0.35)',
+              background: '#111826',
+              color: '#e6edf3',
+              borderRadius: '6px',
+              padding: '2px 8px',
+              cursor: 'pointer'
+            }
+          }, 'Hide');
+          header.appendChild(title);
+          header.appendChild(closeBtn);
+
+          var body = el('div', {
+            style: {
+              padding: '10px',
+              display: 'grid',
+              gap: '8px'
+            }
+          });
+
+          var row1 = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 72px', gap: '6px' } });
+          var symbolInput = el('input', {
+            type: 'text',
+            value: getInitial('symbol', 'SLXUSDT'),
+            placeholder: 'Symbol',
+            style: {
+              background: '#0b1220',
+              color: '#e6edf3',
+              border: '1px solid rgba(130,149,168,0.35)',
+              borderRadius: '6px',
+              padding: '6px'
+            }
+          });
+          var tfInput = el('input', {
+            type: 'text',
+            value: getInitial('tf', '5m'),
+            placeholder: 'TF',
+            style: {
+              background: '#0b1220',
+              color: '#e6edf3',
+              border: '1px solid rgba(130,149,168,0.35)',
+              borderRadius: '6px',
+              padding: '6px'
+            }
+          });
+          row1.appendChild(symbolInput);
+          row1.appendChild(tfInput);
+
+          var row2 = el('div', { style: { display: 'flex', gap: '6px' } });
+          var btnLoad = el('button', {
+            type: 'button',
+            style: {
+              border: '1px solid rgba(84, 174, 255, 0.6)',
+              background: '#0f2a45',
+              color: '#d8ecff',
+              borderRadius: '6px',
+              padding: '6px 8px',
+              cursor: 'pointer'
+            }
+          }, 'Load E/L');
+          var btnCompare = el('button', {
+            type: 'button',
+            style: {
+              border: '1px solid rgba(140, 203, 118, 0.6)',
+              background: '#1a3a23',
+              color: '#d8ffd8',
+              borderRadius: '6px',
+              padding: '6px 8px',
+              cursor: 'pointer'
+            }
+          }, 'Compare Formations');
+          row2.appendChild(btnLoad);
+          row2.appendChild(btnCompare);
+
+          var status = el('div', {
+            style: {
+              color: '#8aa2bb',
+              minHeight: '16px'
+            }
+          }, 'Ready');
+
+          var pre = el('pre', {
+            style: {
+              margin: '0',
+              background: '#0b1220',
+              border: '1px solid rgba(130,149,168,0.22)',
+              borderRadius: '6px',
+              padding: '8px',
+              maxHeight: '280px',
+              overflow: 'auto',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word'
+            }
+          }, 'No data loaded yet.');
+
+          body.appendChild(row1);
+          body.appendChild(row2);
+          body.appendChild(status);
+          body.appendChild(pre);
+
+          wrap.appendChild(header);
+          wrap.appendChild(body);
+
+          closeBtn.addEventListener('click', function () {
+            wrap.remove();
+          });
+
+          function compact(obj) {
+            return JSON.stringify(obj, null, 2);
+          }
+
+          async function loadDebug() {
+            var symbol = String(symbolInput.value || '').toUpperCase().trim();
+            var tf = String(tfInput.value || '').trim();
+            if (!symbol || !tf) {
+              status.textContent = 'Symbol and tf are required';
+              return;
+            }
+            status.textContent = 'Loading /api/debug/extremes-levels ...';
+            try {
+              var url = '/api/debug/extremes-levels?symbol=' + encodeURIComponent(symbol) + '&tf=' + encodeURIComponent(tf);
+              var r = await fetch(url, { credentials: 'include' });
+              var data = await r.json().catch(function () { return null; });
+              if (!r.ok || !data) {
+                status.textContent = 'Debug API error: HTTP ' + r.status;
+                pre.textContent = compact(data || { success: false, status: r.status });
+                return;
+              }
+
+              status.textContent = 'Loaded: extremes=' + (data.extremes || []).length + ', levels=' + (data.levels || []).length;
+              pre.textContent = compact({
+                symbol: data.symbol,
+                tf: data.tf,
+                marketType: data.marketType,
+                quality: data.quality,
+                sampleExtreme: (data.extremes || [])[0] || null,
+                sampleLevel: (data.levels || [])[0] || null
+              });
+            } catch (err) {
+              status.textContent = 'Load failed';
+              pre.textContent = String(err && err.message ? err.message : err);
+            }
+          }
+
+          async function compareFormations() {
+            var symbol = String(symbolInput.value || '').toUpperCase().trim();
+            var tf = String(tfInput.value || '').trim();
+            if (!symbol || !tf) {
+              status.textContent = 'Symbol and tf are required';
+              return;
+            }
+
+            status.textContent = 'Comparing with /api/formations/debug ...';
+            try {
+              var formationsUrl = '/api/formations/debug?symbol=' + encodeURIComponent(symbol) + '&tf=' + encodeURIComponent(tf);
+              var r = await fetch(formationsUrl, { credentials: 'include' });
+              var data = await r.json().catch(function () { return null; });
+              if (!r.ok || !data) {
+                status.textContent = 'Formations debug error: HTTP ' + r.status;
+                pre.textContent = compact(data || { success: false, status: r.status });
+                return;
+              }
+              status.textContent = 'Formations debug loaded';
+              pre.textContent = compact({
+                symbol: symbol,
+                tf: tf,
+                formationsDebug: data
+              });
+            } catch (err) {
+              status.textContent = 'Compare failed';
+              pre.textContent = String(err && err.message ? err.message : err);
+            }
+          }
+
+          btnLoad.addEventListener('click', loadDebug);
+          btnCompare.addEventListener('click', compareFormations);
+          return wrap;
+        }
+
+        function mount() {
+          if (!isTestPage()) return;
+          if (document.getElementById('tp-debug-overlay')) return;
+          var ui = makeUi();
+          document.body.appendChild(ui);
+        }
+
+        mount();
+        window.addEventListener('hashchange', mount);
+        window.addEventListener('popstate', mount);
+      })();
+    </script>
+
   </body>
 </html>

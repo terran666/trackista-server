@@ -1,0 +1,153 @@
+{
+    "success":  true,
+    "strategy":  "ALL",
+    "mode":  "raw",
+    "count":  1,
+    "items":  [
+                  {
+                      "id":  "HUSDT_5m_DOUBLE_BOTTOM",
+                      "symbol":  "HUSDT",
+                      "tf":  "5m",
+                      "market":  "futures",
+                      "patternType":  "DOUBLE_BOTTOM",
+                      "direction":  "LONG",
+                      "status":  "APPROACHING",
+                      "score":  84,
+                      "price":  0.63425,
+                      "neckline":  0.69357,
+                      "distancePct":  8.552849748403196,
+                      "breakLevel":  0.69357,
+                      "supportLevel":  null,
+                      "supportSource":  null,
+                      "resistanceLevel":  null,
+                      "resistanceSource":  null,
+                      "touches":  null,
+                      "strength":  null,
+                      "breakdownPct":  null,
+                      "scoreBreakdown":  null,
+                      "pattern":  {
+                                      "patternType":  "DOUBLE_BOTTOM",
+                                      "topA":  null,
+                                      "topB":  null,
+                                      "lowA":  0.62796,
+                                      "lowB":  0.62909,
+                                      "neckline":  0.69357,
+                                      "topDistancePct":  null,
+                                      "lowDistancePct":  0.17962453702968978,
+                                      "necklinePrice":  0.69357,
+                                      "patternQuality":  84
+                                  },
+                      "strategy":  "doubleExtreme",
+                      "updatedAt":  1780466297803,
+                      "createdAt":  1780465896388,
+                      "alsoFound":  [
+
+                                    ],
+                      "debug":  {
+                                    "source":  "patternEngine",
+                                    "extremesUsed":  3,
+                                    "reason":  null
+                                }
+                  }
+              ],
+    "data":  [
+                 {
+                     "id":  "HUSDT_5m_DOUBLE_BOTTOM",
+                     "symbol":  "HUSDT",
+                     "tf":  "5m",
+                     "market":  "futures",
+                     "patternType":  "DOUBLE_BOTTOM",
+                     "direction":  "LONG",
+                     "status":  "APPROACHING",
+                     "score":  84,
+                     "price":  0.63425,
+                     "neckline":  0.69357,
+                     "distancePct":  8.552849748403196,
+                     "breakLevel":  0.69357,
+                     "supportLevel":  null,
+                     "supportSource":  null,
+                     "resistanceLevel":  null,
+                     "resistanceSource":  null,
+                     "touches":  null,
+                     "strength":  null,
+                     "breakdownPct":  null,
+                     "scoreBreakdown":  null,
+                     "pattern":  {
+                                     "patternType":  "DOUBLE_BOTTOM",
+                                     "topA":  null,
+                                     "topB":  null,
+                                     "lowA":  0.62796,
+                                     "lowB":  0.62909,
+                                     "neckline":  0.69357,
+                                     "topDistancePct":  null,
+                                     "lowDistancePct":  0.17962453702968978,
+                                     "necklinePrice":  0.69357,
+                                     "patternQuality":  84
+                                 },
+                     "strategy":  "doubleExtreme",
+                     "updatedAt":  1780466297803,
+                     "createdAt":  1780465896388,
+                     "alsoFound":  [
+
+                                   ],
+                     "debug":  {
+                                   "source":  "patternEngine",
+                                   "extremesUsed":  3,
+                                   "reason":  null
+                               }
+                 }
+             ],
+    "formations":  [
+                       {
+                           "id":  "HUSDT_5m_DOUBLE_BOTTOM",
+                           "symbol":  "HUSDT",
+                           "tf":  "5m",
+                           "market":  "futures",
+                           "patternType":  "DOUBLE_BOTTOM",
+                           "direction":  "LONG",
+                           "status":  "APPROACHING",
+                           "score":  84,
+                           "price":  0.63425,
+                           "neckline":  0.69357,
+                           "distancePct":  8.552849748403196,
+                           "breakLevel":  0.69357,
+                           "supportLevel":  null,
+                           "supportSource":  null,
+                           "resistanceLevel":  null,
+                           "resistanceSource":  null,
+                           "touches":  null,
+                           "strength":  null,
+                           "breakdownPct":  null,
+                           "scoreBreakdown":  null,
+                           "pattern":  {
+                                           "patternType":  "DOUBLE_BOTTOM",
+                                           "topA":  null,
+                                           "topB":  null,
+                                           "lowA":  0.62796,
+                                           "lowB":  0.62909,
+                                           "neckline":  0.69357,
+                                           "topDistancePct":  null,
+                                           "lowDistancePct":  0.17962453702968978,
+                                           "necklinePrice":  0.69357,
+                                           "patternQuality":  84
+                                       },
+                           "strategy":  "doubleExtreme",
+                           "updatedAt":  1780466297803,
+                           "createdAt":  1780465896388,
+                           "alsoFound":  [
+
+                                         ],
+                           "debug":  {
+                                         "source":  "patternEngine",
+                                         "extremesUsed":  3,
+                                         "reason":  null
+                                     }
+                       }
+                   ],
+    "debug":  {
+                  "totalRawFormations":  11,
+                  "afterFilters":  1,
+                  "afterUniqueSymbol":  1
+              },
+    "generatedAt":  1780466357303
+}

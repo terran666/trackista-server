@@ -1,109 +1,118 @@
 'use strict';
 
 /**
- * sharpExtremesEngine.js — Sharp Extremes Algorithm
+ * sharpExtremesEngine.js � Sharp Extremes (ported 1:1 from frontend sharpExtremes.ts)
  *
- * Finds significant pivot highs/lows (sharp reversals) in bar data.
- * A "sharp" extreme is a pivot whose price movement to the turning point
- * exceeds a minimum strength threshold vs the local price range.
- *
- * Algorithm:
- *   1. Scan bars for pivot highs: bar.high > all bars in [i-pivotWindow, i+pivotWindow]
- *   2. Scan bars for pivot lows : bar.low  < all bars in [i-pivotWindow, i+pivotWindow]
- *   3. Filter by strength: % move from local window extremum must >= minStrengthPct
- *   4. Sort by strength desc, cap at maxExtremes
- *
- * Output: array of extreme records compatible with trackedExtremesStore.bulkSave()
+ * Bars format: { timestamp: number (ms), open, high, low, close, volume? }
+ * NOTE: extremesEngineRoute converts Binance bars (time -> timestamp) before calling here.
  */
 
 const DEFAULT_SETTINGS = {
-  pivotWindow    : 3,    // bars left/right required to confirm a pivot
-  lookbackBars   : 200,  // trailing window of bars to scan
-  minStrengthPct : 0.3,  // min % move from window extremum to qualify as "sharp"
-  maxExtremes    : 60,   // hard cap on output count
+  pivotLeft            : 3,
+  pivotRight           : 3,
+  L                    : 3,
+  R                    : 3,
+  minSlopePct          : 0.08,
+  startFromFirstPivot  : true,
+  unbrokenLookahead    : 300,
+  breakMode            : 'equal',
+  breakToleranceTicks  : 0,
+  tickSize             : undefined,
+  maxExtremes          : 60,
+  lookbackBars         : 200,
 };
 
-/**
- * Find sharp extremes in bars array.
- *
- * @param {Array<{time:number,open:number,high:number,low:number,close:number,volume:number}>} bars
- *   Bars sorted oldest → newest.
- * @param {Partial<typeof DEFAULT_SETTINGS>} [settings]
- * @returns {Array<{side,type,price,points,strength,touches}>}
- */
-function findSharpExtremes(bars, settings = {}) {
-  const cfg   = { ...DEFAULT_SETTINGS, ...settings };
-  const slice = bars.slice(-cfg.lookbackBars);
-  const n     = slice.length;
-  const pw    = cfg.pivotWindow;
+function slopePct(fromClose, toClose, barsCount) {
+  if (barsCount <= 0) return 0;
+  const base = Math.max(1e-12, Math.abs(fromClose));
+  return ((toClose - fromClose) / base) * 100 / barsCount;
+}
 
-  if (n < pw * 2 + 1) return [];
+function isPivotHigh(bars, i, left, right) {
+  const h = bars[i].high;
+  for (let j = i - left; j <= i + right; j++) {
+    if (j === i) continue;
+    if (bars[j].high >= h) return false;
+  }
+  return true;
+}
 
-  const results = [];
+function isPivotLow(bars, i, left, right) {
+  const l = bars[i].low;
+  for (let j = i - left; j <= i + right; j++) {
+    if (j === i) continue;
+    if (bars[j].low <= l) return false;
+  }
+  return true;
+}
 
-  for (let i = pw; i < n - pw; i++) {
-    const bar = slice[i];
+function isSharpByClose(bars, i, p, type) {
+  const leftI  = i - p.L;
+  const rightI = i + p.R;
+  if (leftI < 0 || rightI >= bars.length) return false;
+  const before = slopePct(bars[leftI].close, bars[i].close, p.L);
+  const after  = slopePct(bars[i].close, bars[rightI].close, p.R);
+  if (type === 'HIGH') return before > 0 && after < 0;
+  if (type === 'LOW')  return before < 0 && after > 0;
+  return false;
+}
 
-    // ── Pivot High ────────────────────────────────────────────
-    let isPH = true;
-    for (let j = i - pw; j <= i + pw; j++) {
-      if (j !== i && slice[j].high >= bar.high) { isPH = false; break; }
-    }
-    if (isPH) {
-      const windowLow    = _minLow(slice, i - pw, i + pw);
-      const strengthPct  = windowLow > 0 ? (bar.high - windowLow) / windowLow * 100 : 0;
-      if (strengthPct >= cfg.minStrengthPct) {
-        results.push({
-          side    : 'resistance',
-          type    : 'extreme',
-          price   : bar.high,
-          points  : [{ timestamp: bar.time, value: bar.high }],
-          strength: _r2(strengthPct),
-          touches : 1,
-        });
-      }
-    }
-
-    // ── Pivot Low ─────────────────────────────────────────────
-    let isPL = true;
-    for (let j = i - pw; j <= i + pw; j++) {
-      if (j !== i && slice[j].low <= bar.low) { isPL = false; break; }
-    }
-    if (isPL) {
-      const windowHigh   = _maxHigh(slice, i - pw, i + pw);
-      const strengthPct  = bar.low > 0 ? (windowHigh - bar.low) / bar.low * 100 : 0;
-      if (strengthPct >= cfg.minStrengthPct) {
-        results.push({
-          side    : 'support',
-          type    : 'extreme',
-          price   : bar.low,
-          points  : [{ timestamp: bar.time, value: bar.low }],
-          strength: _r2(strengthPct),
-          touches : 1,
-        });
-      }
+function isBrokenToRight(bars, i, type, lookahead, breakMode, tickSize, breakToleranceTicks) {
+  const raw = type === 'HIGH' ? bars[i].high : bars[i].low;
+  const tol = tickSize && breakToleranceTicks > 0 ? tickSize * breakToleranceTicks : 0;
+  const end = lookahead && lookahead > 0
+    ? Math.min(bars.length - 1, i + lookahead)
+    : bars.length - 1;
+  for (let k = i + 1; k <= end; k++) {
+    if (type === 'HIGH') {
+      const threshold = raw + tol;
+      if (breakMode === 'strict' ? bars[k].high > threshold : bars[k].high >= threshold) return true;
+    } else {
+      const threshold = raw - tol;
+      if (breakMode === 'strict' ? bars[k].low < threshold : bars[k].low <= threshold) return true;
     }
   }
-
-  // Sort by strength descending so the caller gets the most significant first
-  results.sort((a, b) => b.strength - a.strength);
-  return results.slice(0, cfg.maxExtremes);
+  return false;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────
+function findSharpExtremes(bars, settings) {
+  const p = Object.assign({}, DEFAULT_SETTINGS, settings || {});
+  const slice = p.lookbackBars > 0 && p.lookbackBars < bars.length
+    ? bars.slice(bars.length - p.lookbackBars) : bars;
+  const n     = slice.length;
+  const startI = p.pivotLeft;
+  const endI   = n - 1 - p.pivotRight;
+  if (endI <= startI) return [];
 
-function _minLow(bars, from, to) {
-  let m = Infinity;
-  for (let i = from; i <= to; i++) if (bars[i].low  < m) m = bars[i].low;
-  return m;
+  const pivots = [];
+  for (let i = startI; i <= endI; i++) {
+    if (isPivotHigh(slice, i, p.pivotLeft, p.pivotRight)) pivots.push({ i, type: 'HIGH' });
+    if (isPivotLow(slice,  i, p.pivotLeft, p.pivotRight)) pivots.push({ i, type: 'LOW'  });
+  }
+  pivots.sort((a, b) => a.i - b.i);
+  if (!pivots.length) return [];
+
+  const firstPivotIndex     = p.startFromFirstPivot ? pivots[0].i : startI;
+  const lookahead           = p.unbrokenLookahead ?? 0;
+  const breakMode           = p.breakMode ?? 'equal';
+  const breakToleranceTicks = p.breakToleranceTicks ?? 0;
+
+  const result = [];
+  for (const pv of pivots) {
+    if (pv.i < firstPivotIndex) continue;
+    if (!isSharpByClose(slice, pv.i, p, pv.type)) continue;
+    if (isBrokenToRight(slice, pv.i, pv.type, lookahead, breakMode, p.tickSize, breakToleranceTicks)) continue;
+    const price = pv.type === 'HIGH' ? slice[pv.i].high : slice[pv.i].low;
+    result.push({
+      side   : pv.type === 'HIGH' ? 'resistance' : 'support',
+      type   : 'extreme',
+      price,
+      points : [{ timestamp: slice[pv.i].timestamp, value: price }],
+      strength: 1,
+      touches : 1,
+    });
+  }
+  return result.slice(0, p.maxExtremes);
 }
-
-function _maxHigh(bars, from, to) {
-  let m = -Infinity;
-  for (let i = from; i <= to; i++) if (bars[i].high > m) m = bars[i].high;
-  return m;
-}
-
-function _r2(v) { return Math.round(v * 100) / 100; }
 
 module.exports = { findSharpExtremes, DEFAULT_SETTINGS };

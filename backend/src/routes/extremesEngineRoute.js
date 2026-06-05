@@ -203,15 +203,24 @@ async function extremesEngineHandler(req, res) {
     return res.status(422).json({ success: false, error: 'Insufficient bar data from Binance' });
   }
 
+  // ── Convert bar format: Binance returns time, algorithms expect timestamp ──
+  // All three ported engines use { timestamp, open, high, low, close, volume }
+  const barsWithTs = bars[0] && bars[0].timestamp !== undefined
+    ? bars
+    : bars.map(b => ({ ...b, timestamp: b.time }));
+
   // ── Compute ───────────────────────────────────────────────────
+  // Pass tf into settings so slope filters work per-timeframe
+  const computeSettings = { ...settings, tf };
+
   let extremes;
   try {
     if (source === 'sharp-extremes') {
-      extremes = findSharpExtremes(bars, settings);
+      extremes = findSharpExtremes(barsWithTs, computeSettings);
     } else if (source === 'vertical-extremes') {
-      extremes = findVerticalExtremes(bars, settings);
+      extremes = findVerticalExtremes(barsWithTs, computeSettings);
     } else {
-      extremes = findTrendlines(bars, settings);
+      extremes = findTrendlines(barsWithTs, computeSettings);
     }
   } catch (err) {
     console.error(`[extremes-engine] compute error source=${source}:`, err.message);

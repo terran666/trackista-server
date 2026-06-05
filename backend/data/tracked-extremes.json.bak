@@ -1,5 +1,5 @@
 {
-  "nextId": 5728,
+  "nextId": 5803,
   "extremes": [
     {
       "id": 206,
@@ -21929,276 +21929,6 @@
       "updatedAt": 1776365965674
     },
     {
-      "id": 3809,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2282.7,
-      "points": [
-        {
-          "timestamp": 1776349440000,
-          "value": 2282.7
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2282.7
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3810,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2305.18,
-      "points": [
-        {
-          "timestamp": 1776351480000,
-          "value": 2305.18
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2305.18
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3811,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": 2348.73,
-      "points": [
-        {
-          "timestamp": 1776353820000,
-          "value": 2348.73
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2348.73
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3812,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": 2347.68,
-      "points": [
-        {
-          "timestamp": 1776355680000,
-          "value": 2347.68
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2347.68
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3813,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2307.94,
-      "points": [
-        {
-          "timestamp": 1776358380000,
-          "value": 2307.94
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2307.94
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3814,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2309,
-      "points": [
-        {
-          "timestamp": 1776359700000,
-          "value": 2309
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2309
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3815,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2317.08,
-      "points": [
-        {
-          "timestamp": 1776361080000,
-          "value": 2317.08
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2317.08
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3816,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2318.58,
-      "points": [
-        {
-          "timestamp": 1776362280000,
-          "value": 2318.58
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2318.58
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3817,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2319,
-      "points": [
-        {
-          "timestamp": 1776362940000,
-          "value": 2319
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2319
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
-      "id": 3818,
-      "userId": 2,
-      "symbol": "ETHUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 2321.47,
-      "points": [
-        {
-          "timestamp": 1776364080000,
-          "value": 2321.47
-        },
-        {
-          "timestamp": 1776365940000,
-          "value": 2321.47
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1776365985412,
-      "updatedAt": 1776365985412
-    },
-    {
       "id": 3819,
       "userId": 2,
       "symbol": "ENJUSDT",
@@ -40046,168 +39776,6 @@
       "updatedAt": 1778354459709
     },
     {
-      "id": 5053,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778350500000,
-          "value": 4.327271650457988
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.434963958148728
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778354733552,
-      "updatedAt": 1778354733552
-    },
-    {
-      "id": 5054,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778350500000,
-          "value": 4.324730945329065
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.432939278667618
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778354733552,
-      "updatedAt": 1778354733552
-    },
-    {
-      "id": 5055,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778350500000,
-          "value": 4.324842464942776
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.432930700240831
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778354733552,
-      "updatedAt": 1778354733552
-    },
-    {
-      "id": 5056,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778343420000,
-          "value": 4.536028023592735
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.494444972745441
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778353881998,
-      "updatedAt": 1778354733552
-    },
-    {
-      "id": 5057,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778343420000,
-          "value": 4.5355757575653115
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.494501844521437
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778353881998,
-      "updatedAt": 1778354733552
-    },
-    {
-      "id": 5058,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "vertical-extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": null,
-      "points": [
-        {
-          "timestamp": 1778343420000,
-          "value": 4.5354002614440105
-        },
-        {
-          "timestamp": 1778354700000,
-          "value": 4.494523912895602
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1778353881998,
-      "updatedAt": 1778354733552
-    },
-    {
       "id": 5059,
       "userId": 2,
       "symbol": "ZECUSDT",
@@ -45203,195 +44771,6 @@
       "updatedAt": 1780178344676
     },
     {
-      "id": 5296,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": 8.1152,
-      "points": [
-        {
-          "timestamp": 1780167720000,
-          "value": 8.1152
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 8.1152
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5297,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 7.3878,
-      "points": [
-        {
-          "timestamp": 1780167900000,
-          "value": 7.3878
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 7.3878
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5298,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 7.5036,
-      "points": [
-        {
-          "timestamp": 1780174320000,
-          "value": 7.5036
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 7.5036
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5299,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 7.5905,
-      "points": [
-        {
-          "timestamp": 1780175100000,
-          "value": 7.5905
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 7.5905
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5300,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": 8.0421,
-      "points": [
-        {
-          "timestamp": 1780176420000,
-          "value": 8.0421
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 8.0421
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5301,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 7.846,
-      "points": [
-        {
-          "timestamp": 1780176600000,
-          "value": 7.846
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 7.846
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
-      "id": 5302,
-      "userId": 2,
-      "symbol": "LABUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 7.8502,
-      "points": [
-        {
-          "timestamp": 1780177320000,
-          "value": 7.8502
-        },
-        {
-          "timestamp": 1780178340000,
-          "value": 7.8502
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780178347283,
-      "updatedAt": 1780178347283
-    },
-    {
       "id": 5303,
       "userId": 2,
       "symbol": "ALLOUSDT",
@@ -45984,114 +45363,6 @@
       "tracked": false,
       "createdAt": 1780259897787,
       "updatedAt": 1780259897787
-    },
-    {
-      "id": 5328,
-      "userId": 2,
-      "symbol": "BTCUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 73417.2,
-      "points": [
-        {
-          "timestamp": 1780255980000,
-          "value": 73417.2
-        },
-        {
-          "timestamp": 1780266300000,
-          "value": 73417.2
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780266345054,
-      "updatedAt": 1780266345054
-    },
-    {
-      "id": 5329,
-      "userId": 2,
-      "symbol": "BTCUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 73590.2,
-      "points": [
-        {
-          "timestamp": 1780262760000,
-          "value": 73590.2
-        },
-        {
-          "timestamp": 1780266300000,
-          "value": 73590.2
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780266345054,
-      "updatedAt": 1780266345054
-    },
-    {
-      "id": 5330,
-      "userId": 2,
-      "symbol": "BTCUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "support",
-      "type": "extreme",
-      "price": 73645.6,
-      "points": [
-        {
-          "timestamp": 1780265040000,
-          "value": 73645.6
-        },
-        {
-          "timestamp": 1780266300000,
-          "value": 73645.6
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780266345054,
-      "updatedAt": 1780266345054
-    },
-    {
-      "id": 5331,
-      "userId": 2,
-      "symbol": "BTCUSDT",
-      "marketType": "futures",
-      "tf": "1m",
-      "source": "extremes",
-      "side": "resistance",
-      "type": "extreme",
-      "price": 73965,
-      "points": [
-        {
-          "timestamp": 1780265700000,
-          "value": 73965
-        },
-        {
-          "timestamp": 1780266300000,
-          "value": 73965
-        }
-      ],
-      "strength": 0,
-      "touches": 0,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1780266345054,
-      "updatedAt": 1780266345054
     },
     {
       "id": 5332,
@@ -53949,6 +53220,1869 @@
       "tracked": false,
       "createdAt": 1780573477009,
       "updatedAt": 1780573507086
+    },
+    {
+      "id": 5728,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1786.34,
+      "points": [
+        {
+          "timestamp": 1780558980000,
+          "value": 1786.34
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1786.34
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5729,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1778.14,
+      "points": [
+        {
+          "timestamp": 1780561800000,
+          "value": 1778.14
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1778.14
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5730,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1776.72,
+      "points": [
+        {
+          "timestamp": 1780563480000,
+          "value": 1776.72
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1776.72
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5731,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1766.49,
+      "points": [
+        {
+          "timestamp": 1780567200000,
+          "value": 1766.49
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1766.49
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5732,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1762.65,
+      "points": [
+        {
+          "timestamp": 1780569240000,
+          "value": 1762.65
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1762.65
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5733,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 1728.88,
+      "points": [
+        {
+          "timestamp": 1780570440000,
+          "value": 1728.88
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1728.88
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5734,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 1754.18,
+      "points": [
+        {
+          "timestamp": 1780572660000,
+          "value": 1754.18
+        },
+        {
+          "timestamp": 1780574040000,
+          "value": 1754.18
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780574062209,
+      "updatedAt": 1780574062209
+    },
+    {
+      "id": 5735,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 67448,
+      "points": [
+        {
+          "timestamp": 1780481280000,
+          "value": 67448
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 67448
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5736,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 67380,
+      "points": [
+        {
+          "timestamp": 1780483140000,
+          "value": 67380
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 67380
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5737,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 67330.8,
+      "points": [
+        {
+          "timestamp": 1780485900000,
+          "value": 67330.8
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 67330.8
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5738,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 67220.2,
+      "points": [
+        {
+          "timestamp": 1780492800000,
+          "value": 67220.2
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 67220.2
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5739,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 66975,
+      "points": [
+        {
+          "timestamp": 1780497420000,
+          "value": 66975
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 66975
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5740,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 66159,
+      "points": [
+        {
+          "timestamp": 1780508340000,
+          "value": 66159
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 66159
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5741,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 66141.7,
+      "points": [
+        {
+          "timestamp": 1780512360000,
+          "value": 66141.7
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 66141.7
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5742,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 65829.4,
+      "points": [
+        {
+          "timestamp": 1780523340000,
+          "value": 65829.4
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 65829.4
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5743,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 61344.8,
+      "points": [
+        {
+          "timestamp": 1780538640000,
+          "value": 61344.8
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 61344.8
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5744,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 64739.8,
+      "points": [
+        {
+          "timestamp": 1780547040000,
+          "value": 64739.8
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 64739.8
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5745,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 64480,
+      "points": [
+        {
+          "timestamp": 1780553880000,
+          "value": 64480
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 64480
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5746,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 62150.8,
+      "points": [
+        {
+          "timestamp": 1780573020000,
+          "value": 62150.8
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 62150.8
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5747,
+      "userId": 2,
+      "symbol": "BTCUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 63038,
+      "points": [
+        {
+          "timestamp": 1780579320000,
+          "value": 63038
+        },
+        {
+          "timestamp": 1780581120000,
+          "value": 63038
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780581128718,
+      "updatedAt": 1780581128718
+    },
+    {
+      "id": 5748,
+      "userId": 2,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 13.242,
+      "points": [
+        {
+          "timestamp": 1780565880000,
+          "value": 13.242
+        },
+        {
+          "timestamp": 1780582560000,
+          "value": 13.242
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582603442,
+      "updatedAt": 1780582603442
+    },
+    {
+      "id": 5749,
+      "userId": 2,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 18.18,
+      "points": [
+        {
+          "timestamp": 1780570380000,
+          "value": 18.18
+        },
+        {
+          "timestamp": 1780582560000,
+          "value": 18.18
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582603442,
+      "updatedAt": 1780582603442
+    },
+    {
+      "id": 5750,
+      "userId": 2,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 17.618,
+      "points": [
+        {
+          "timestamp": 1780574340000,
+          "value": 17.618
+        },
+        {
+          "timestamp": 1780582560000,
+          "value": 17.618
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582603442,
+      "updatedAt": 1780582603442
+    },
+    {
+      "id": 5751,
+      "userId": 2,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 16.269,
+      "points": [
+        {
+          "timestamp": 1780579080000,
+          "value": 16.269
+        },
+        {
+          "timestamp": 1780582560000,
+          "value": 16.269
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582603442,
+      "updatedAt": 1780582603442
+    },
+    {
+      "id": 5752,
+      "userId": 2,
+      "symbol": "OPNUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 0.1801,
+      "points": [
+        {
+          "timestamp": 1780566300000,
+          "value": 0.1801
+        },
+        {
+          "timestamp": 1780582620000,
+          "value": 0.1801
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582627347,
+      "updatedAt": 1780582627347
+    },
+    {
+      "id": 5753,
+      "userId": 2,
+      "symbol": "OPNUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 0.203,
+      "points": [
+        {
+          "timestamp": 1780572000000,
+          "value": 0.203
+        },
+        {
+          "timestamp": 1780582620000,
+          "value": 0.203
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582627347,
+      "updatedAt": 1780582627347
+    },
+    {
+      "id": 5754,
+      "userId": 2,
+      "symbol": "OPNUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 0.2068,
+      "points": [
+        {
+          "timestamp": 1780575720000,
+          "value": 0.2068
+        },
+        {
+          "timestamp": 1780582620000,
+          "value": 0.2068
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780582627347,
+      "updatedAt": 1780582627347
+    },
+    {
+      "id": 5755,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.11847,
+      "points": [
+        {
+          "timestamp": 1780507980000,
+          "value": 0.11847
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.11847
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5756,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.1156,
+      "points": [
+        {
+          "timestamp": 1780524120000,
+          "value": 0.1156
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.1156
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5757,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.11474,
+      "points": [
+        {
+          "timestamp": 1780527420000,
+          "value": 0.11474
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.11474
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5758,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.11431,
+      "points": [
+        {
+          "timestamp": 1780529520000,
+          "value": 0.11431
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.11431
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5759,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.11393,
+      "points": [
+        {
+          "timestamp": 1780534980000,
+          "value": 0.11393
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.11393
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5760,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.11291,
+      "points": [
+        {
+          "timestamp": 1780546260000,
+          "value": 0.11291
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.11291
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5761,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.10533,
+      "points": [
+        {
+          "timestamp": 1780555380000,
+          "value": 0.10533
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.10533
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5762,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.10444,
+      "points": [
+        {
+          "timestamp": 1780561800000,
+          "value": 0.10444
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.10444
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5763,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.10383,
+      "points": [
+        {
+          "timestamp": 1780563480000,
+          "value": 0.10383
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.10383
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5764,
+      "userId": 2,
+      "symbol": "ENAUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 0.10239,
+      "points": [
+        {
+          "timestamp": 1780567320000,
+          "value": 0.10239
+        },
+        {
+          "timestamp": 1780587720000,
+          "value": 0.10239
+        }
+      ],
+      "strength": 1,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1780587734074,
+      "updatedAt": 1780587734074
+    },
+    {
+      "id": 5767,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "sharp-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 9.203,
+      "points": [
+        {
+          "timestamp": 1780680960000,
+          "value": 9.203
+        }
+      ],
+      "strength": 34.55,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688792927,
+      "updatedAt": 1780688792927
+    },
+    {
+      "id": 5768,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "sharp-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.457,
+      "points": [
+        {
+          "timestamp": 1780679700000,
+          "value": 12.457
+        }
+      ],
+      "strength": 33,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688792927,
+      "updatedAt": 1780688792927
+    },
+    {
+      "id": 5769,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "sharp-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.998,
+      "points": [
+        {
+          "timestamp": 1780684800000,
+          "value": 12.998
+        }
+      ],
+      "strength": 28.69,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688792927,
+      "updatedAt": 1780688792927
+    },
+    {
+      "id": 5770,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "sharp-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.1,
+      "points": [
+        {
+          "timestamp": 1780685460000,
+          "value": 10.1
+        }
+      ],
+      "strength": 28.69,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688792927,
+      "updatedAt": 1780688792927
+    },
+    {
+      "id": 5771,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "sharp-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.264,
+      "points": [
+        {
+          "timestamp": 1780686840000,
+          "value": 10.264
+        }
+      ],
+      "strength": 7.66,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688792927,
+      "updatedAt": 1780688792927
+    },
+    {
+      "id": 5772,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.0824,
+      "points": [
+        {
+          "timestamp": 1780643040000,
+          "value": 11.0824
+        }
+      ],
+      "strength": 2.52,
+      "touches": 21,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5773,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.3204,
+      "points": [
+        {
+          "timestamp": 1780668240000,
+          "value": 11.3204
+        }
+      ],
+      "strength": 1.96,
+      "touches": 21,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5774,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.1934,
+      "points": [
+        {
+          "timestamp": 1780620720000,
+          "value": 11.1934
+        }
+      ],
+      "strength": 2.09,
+      "touches": 18,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5775,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.4358,
+      "points": [
+        {
+          "timestamp": 1780637460000,
+          "value": 11.4358
+        }
+      ],
+      "strength": 2.43,
+      "touches": 15,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5776,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.9904,
+      "points": [
+        {
+          "timestamp": 1780672500000,
+          "value": 10.9904
+        }
+      ],
+      "strength": 1.74,
+      "touches": 15,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5777,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.7853,
+      "points": [
+        {
+          "timestamp": 1780632300000,
+          "value": 10.7853
+        }
+      ],
+      "strength": 2.61,
+      "touches": 14,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5778,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.5385,
+      "points": [
+        {
+          "timestamp": 1780667880000,
+          "value": 11.5385
+        }
+      ],
+      "strength": 1.94,
+      "touches": 13,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5779,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.8932,
+      "points": [
+        {
+          "timestamp": 1780642140000,
+          "value": 10.8932
+        }
+      ],
+      "strength": 3.92,
+      "touches": 11,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5780,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.7405,
+      "points": [
+        {
+          "timestamp": 1780679760000,
+          "value": 11.7405
+        }
+      ],
+      "strength": 3.3,
+      "touches": 8,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5781,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.1965,
+      "points": [
+        {
+          "timestamp": 1780655280000,
+          "value": 10.1965
+        }
+      ],
+      "strength": 3.28,
+      "touches": 8,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5782,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.4954,
+      "points": [
+        {
+          "timestamp": 1780681620000,
+          "value": 10.4954
+        }
+      ],
+      "strength": 2.02,
+      "touches": 8,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5783,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.947,
+      "points": [
+        {
+          "timestamp": 1780670280000,
+          "value": 11.947
+        }
+      ],
+      "strength": 3.62,
+      "touches": 6,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5784,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.6485,
+      "points": [
+        {
+          "timestamp": 1780634640000,
+          "value": 10.6485
+        }
+      ],
+      "strength": 2.18,
+      "touches": 6,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5785,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.6185,
+      "points": [
+        {
+          "timestamp": 1780669920000,
+          "value": 11.6185
+        }
+      ],
+      "strength": 1.84,
+      "touches": 6,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5786,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 9.9203,
+      "points": [
+        {
+          "timestamp": 1780681080000,
+          "value": 9.9203
+        }
+      ],
+      "strength": 5.59,
+      "touches": 4,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5787,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.2997,
+      "points": [
+        {
+          "timestamp": 1780679640000,
+          "value": 12.2997
+        }
+      ],
+      "strength": 2.97,
+      "touches": 4,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5788,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 11.8356,
+      "points": [
+        {
+          "timestamp": 1780679340000,
+          "value": 11.8356
+        }
+      ],
+      "strength": 1.8,
+      "touches": 4,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5789,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.5601,
+      "points": [
+        {
+          "timestamp": 1780633080000,
+          "value": 10.5601
+        }
+      ],
+      "strength": 1.66,
+      "touches": 4,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5790,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.1312,
+      "points": [
+        {
+          "timestamp": 1780684260000,
+          "value": 12.1312
+        }
+      ],
+      "strength": 8,
+      "touches": 3,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5791,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.0045,
+      "points": [
+        {
+          "timestamp": 1780634160000,
+          "value": 10.0045
+        }
+      ],
+      "strength": 4.5,
+      "touches": 3,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5792,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 9.7398,
+      "points": [
+        {
+          "timestamp": 1780680900000,
+          "value": 9.7398
+        }
+      ],
+      "strength": 6.3,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5793,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.0507,
+      "points": [
+        {
+          "timestamp": 1780679580000,
+          "value": 12.0507
+        }
+      ],
+      "strength": 4.88,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5794,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.3402,
+      "points": [
+        {
+          "timestamp": 1780623720000,
+          "value": 10.3402
+        }
+      ],
+      "strength": 2.88,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5795,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.2581,
+      "points": [
+        {
+          "timestamp": 1780633440000,
+          "value": 10.2581
+        }
+      ],
+      "strength": 2.35,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5796,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 10.3965,
+      "points": [
+        {
+          "timestamp": 1780633200000,
+          "value": 10.3965
+        }
+      ],
+      "strength": 2.03,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5797,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 9.3985,
+      "points": [
+        {
+          "timestamp": 1780680960000,
+          "value": 9.3985
+        }
+      ],
+      "strength": 6.36,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5798,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.196,
+      "points": [
+        {
+          "timestamp": 1780670100000,
+          "value": 12.196
+        }
+      ],
+      "strength": 5.89,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5799,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 9.685,
+      "points": [
+        {
+          "timestamp": 1780681020000,
+          "value": 9.685
+        }
+      ],
+      "strength": 4.42,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5800,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "support",
+      "type": "extreme",
+      "price": 10.081,
+      "points": [
+        {
+          "timestamp": 1780681200000,
+          "value": 10.081
+        }
+      ],
+      "strength": 3.36,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5801,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.454,
+      "points": [
+        {
+          "timestamp": 1780670160000,
+          "value": 12.454
+        }
+      ],
+      "strength": 2.3,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
+    },
+    {
+      "id": 5802,
+      "userId": null,
+      "symbol": "LABUSDT",
+      "marketType": "futures",
+      "tf": "1m",
+      "source": "vertical-extremes",
+      "side": "resistance",
+      "type": "extreme",
+      "price": 12.3845,
+      "points": [
+        {
+          "timestamp": 1780670220000,
+          "value": 12.3845
+        }
+      ],
+      "strength": 1.91,
+      "touches": 1,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780688963667,
+      "updatedAt": 1780688963667
     }
   ],
   "fingerprints": {
@@ -54123,11 +55257,11 @@
     "2:NEIROUSDT:futures:1m:vertical-extremes": "d4f2e86c7f123fd30814bfff960187f1c969c6185ce5e56d19c81de9073880f8",
     "2:NEIROUSDT:futures:1m:extremes": "c1d59da5a84e2af9337ebec08d80ead8a35083c49f48dbc0e3a71e74bfa9bc9a",
     "2:1000PEPEUSDT:futures:1m:extremes": "727ff05225c4790ee654d30060479b8ba51c448291a6a2ceb02e201e219df385",
-    "2:BTCUSDT:futures:1m:extremes": "462f23796a30d0d10897cf094c3265582ee689537ff7177f113a175b7057e1cc",
+    "2:BTCUSDT:futures:1m:extremes": "0e68c6c865ec1151cc370d0b7428e2adc9cbcfb514cc6ef2be351b1a9898f3a8",
     "2:PLAYUSDT:futures:1m:extremes": "48dc951d58ca2f66b201efd626ffc2937e8ceddd8224de3838b9b106129d8cd6",
     "2:BIOUSDT:futures:1m:extremes": "efffea5eda34cacd202f739239120662c4810c1631f95b1a164af092758b8914",
     "2:BLESSUSDT:futures:1m:extremes": "eccb2dc84a9046109da28e7bd00f6ae519504555b8a4f29f12f915b6d2512882",
-    "2:ETHUSDT:futures:1m:extremes": "e4dd2f7d129696d685ff515860263db7a80c27eaaf5a0020a9aa92d9916205e4",
+    "2:ETHUSDT:futures:1m:extremes": "143e877630486d4ded2aa57248f19d62b3fa6203bc59e3701ec3fef118fb934b",
     "2:ENJUSDT:futures:1m:extremes": "356c6ad898cb9770cf66f21133f0dcdfd79f8689f771a2048cb0f40fac4d6519",
     "2:RAVEUSDT:futures:1m:extremes": "d01263b8c020a5c385214da8b9735fbd0d411d0de2311839cd1edb3b6c40b937",
     "2:ORDIUSDT:futures:1m:extremes": "e39795a70b5892370fe8b9b9a0bbc65749d9185c92b048c003be3f044ab24950",
@@ -54213,7 +55347,7 @@
     "2:LABUSDT:futures:1m:vertical-extremes": "f5e8a85318f5ee3762955c26ce7cbc220734d20a785aef65db4f43cd6e023b6a",
     "2:TONUSDT:futures:1m:vertical-extremes": "0f9b34c40a082d69c8d57d533303a479ce6c383999eecb45b40f15a672a4b3a3",
     "2:TONUSDT:futures:1m:extremes": "acf0518c7d6afc41b88f44d909d0439961865b934199f7fa3f086c36f50bd0d2",
-    "2:LABUSDT:futures:1m:extremes": "0086854a62efa539c2404b48450887f44f8aa471a381c2352c54515b0ffc2b57",
+    "2:LABUSDT:futures:1m:extremes": "1e63e2bf23b34f51be82fd7bfc31bcab9eff7e20aa3f5419ed811be178240db9",
     "2:LABUSDT:futures:1m:sloped-levels": "4f2e12ef459e7dbee01633e8894bb571997029a3a16a48ce635a4a70db1ebfd6",
     "2:SKYAIUSDT:futures:1m:vertical-extremes": "a3bd3cd48f11558ad1460c9a0646c635134a63fd0c390dfbca7b0cc9478f7396",
     "2:SKYAIUSDT:futures:1m:extremes": "74c7bd298b939d4d795c11ff823b8fdbe811f7b931117751d4d3ecc7afacf462",
@@ -54301,6 +55435,11 @@
     "2:CLOUSDT:futures:1h:extremes": "1cc711647de510595a58bf67beaef51f1edd49f540952cb657e66ae2c3e6169e",
     "2:OPNUSDT:futures:1h:vertical-extremes": "fa0b2e12719a701920118efbe507424aa0cc8250c3602f4443000ad9cec2456b",
     "2:OPNUSDT:futures:5m:vertical-extremes": "ec06dc02527c5ca2f52a624988673180b3f63577a39a0f82ad5f43e3fae8a895",
-    "2:BNBUSDT:futures:5m:extremes": "b6513be40709607587741c1221c7c516558bfddff8fbfc30d666ba6451d7a9ae"
+    "2:BNBUSDT:futures:5m:extremes": "b6513be40709607587741c1221c7c516558bfddff8fbfc30d666ba6451d7a9ae",
+    "2:OPNUSDT:futures:1m:extremes": "47429b1000c1d77a91ac99d108a7239a4c0c83c2843de849494e5fe70ed0ea66",
+    "2:ENAUSDT:futures:1m:extremes": "b48a68a22a252e5abdaa5faff0773e9f3f7c8a06f709ecf9becb7196e16db893",
+    "TESTUSDT:futures:5m:trendlines": "c9948be614e5cb6d23b99eb6275a71e3566ed112d8f24cb17501c3f53a607789",
+    "LABUSDT:futures:1m:sharp-extremes": "9d69447c1fca81cbcd704ffdedef91fc316989205937fd85efe6f8a4c7f487ad",
+    "LABUSDT:futures:1m:vertical-extremes": "d29629d2731d95cfb0b7156fb563660914b9950075041d6d43f229c76e8735f8"
   }
 }

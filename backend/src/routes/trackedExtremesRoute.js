@@ -238,8 +238,15 @@ function patchOneHandler(req, res) {
     patch.tracked = body.tracked;
   }
 
+  if (body.userModified !== undefined) {
+    if (typeof body.userModified !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'userModified must be a boolean' });
+    }
+    patch.userModified = body.userModified;
+  }
+
   if (Object.keys(patch).length === 0) {
-    return res.status(400).json({ success: false, error: 'No patchable fields provided. Accepted: price, points, alertEnabled, tracked' });
+    return res.status(400).json({ success: false, error: 'No patchable fields provided. Accepted: price, points, alertEnabled, tracked, userModified' });
   }
 
   try {

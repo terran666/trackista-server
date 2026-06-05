@@ -8,6 +8,7 @@ const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
 const { createDebugExtremesLevelsHandler } = require('./routes/debugExtremesLevelsRoute');
+const { extremesEngineHandler }       = require('./routes/extremesEngineRoute');
 const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete, patchHandler: manualLevelsPatchFactory } = require('./routes/manualLevelsRoute');
 const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
@@ -751,6 +752,13 @@ app.get('/api/density/universe-debug', authRequired, createUniverseDebugHandler(
 // GET /api/levels — levels engine (global/local, supports futures/spot)
 console.log('[backend] registering /api/levels route');
 app.get('/api/levels', levelsHandler);
+
+// GET /api/extremes-engine — server-side Sharp Extremes / Vertical Extremes / Trendlines
+// ?symbol=BTCUSDT&tf=5m&marketType=futures&source=sharp-extremes|vertical-extremes|trendlines
+// Optional overrides: lookbackBars, pivotWindow, minStrengthPct, variant, etc.
+// save=true (default) persists results to trackedExtremesStore (userModified records are preserved)
+console.log('[backend] registering /api/extremes-engine route');
+app.get('/api/extremes-engine', extremesEngineHandler);
 
 // GET /api/autolevels — AutoLevels engine (pivot grid clustering)
 console.log('[backend] registering /api/autolevels route');

@@ -113,6 +113,11 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
          (!userId || !e.userId || e.userId === userId)
   );
 
+  // Records the user has manually edited (dragged trendlines, moved price).
+  // These are PRESERVED unchanged across server recalculations so user
+  // adjustments are never silently overwritten.
+  const userModifiedRecords = prevRecords.filter(e => e.userModified === true);
+
   // Match key: side + first-point timestamp (stable across minor price moves)
   function lineKey(side, pts) {
     const p0 = Array.isArray(pts) && pts[0];
@@ -124,10 +129,12 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
     if (k) prevByKey.set(k, rec);
   }
 
-  // Remove old snapshot for this combination (scoped to userId if present)
+  // Remove old snapshot for this combination (scoped to userId if present),
+  // but retain userModified records — they survive recalculation.
   store.extremes = store.extremes.filter(
     e => !(e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source &&
-           (!userId || !e.userId || e.userId === userId))
+           (!userId || !e.userId || e.userId === userId) &&
+           !e.userModified) // ← keep userModified records
   );
 
   // Insert new records — carry over alertEnabled/tracked from matching previous record
@@ -152,6 +159,7 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
       touches,
       alertEnabled: prev?.alertEnabled ?? false,
       tracked:      prev?.tracked      ?? false,
+      userModified: false,
       createdAt:    prev?.createdAt    ?? now,
       updatedAt:    now,
     };
@@ -160,7 +168,8 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
   store.extremes.push(...created);
   store.fingerprints[fpKey] = incoming;
   writeStore(store);
-  return { skipped: false, items: created };
+  // Return both newly computed records and preserved userModified ones
+  return { skipped: false, items: [...created, ...userModifiedRecords] };
 }
 
 /**
@@ -219,7 +228,7 @@ function removeMany(ids, userId = null) {
  * If userId provided, verifies ownership.
  */
 function patchOne(id, patch, userId = null) {
-  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
+  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'userModified', 'watchMode', 'alertOptions', 'scenarioMode']);
   const store     = readStore();
   const idx       = store.extremes.findIndex(e => e.id === id);
   if (idx === -1) return null;
@@ -239,7 +248,7 @@ function patchOne(id, patch, userId = null) {
  * Returns count of updated records.
  */
 function patchMany(ids, patch, userId = null) {
-  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'watchMode', 'alertOptions', 'scenarioMode']);
+  const PATCHABLE = new Set(['price', 'points', 'alertEnabled', 'tracked', 'userModified', 'watchMode', 'alertOptions', 'scenarioMode']);
   const idSet     = new Set(ids);
   const store     = readStore();
   const now       = Date.now();

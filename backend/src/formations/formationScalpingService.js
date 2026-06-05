@@ -22,6 +22,7 @@ const { createEngineV3 } = require('./v3/engineV3');
 const { aggregate } = require('./v3/timeframes');
 const lifecycle = require('./formationLifecycle');
 const { createPatternEngine } = require('./patternEngine/formationPatternEngine');
+const { runExtremeFormations, evaluateExtremeLifecycle } = require('./strategies/extremeFormationsStrategy');
 const eventBus = require('../services/wsEventBus');
 const { binanceFetch } = require('../utils/binanceRestLogger');
 
@@ -100,6 +101,9 @@ function createFormationService({ redis, store, config }) {
   let started = false;   // whether the scan loop is active (start/stop)
   const lifecycleEvents = []; // newest last, bounded ring buffer
   const MAX_LIFECYCLE_EVENTS = 2000;
+  const rejectLog = [];        // rolling log of rejected extreme candidates (newest last)
+  const MAX_REJECT_LOG = 100;
+  let _lastTickExtremeStats = null; // stats snapshot from the most recent tick
   // Liquidity cache — refreshed at most once per cacheTtlMs (default 60 s).
   // detailsBySymbol: Map<symbol, { volume24hUsd, volumeSource, trades24h, tradesSource,
   //                                  volumeOk, tradesOk, eligible, reason }>
@@ -390,7 +394,7 @@ function createFormationService({ redis, store, config }) {
           else                      { reason = 'TRADES_OK';            passedByTrades++; }
         } else {
           eligible = false;
-          reason   = 'LIQUIDITY_VOLUME_AND_TRADES_TOO_LOW';
+          reason   = 'LIQUIDITY_FILTER_FAILED';
           rejectedByBoth++;
         }
 
@@ -822,7 +826,201 @@ function createFormationService({ redis, store, config }) {
         }
       }
 
+      // ── Extreme formations pass (Stage 1: extremes only) ────────────────────
+      // Reads tracked-extremes per symbol+tf, evaluates proximity to current price,
+      // and creates SUPPORT_BOUNCE / SUPPORT_BREAKDOWN_SETUP / RESISTANCE_REJECTION /
+      // RESISTANCE_BREAKOUT_SETUP cards when price is within setupDistancePct %.
+      // Does NOT fetch from Binance REST — only reads trackedExtremesStore.
+      if (config.extremeFormationsEnabled !== false) {
+        const efCfg       = config.extremeFormations || {};
+        const maxSymbols  = Number(efCfg.maxSymbols)  || 100;
+        const maxFormations = Number(efCfg.maxFormations) || 200;
+        const maxJobs     = Number(efCfg.maxJobsPerTick) || 5;
+        const concurrency = Number(efCfg.maxConcurrentJobs) || 3;
+
+        // Count only extreme-based formations toward the cap
+        const efFormationCount = [...activeMap.values()].filter(f => f.strategy === 'extremeBased').length;
+
+        // Refresh extremes snapshot once per pass (synchronous file read, no Redis)
+        const extremeExtremesAll = refreshPatternExtremes(t0);
+
+        // Cap the symbol list for this pass
+        const efSymbols = tradable.slice(0, maxSymbols);
+        let efJobsThisTick = 0;
+
+        // Per-tick diagnostic stats — saved to _lastTickExtremeStats after the pass.
+        const tickEfStats = {
+          trackedExtremes: 0, candidatesCreated: 0, accepted: 0, rejected: 0,
+          rejectReasons: {}, byTf: {}, sources: {},
+          acceptedByTf: {}, acceptedBySource: {},
+          priceTooFarBuckets: { d0_1: 0, d1_2: 0, d2_3: 0, d3_5: 0, d5_10: 0, d10plus: 0 },
+          ts: t0,
+        };
+
+        // Process in bounded parallel batches to limit Redis load
+        for (let i = 0; i < efSymbols.length; i += concurrency) {
+          if (efFormationCount + efJobsThisTick >= maxFormations) break;
+          const batch = efSymbols.slice(i, i + concurrency);
+          await Promise.allSettled(batch.map(async (symbol) => {
+            if (efFormationCount + efJobsThisTick >= maxFormations) return;
+
+            const extremesByTf = extremeExtremesAll.get(symbol);
+            if (!extremesByTf || extremesByTf.size === 0) return;
+
+            const lightData    = light.get(symbol);
+            const cached       = barsCache.get(symbol);
+            const lastBar      = cached?.bars?.[cached.bars.length - 1];
+            const currentPrice = lightData?.metrics?.lastPrice ?? lightData?.price ?? lastBar?.close ?? null;
+            if (!Number.isFinite(currentPrice)) return;
+
+            // Flatten all extremes across all TFs into one list with symbol injected
+            const allExtremes = [];
+            for (const [, exts] of extremesByTf) {
+              for (const ext of exts) allExtremes.push({ ...ext, symbol });
+            }
+
+            const { candidates: _rawCandidates, rejected } = runExtremeFormations(allExtremes, currentPrice, efCfg);
+
+            // ── Bar validation: reject if extremeTime has no matching bar ──────
+            // Uses the in-memory tfBarsCache so no extra Redis calls are needed.
+            // EXTREME_BAR_NOT_FOUND   → ts is within range but no exact bar match.
+            // EXTREME_OUTSIDE_VISIBLE_RANGE → ts predates stored bars (older
+            //   extremes on 1h/4h TFs are expected; skip but record extremeBarIndex=null).
+            const tfBarsForSymbol = buildTfBars(symbol, barsCache.get(symbol)?.bars || [], t0);
+            const candidates = [];
+            for (const c of _rawCandidates) {
+              const extremeTime = c.extremeTime;
+              if (!extremeTime) {
+                // No time info available — allow through without validation
+                candidates.push(c);
+                continue;
+              }
+              const ctf  = c.extremeTf || c.tf;
+              // For 1m: use the full barsCache (1600 bars ~26h) — tfBarsForSymbol
+              // is limited to tfLookbackBars (200) which may not cover older extremes.
+              // For higher TFs: use aggregated bars from tfBarsForSymbol.
+              const bars = ctf === '1m'
+                ? (barsCache.get(symbol)?.bars || [])
+                : (tfBarsForSymbol.get(ctf) || []);
+              if (bars.length === 0) {
+                // No bar data for this TF — skip bar validation
+                candidates.push(c);
+                continue;
+              }
+              const minTs = bars[0].ts;
+              const maxTs = bars[bars.length - 1].ts;
+              if (extremeTime < minTs || extremeTime > maxTs) {
+                // Extreme predates (or postdates) stored bar window.
+                // This is expected for multi-day extremes on higher TFs.
+                // Record as diagnostic but do NOT reject — allow the formation.
+                rejected.push({ extremeId: c.extremeId, reason: 'EXTREME_OUTSIDE_VISIBLE_RANGE',
+                  tf: ctf, extremeTime, minTs, maxTs, _diagnostic: true });
+                candidates.push(c); // pass through without extremeBarIndex
+                continue;
+              }
+              const barIdx = bars.findIndex(b => b.ts === extremeTime);
+              if (barIdx === -1) {
+                // Timestamp is within bar range but no exact bar match.
+                // Per Stage 1 spec: visual warning only — do NOT hard-reject.
+                // Formation passes through; extremeBarIndex stays null.
+                rejected.push({ extremeId: c.extremeId, reason: 'EXTREME_BAR_NOT_FOUND',
+                  tf: ctf, extremeTime, _diagnostic: true });
+                candidates.push(c); // pass through without extremeBarIndex
+                continue;
+              }
+              candidates.push({ ...c, extremeBarIndex: barIdx });
+            }
+
+            // ── Accumulate per-tick diagnostic stats ──────────────────────────
+            for (const e of allExtremes) {
+              tickEfStats.trackedExtremes++;
+              const etf = e.tf || 'unknown';
+              if (!tickEfStats.byTf[etf]) tickEfStats.byTf[etf] = { extremes: 0, candidates: 0, rejected: 0, accepted: 0 };
+              tickEfStats.byTf[etf].extremes++;
+              const src = String(e.source || e.extremeSource || 'unknown').toLowerCase();
+              tickEfStats.sources[src] = (tickEfStats.sources[src] || 0) + 1;
+            }
+            for (const c of candidates) {
+              tickEfStats.candidatesCreated++;
+              const ctf = c.tf || 'unknown';
+              if (!tickEfStats.byTf[ctf]) tickEfStats.byTf[ctf] = { extremes: 0, candidates: 0, rejected: 0, accepted: 0 };
+              tickEfStats.byTf[ctf].candidates++;
+            }
+            for (const r of rejected) {
+              tickEfStats.rejected++;
+              tickEfStats.rejectReasons[r.reason] = (tickEfStats.rejectReasons[r.reason] || 0) + 1;
+              const matchExt = r.extremeId != null
+                ? allExtremes.find(e => String(e.id) === String(r.extremeId))
+                : null;
+              const rtf = matchExt?.tf || r.tf || 'unknown';
+              if (!tickEfStats.byTf[rtf]) tickEfStats.byTf[rtf] = { extremes: 0, candidates: 0, rejected: 0, accepted: 0 };
+              tickEfStats.byTf[rtf].rejected++;
+              // Bucket PRICE_TOO_FAR by distance
+              if (r.reason === 'PRICE_TOO_FAR' && typeof r.distancePct === 'number') {
+                const d = r.distancePct;
+                const b = tickEfStats.priceTooFarBuckets;
+                if      (d < 1)  b.d0_1++;
+                else if (d < 2)  b.d1_2++;
+                else if (d < 3)  b.d2_3++;
+                else if (d < 5)  b.d3_5++;
+                else if (d < 10) b.d5_10++;
+                else             b.d10plus++;
+              }
+              // Rolling reject log (newest last, bounded)
+              if (rejectLog.length >= MAX_REJECT_LOG) rejectLog.shift();
+              rejectLog.push({
+                ts:          t0,
+                symbol,
+                tf:          rtf !== 'unknown' ? rtf : null,
+                extremeId:   r.extremeId ?? null,
+                price:       Number.isFinite(currentPrice) ? +currentPrice.toFixed(8) : null,
+                extremePrice: r.rawExtreme?.price ?? matchExt?.price ?? null,
+                distancePct: typeof r.distancePct === 'number' ? r.distancePct : null,
+                rejectReason: r.reason,
+              });
+            }
+
+            for (const c of candidates) {
+              if (efFormationCount + efJobsThisTick >= maxFormations) break;
+              // Attach TTL via patternTtlSec hint so store uses the right expiry
+              const ttlHours = Number(efCfg.maxPatternAgeHours) || 24;
+              const withTtl  = { ...c, ttlSec: ttlHours * 3600 };
+              const { formation, created: isNew } = await store.upsert(withTtl, fpMap);
+              activeMap.set(formation.id, formation);
+              fpMap.set(formation.fingerprint, formation);
+              eventBus.emit('formation:updated', formation);
+              efJobsThisTick++;
+              tickEfStats.accepted++;
+              const ctf = c.tf || 'unknown';
+              if (tickEfStats.byTf[ctf]) tickEfStats.byTf[ctf].accepted++;
+              // Track accepted by TF and by source
+              tickEfStats.acceptedByTf[ctf] = (tickEfStats.acceptedByTf[ctf] || 0) + 1;
+              const csrc = String(c.extremeSource || 'unknown').toLowerCase();
+              tickEfStats.acceptedBySource[csrc] = (tickEfStats.acceptedBySource[csrc] || 0) + 1;
+              stats.efFormationsUpserted = (stats.efFormationsUpserted || 0) + 1;
+              if (isNew) created++; else updated++;
+            }
+          }));
+        }
+        _lastTickExtremeStats = tickEfStats;
+      }
+
+      // ── Reset per-tick lifecycle counters ──────────────────────────────────
+      // These are stored directly on _lastTickExtremeStats so the debug endpoint
+      // can read them alongside the detection counters.
+      if (_lastTickExtremeStats) {
+        _lastTickExtremeStats.brokenLastTick         = 0;
+        _lastTickExtremeStats.orphanedLastTick        = 0;
+        _lastTickExtremeStats.liquidityFilterFailed   = list.length - tradable.length;
+      }
+
       // ── Lifecycle pass: terminal transitions (runs every tick) ──────────────
+      // Extreme-based formations use a dedicated lifecycle evaluator; all others
+      // go through the existing formationLifecycle.evaluate() path.
+      const _extremeExtremesForLifecycle = config.extremeFormationsEnabled !== false
+        ? refreshPatternExtremes(t0)
+        : null;
+
       for (const formation of activeMap.values()) {
         const lightData = light.get(formation.symbol);
         const cached    = barsCache.get(formation.symbol);
@@ -831,6 +1029,60 @@ function createFormationService({ redis, store, config }) {
         const lastBar = cached?.bars?.[cached.bars.length - 1];
         const price = lightData?.metrics?.lastPrice ?? lightData?.price ?? lastBar?.close ?? formation.currentPrice;
         if (!Number.isFinite(price)) continue;
+
+        // ── Extreme-based formation lifecycle (Stage 1) ─────────────────────
+        // Evaluated before generic lifecycle — entirely different rules.
+        if (formation.strategy === 'extremeBased') {
+          const efCfg        = config.extremeFormations || {};
+          const extremesByTf = _extremeExtremesForLifecycle
+            ? (_extremeExtremesForLifecycle.get(formation.symbol) || null)
+            : null;
+
+          const efDecision = evaluateExtremeLifecycle(formation, price, extremesByTf, efCfg);
+
+          if (efDecision.action === 'remove') {
+            await store.remove(formation);
+            activeMap.delete(formation.id);
+            fpMap.delete(formation.fingerprint);
+            const removedPayload = {
+              ...formation,
+              status: 'INVALIDATED',
+              lifecycleStatus: efDecision.lifecycleStatus || 'REMOVED',
+              lifecycleReason: efDecision.lifecycleReason || 'REMOVED_EXTREME_LIFECYCLE',
+              updatedAt: t0,
+            };
+            eventBus.emit('formation:updated', removedPayload);
+            recordLifecycleEvent({ symbol: formation.symbol, tf: formation.tf, id: formation.id, action: 'remove', reason: removedPayload.lifecycleReason, formation: removedPayload });
+            // Track broken / orphaned counts in per-tick stats
+            if (_lastTickExtremeStats) {
+              const lr = removedPayload.lifecycleReason || '';
+              if (lr === 'SUPPORT_EXTREME_BROKEN' || lr === 'RESISTANCE_EXTREME_BROKEN') {
+                _lastTickExtremeStats.brokenLastTick = (_lastTickExtremeStats.brokenLastTick || 0) + 1;
+              } else if (lr === 'EXTREME_DELETED_FROM_TESTPAGE' || lr === 'EXTREME_NOT_VISIBLE_ON_TESTPAGE') {
+                _lastTickExtremeStats.orphanedLastTick = (_lastTickExtremeStats.orphanedLastTick || 0) + 1;
+              }
+            }
+            removed++;
+          } else {
+            // Update currentPrice + distancePct if changed
+            const newDistancePct = efDecision.distancePct ?? formation.distancePct;
+            if (formation.currentPrice !== price || formation.distancePct !== newDistancePct) {
+              const patch = {
+                ...formation,
+                currentPrice: price,
+                distancePct:  newDistancePct,
+                updatedAt:    t0,
+              };
+              const ttlSec = Math.max(1, Math.ceil(((patch.expiresAt || (t0 + 86400_000)) - t0) / 1000));
+              await store.save(patch, ttlSec);
+              activeMap.set(patch.id, patch);
+              fpMap.set(patch.fingerprint, patch);
+              eventBus.emit('formation:updated', patch);
+              updated++;
+            }
+          }
+          continue; // skip generic lifecycle for extreme-based formations
+        }
 
         const sourceNorm = normalizeLevelSource(formation.levelSource);
         if (formation.levelSource && !VALID_LEVEL_SOURCES.has(sourceNorm)) {
@@ -1158,6 +1410,81 @@ function createFormationService({ redis, store, config }) {
     return out;
   }
 
+  // ── Debug: diagnose extreme-based formations for specific symbols ───────────
+  // Returns per-symbol/per-tf detail matching TZ §16 debug format.
+  async function diagnoseExtremes(symbols, { tf: filterTf, marketType: filterMarket } = {}) {
+    const now = Date.now();
+    const efCfg = config.extremeFormations || {};
+    const light = await readSymbolData(symbols, now);
+    const extremeExtremesAll = refreshPatternExtremes(now);
+    const liquidity = await readLiquidity();
+    const out = [];
+
+    for (const sym of symbols) {
+      const symbol = sym.toUpperCase();
+      const liq = liquidity.get(symbol) || { eligible: false, reason: 'NO_TICKER_DATA', volume24hUsd: 0, trades24h: 0 };
+      const lightData    = light.get(symbol);
+      const cached       = barsCache.get(symbol);
+      const lastBar      = cached?.bars?.[cached.bars.length - 1];
+      const currentPrice = lightData?.metrics?.lastPrice ?? lightData?.price ?? lastBar?.close ?? null;
+
+      const extremesByTf = extremeExtremesAll.get(symbol) || new Map();
+
+      // Flatten all extremes with optional tf filter
+      const allExtremes = [];
+      for (const [etf, exts] of extremesByTf) {
+        if (filterTf && etf !== filterTf) continue;
+        for (const ext of exts) allExtremes.push({ ...ext, symbol });
+      }
+
+      const extremeTfCounts = {};
+      for (const [etf, exts] of extremesByTf) extremeTfCounts[etf] = exts.length;
+
+      const { candidates, rejected } = Number.isFinite(currentPrice)
+        ? runExtremeFormations(allExtremes, currentPrice, efCfg)
+        : { candidates: [], rejected: allExtremes.map(e => ({ extremeId: e.id, reason: 'PRICE_UNAVAILABLE' })) };
+
+      // Rejection breakdown
+      const rejectByReason = {};
+      for (const r of rejected) {
+        rejectByReason[r.reason] = (rejectByReason[r.reason] || 0) + 1;
+      }
+
+      out.push({
+        symbol,
+        tf: filterTf || 'ALL',
+        marketType: filterMarket || config.marketType,
+        currentPrice: currentPrice ?? null,
+        liquidity: {
+          volume24hUsd: liq.volume24hUsd,
+          trades24h: liq.trades24h,
+          passed: liq.eligible,
+          reason: liq.reason,
+        },
+        extremes: {
+          loaded: allExtremes.length,
+          valid: candidates.length / 2,   // 2 candidates per extreme (both directions)
+          rejected: rejected.length,
+          byTf: extremeTfCounts,
+        },
+        candidates: candidates.map(c => ({
+          patternType:  c.patternType,
+          direction:    c.direction,
+          extremeId:    c.extremeId,
+          extremeType:  c.extremeType,
+          extremeSource: c.extremeSource,
+          extremeTf:    c.extremeTf,
+          extremePrice: c.extremePrice,
+          distancePct:  c.distancePct,
+          score:        c.score,
+        })),
+        rejected: rejected.map(r => ({ extremeId: r.extremeId, reason: r.reason })),
+        rejectBreakdown: rejectByReason,
+      });
+    }
+    return out;
+  }
+
   function start() {
     if (timer) return;
     started = true;
@@ -1172,6 +1499,12 @@ function createFormationService({ redis, store, config }) {
     if (patternEngine) {
       const lbEnabled = config.patternEngine?.levelBased?.enabled !== false;
       console.log(`[formations] patternEngine=ON (doubleExtreme${lbEnabled ? '+levelBased' : ''})`);
+    } else {
+      console.log('[formations] patternEngine=OFF (disabled by config)');
+    }
+    if (config.extremeFormationsEnabled !== false) {
+      const efCfg = config.extremeFormations || {};
+      console.log(`[formations] extremeFormations=ON maxSymbols=${efCfg.maxSymbols || 100} maxFormations=${efCfg.maxFormations || 200}`);
     }
     timer = setInterval(() => { tick().catch(() => {}); }, config.intervalMs);
     if (timer.unref) timer.unref();
@@ -1193,6 +1526,8 @@ function createFormationService({ redis, store, config }) {
       patternCandidatesFound:  stats.patternCandidatesFound  ?? 0,
       patternDuplicatesRemoved: stats.patternDuplicatesRemoved ?? 0,
       patternFormationsStored: stats.patternFormationsStored ?? 0,
+      // Extreme formations counters
+      efFormationsUpserted: stats.efFormationsUpserted ?? 0,
       // Liquidity filter breakdown (last tick)
       liquidityFilter: liq,
       passedSymbols:   liq.passedSymbols   ?? null,
@@ -1252,7 +1587,16 @@ function createFormationService({ redis, store, config }) {
     };
   }
 
-  return { start, stop, tick, diagnose, diagnosePatterns, getStats, getConfig, getLifecycleDebug };
+  function getRejectLog() {
+    // Return newest first (most recent rejects at top)
+    return rejectLog.slice().reverse();
+  }
+
+  function getExtremeStats() {
+    return _lastTickExtremeStats;
+  }
+
+  return { start, stop, tick, diagnose, diagnosePatterns, diagnoseExtremes, getStats, getConfig, getLifecycleDebug, getRejectLog, getExtremeStats };
 }
 
 module.exports = { createFormationService };

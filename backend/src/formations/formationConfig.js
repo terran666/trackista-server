@@ -26,14 +26,14 @@ const config = {
 
   // -- Liquidity filter (FIRST gate -- coins below this are not analysed) --
   // Legacy scalar fields kept for backwards compat (used by diagnose / debug).
-  minTrades24h:      envInt('FORMATIONS_MIN_TRADES_24H', 400_000),
-  minVolume24h:      envInt('FORMATIONS_MIN_VOLUME_24H', 40_000_000),
+  minTrades24h:      envInt('FORMATIONS_MIN_TRADES_24H', 900_000),
+  minVolume24h:      envInt('FORMATIONS_MIN_VOLUME_24H', 70_000_000),
 
   // Structured liquidity filter -- OR logic: pass if EITHER threshold met.
   formationLiquidityFilter: {
     enabled:         true,
-    minVolume24hUsd: envInt('FORMATIONS_MIN_VOLUME_24H',  40_000_000),
-    minTrades24h:    envInt('FORMATIONS_MIN_TRADES_24H',    400_000),
+    minVolume24hUsd: envInt('FORMATIONS_MIN_VOLUME_24H',  70_000_000),
+    minTrades24h:    envInt('FORMATIONS_MIN_TRADES_24H',    900_000),
     mode:            'OR',        // 'OR' | 'AND'
     cacheTtlMs:      60_000,      // refresh futures:tickers:all at most once per minute
     createOnly:      true,        // liquidity only gates formation CREATE, not lifecycle
@@ -48,8 +48,8 @@ const config = {
   // --
   engineVersion:     'v3',
 
-  // -- Timeframes analysed (youngest -- oldest) --
-  timeframes:        ['1m', '5m', '15m', '30m', '1h', '4h', '1d'],
+  // -- Timeframes analysed (youngest -- oldest) -- 1d excluded (Stage 1: Extremes only)
+  timeframes:        ['1m', '5m', '15m', '30m', '1h', '4h'],
 
   // Per-timeframe full-recompute cadence (ms). Breakout check still runs every
   // tick regardless of these. A formation spanning several tfs uses the cadence
@@ -183,8 +183,10 @@ const config = {
   // Current price is used ONLY to check breakout / invalidation -- NEVER to
   // find the pattern.
   // --
+  // Stage 1: Extremes-only mode — V3 geometry engine + V1 pattern engine (double top/bottom) disabled.
+  // Only extremeFormationsEnabled pass is active.
   legacyEngineEnabled:  false,
-  patternEngineEnabled: true,
+  patternEngineEnabled: false,
 
   patternEngine: {
     doubleExtreme: {
@@ -225,6 +227,9 @@ const config = {
 
       // Max patterns per patternType per symbol+tf (1 DT + 1 DB; best score wins)
       maxResultsPerSymbol:      1,
+
+      // Stage 1 override: double extreme patterns disabled — use extremeFormations instead
+      enabled: false,
 
       // Min bars between first and second extreme (A--C span), by timeframe.
       minBarsBetweenExtremesByTf: {
@@ -353,6 +358,36 @@ const config = {
       // Formation TTL
       maxPatternAgeHours:         8,
     },
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Stage 1: Extreme-based formations
+  // Source: tracked-extremes (source: extremes | vertical-extremes |
+  //         tracked-extremes | sharp-extremes)
+  //
+  // Each formation requires extremeId, extremeSource, extremeTf,
+  // extremePrice, extremeType, visibleOnTestPage=true.
+  // ──────────────────────────────────────────────────────────────────────────
+  extremeFormationsEnabled: true,
+
+  extremeFormations: {
+    // Distance gates (% of price)
+    setupDistancePct:     3.0,   // do not create if price farther than this
+    breakThresholdPct:    0.2,   // extreme is "broken" when price crosses by this %
+    maxActiveDistancePct: 5.0,   // remove existing formation if price drifts past this
+
+    // Scanner limits
+    maxConcurrentJobs: 3,        // parallel symbol processing per tick
+    maxJobsPerTick:    5,        // max new upserts per tick across all symbols
+    scanIntervalMs:    1000,     // cadence (uses service.intervalMs)
+    maxSymbols:        100,      // top-N liquid coins to scan
+    maxFormations:     200,      // hard cap on total stored extreme formations
+
+    // Allowed timeframes (1d is excluded at Stage 1)
+    allowedTfs: ['1m', '5m', '15m', '30m', '1h', '4h'],
+
+    // Formation TTL (24 h)
+    maxPatternAgeHours: 24,
   },
 };
 

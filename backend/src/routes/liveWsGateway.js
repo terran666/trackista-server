@@ -380,6 +380,10 @@ let   _redis        = null;       // set by attachLiveWsGateway
 // Server-side watch-state snapshot for incremental diff
 let _watchStateSnap = null;       // Map<redisKey, object>
 
+// Per-symbol last-bar signature for formations:bar dedup
+// Map<symbol, `${symbol}:${barTs}`>
+const _formationsLastBarSig = new Map();
+
 function startFlushLoops() {
   for (const [scope, cadence] of Object.entries(FLUSH_CADENCE)) {
     const timer = setInterval(() => _runFlush(scope), cadence);
@@ -975,6 +979,62 @@ async function _flushFormations() {
       items          : data,
       data,
     });
+  }
+
+  // ── formations:bar — push latest closed 1m bar for each active symbol ──────
+  // Sent ONCE when a new bar closes (signature-deduped per symbol).
+  // The frontend uses this to update formation charts without polling klines —
+  // charts only refresh when a real new bar arrives, not on every render.
+  // Each symbol's bar is fetched at most once per tick via a single pipeline.
+  const activeSymbols = [...new Set(allFormations.map(f => String(f.symbol || '').toUpperCase()).filter(Boolean))];
+  if (activeSymbols.length > 0 && subs.length > 0) {
+    try {
+      const barPipe = _redis.pipeline();
+      for (const sym of activeSymbols) barPipe.zrange(`bars:1m:${sym}`, -1, -1);
+      const barResults = await barPipe.exec();
+
+      for (let i = 0; i < activeSymbols.length; i++) {
+        const sym    = activeSymbols[i];
+        const rawArr = barResults[i]?.[1];
+        if (!Array.isArray(rawArr) || !rawArr[0]) continue;
+        let bar;
+        try { bar = JSON.parse(rawArr[0]); } catch (_) { continue; }
+        // Only emit when this is a CLOSED bar (ts is a round minute boundary)
+        // and when the bar is newer than what was last sent for this symbol.
+        const barTs  = bar.ts;
+        const barSig = `${sym}:${barTs}`;
+        // Track per-gateway (not per-sub) — bar data is identical for all subs.
+        if (_formationsLastBarSig.get(sym) === barSig) continue;
+        _formationsLastBarSig.set(sym, barSig);
+
+        const candle = {
+          time   : barTs,
+          open   : bar.open,
+          high   : bar.high,
+          low    : bar.low,
+          close  : bar.close,
+          volume : bar.volumeUsdt ?? 0,
+        };
+
+        for (const sub of subs) {
+          const state = connections.get(sub.connectionId);
+          if (!state || state.ws.readyState !== WebSocket.OPEN) continue;
+          // Only deliver to subs that have this symbol in their visible set,
+          // or to subs with no symbol filter (show all symbols).
+          const symFilter = (sub.params?.symbol || '').toUpperCase();
+          if (symFilter && symFilter !== sym) continue;
+          safeSend(state.ws, {
+            type           : 'formations:bar',
+            subscriptionId : sub.subscriptionId,
+            cursor         : now,
+            serverTime     : now,
+            symbol         : sym,
+            tf             : '1m',
+            candle,
+          });
+        }
+      }
+    } catch (_) { /* non-fatal */ }
   }
 }
 
@@ -1665,6 +1725,7 @@ function stopGateway() {
   stopFlushLoops();
   _detachEventBusListeners();
   _watchStateSnap = null;
+  _formationsLastBarSig.clear();
   for (const state of connections.values()) {
     if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
     try { state.ws.terminate(); } catch (_) { /* noop */ }

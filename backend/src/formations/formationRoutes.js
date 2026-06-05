@@ -434,8 +434,8 @@ function createFormationDebugRouter({ service, store }) {
   });
 
   // GET /api/formations/debug/source?symbol=BTCUSDT&tf=5m&marketType=futures
-  // Full source parity payload used by backend audit:
-  // highs/lows/support/resistance + quality + decision trace.
+  // Stage 1: returns extreme-based source diagnostics (TZ §16 debug format).
+  // Falls back to the legacy audit if diagnoseExtremes is not available.
   router.get('/source', async (req, res) => {
     try {
       const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase().trim() : null;
@@ -445,10 +445,29 @@ function createFormationDebugRouter({ service, store }) {
 
       const tf = req.query.tf ? String(req.query.tf).trim() : null;
       if (tf && normalizeTf(tf) == null) {
-        return res.status(400).json({ success: false, error: 'Invalid tf. Use ALL|1m|3m|5m|15m|30m|1h|4h|1d' });
+        return res.status(400).json({ success: false, error: 'Invalid tf. Use ALL|1m|3m|5m|15m|30m|1h|4h' });
       }
 
       const marketType = req.query.marketType ? String(req.query.marketType).trim() : 'futures';
+
+      // Stage 1: use extremes-based diagnostics
+      if (service.diagnoseExtremes) {
+        const [diag] = await service.diagnoseExtremes([symbol], { tf: tf || null, marketType });
+        return res.json({
+          success: true,
+          symbol,
+          tf: tf || 'ALL',
+          marketType,
+          liquidity:   diag.liquidity,
+          extremes:    diag.extremes,
+          candidates:  diag.candidates,
+          rejected:    diag.rejected,
+          rejectBreakdown: diag.rejectBreakdown,
+          generatedAt: Date.now(),
+        });
+      }
+
+      // Legacy fallback
       const audit = await buildFormationSourceAudit(service, { symbol, tf, marketType });
       return res.json({
         success: true,
@@ -479,7 +498,7 @@ function createFormationDebugRouter({ service, store }) {
   });
 
   // GET /api/formations/debug/tf?symbol=BTCUSDT
-  // Per-timeframe diagnostics used to explain why a symbol forms only on some TFs.
+  // Stage 1: per-timeframe extreme diagnostics.
   router.get('/tf', async (req, res) => {
     try {
       const symbol = req.query.symbol ? String(req.query.symbol).toUpperCase().trim() : null;
@@ -487,8 +506,29 @@ function createFormationDebugRouter({ service, store }) {
         return res.status(400).json({ success: false, error: 'symbol query param is required' });
       }
 
+      const tfOrder = ['1m', '5m', '15m', '30m', '1h', '4h'];
+
+      // Stage 1: use extreme diagnostics per TF
+      if (service.diagnoseExtremes) {
+        const byTf = {};
+        // Run per-tf diagnoses in parallel
+        const results = await Promise.all(
+          tfOrder.map(tf => service.diagnoseExtremes([symbol], { tf }).then(r => ({ tf, diag: r[0] || {} }))),
+        );
+        for (const { tf, diag } of results) {
+          byTf[tf] = {
+            extremes:   diag.extremes?.loaded  ?? 0,
+            valid:      diag.extremes?.valid   ?? 0,
+            rejected:   diag.extremes?.rejected ?? 0,
+            candidates: diag.candidates?.length ?? 0,
+            rejectBreakdown: diag.rejectBreakdown || {},
+          };
+        }
+        return res.json({ success: true, symbol, byTf, generatedAt: Date.now() });
+      }
+
+      // Legacy fallback
       const [diag] = await service.diagnosePatterns([symbol], {});
-      const tfOrder = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
       const byTf = {};
       const lbSeq = Array.isArray(diag?.debugByTf?._levelBased?.sequences)
         ? diag.debugByTf._levelBased.sequences
@@ -509,11 +549,7 @@ function createFormationDebugRouter({ service, store }) {
         };
       }
 
-      return res.json({
-        success: true,
-        symbol,
-        byTf,
-      });
+      return res.json({ success: true, symbol, byTf });
     } catch (err) {
       console.error('[formations] debug/tf error:', err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });
@@ -532,6 +568,239 @@ function createFormationDebugRouter({ service, store }) {
       return res.json({ success: true, ...payload });
     } catch (err) {
       console.error('[formations] debug/lifecycle error:', err.message);
+      return res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  });
+
+  // GET /api/formations/debug/extremes
+  // Summary of the most recent tick's extreme-formations pass.
+  // Shows: trackedExtremes, candidatesCreated, accepted, rejected, rejectReasons,
+  //        byTf (extremes/candidates/rejected/accepted per TF), sources, filter config.
+  router.get('/extremes', async (req, res) => {
+    try {
+      const stats  = service.getExtremeStats ? service.getExtremeStats() : null;
+      const config = service.getConfig ? service.getConfig() : {};
+      const efCfg  = config.extremeFormations || {};
+
+      const all          = await store.getActive();
+      const extremeBased = all.filter(f => f.strategy === 'extremeBased');
+      const byStatus     = {};
+      const storeByTf    = {};
+      const storeBySource = {};
+      for (const f of extremeBased) {
+        byStatus[f.status || 'UNKNOWN']            = (byStatus[f.status || 'UNKNOWN']            || 0) + 1;
+        storeByTf[f.tf || 'unknown']               = (storeByTf[f.tf || 'unknown']               || 0) + 1;
+        const src = String(f.extremeSource || 'unknown').toLowerCase();
+        storeBySource[src]                         = (storeBySource[src]                         || 0) + 1;
+      }
+      const invalidPrice        = extremeBased.filter(f => !(Number(f.extremePrice) > 0)).length;
+      const missingId           = extremeBased.filter(f => f.extremeId == null).length;
+      const missingExtremeId    = extremeBased.filter(f => f.extremeId == null).length;
+      const missingExtremePrice = extremeBased.filter(f => !(Number(f.extremePrice) > 0)).length;
+      const missingExtremeType  = extremeBased.filter(f => !f.extremeType).length;
+      // These are WARNINGS only — missing time/barIndex does not invalidate a formation
+      const missingExtremeTime     = extremeBased.filter(f => f.extremeTime == null).length;
+      const missingExtremeBarIndex = extremeBased.filter(f => f.extremeBarIndex == null).length;
+
+      // Counters by source (Stage 1: extremes only)
+      const formationsFromExtremes         = extremeBased.filter(f => f.extremeSource === 'extremes').length;
+      const formationsFromVerticalExtremes = extremeBased.filter(f => f.extremeSource === 'vertical-extremes').length;
+      const formationsFromSharpExtremes    = extremeBased.filter(f => f.extremeSource === 'sharp-extremes').length;
+
+      // Orphaned: extremeId is set but the extreme no longer exists in trackedExtremesStore.
+      // Useful for detecting stale formations that haven't been cleaned up by lifecycle yet.
+      let orphaned = 0;
+      try {
+        const trackedExtremesStore = require('../services/trackedExtremesStore');
+        const allExtremes = trackedExtremesStore.getAll({ marketType: config.marketType || 'futures' }) || [];
+        const knownIds = new Set(allExtremes.map(e => String(e.id)));
+        orphaned = extremeBased.filter(f => f.extremeId != null && !knownIds.has(String(f.extremeId))).length;
+      } catch (_) { /* non-fatal */ }
+
+      return res.json({
+        success: true,
+        lastTickStats: stats
+          ? {
+              ts:                    stats.ts,
+              trackedExtremes:       stats.trackedExtremes,
+              candidatesCreated:     stats.candidatesCreated,
+              accepted:              stats.accepted,
+              rejected:              stats.rejected,
+              rejectReasons:         {
+                ...(stats.rejectReasons || {}),
+                // Liquidity filter failed (symbols skipped before extreme pass)
+                ...(stats.liquidityFilterFailed != null
+                  ? { LIQUIDITY_FILTER_FAILED: stats.liquidityFilterFailed }
+                  : {}),
+              },
+              priceTooFarDistribution: stats.priceTooFarBuckets,
+              byTf:                  stats.byTf,
+              acceptedByTf:          stats.acceptedByTf,
+              acceptedBySource:      stats.acceptedBySource,
+              sources:               stats.sources,
+              // Lifecycle removals (last tick)
+              brokenLastTick:        stats.brokenLastTick    ?? 0,
+              orphanedLastTick:      stats.orphanedLastTick  ?? 0,
+              liquidityFilterFailed: stats.liquidityFilterFailed ?? 0,
+            }
+          : null,
+        store: {
+          // Core counters
+          active:            extremeBased.length,   // formations from extremes engine
+          totalActive:       all.length,
+          extremeBasedCount: extremeBased.length,
+          broken:            stats?.brokenLastTick  ?? 0,   // removed last tick as broken
+          orphaned,                                          // extremeId not in tracked-extremes
+          // Source breakdown (Stage 1: all should be extreme sources)
+          formationsFromExtremes,
+          formationsFromVerticalExtremes,
+          formationsFromSharpExtremes,
+          // Field completeness (invalid = hard block; missing* = warning only)
+          invalidPriceCount:     invalidPrice,
+          missingIdCount:        missingId,
+          missingExtremeId,      // HARD reject if > 0
+          missingExtremePrice,   // HARD reject if > 0
+          missingExtremeType,    // HARD reject if > 0
+          missingExtremeTime,        // WARNING only — does not block formation
+          missingExtremeBarIndex,    // WARNING only — does not block formation
+          fieldWarnings: {
+            missingExtremeId,
+            missingExtremePrice,
+            missingExtremeType,
+            missingExtremeTime,
+            missingExtremeBarIndex,
+          },
+          byStatus,
+          byTf:    storeByTf,
+          bySource: storeBySource,
+          active: extremeBased.slice(0, 50).map(f => {
+            const ep = Number(f.extremePrice);
+            const cp = Number(f.currentPrice);
+            const bt = Number(efCfg.breakThresholdPct || 0.2);
+            const rawType = String(f.extremeType || '').toUpperCase();
+            const extType = (rawType === 'HIGH' || rawType === 'RESISTANCE') ? 'HIGH'
+              : (rawType === 'LOW' || rawType === 'SUPPORT') ? 'LOW' : rawType;
+            let isBroken = false;
+            if (ep > 0 && cp > 0) {
+              if (extType === 'LOW')  isBroken = cp < ep * (1 - bt / 100);
+              if (extType === 'HIGH') isBroken = cp > ep * (1 + bt / 100);
+            }
+            return {
+              id:              f.id,
+              symbol:          f.symbol,
+              tf:              f.tf,
+              patternType:     f.patternType,
+              direction:       f.direction,
+              extremeId:       f.extremeId     ?? null,
+              extremeSource:   f.extremeSource ?? null,
+              extremeTf:       f.extremeTf     ?? null,
+              extremeType:     extType         || null,
+              extremePrice:    ep              || null,
+              extremeTime:     f.extremeTime   ?? null,
+              extremeBarIndex: f.extremeBarIndex ?? null,
+              currentPrice:    cp              || null,
+              distancePct:     f.distancePct   ?? null,
+              score:           f.score         ?? null,
+              visibleOnTestPage: f.visibleOnTestPage ?? null,
+              isBroken,
+              status:          f.status,
+              updatedAt:       f.updatedAt,
+            };
+          }),
+        },
+        config: {
+          extremeFormationsEnabled: config.extremeFormationsEnabled !== false,
+          legacyEngineEnabled:      config.legacyEngineEnabled     ?? false,
+          patternEngineEnabled:     config.patternEngineEnabled     ?? false,
+          allowedSources:           ['extremes', 'vertical-extremes', 'sharp-extremes', 'tracked-extremes'],
+          allowedTfs:               efCfg.allowedTfs               ?? ['1m', '5m', '15m', '30m', '1h', '4h'],
+          setupDistancePct:         efCfg.setupDistancePct         ?? null,
+          breakThresholdPct:        efCfg.breakThresholdPct        ?? null,
+          maxActiveDistancePct:     efCfg.maxActiveDistancePct     ?? null,
+          maxSymbols:               efCfg.maxSymbols               ?? null,
+          maxFormations:            efCfg.maxFormations            ?? null,
+          maxPatternAgeHours:       efCfg.maxPatternAgeHours       ?? null,
+          liquidityFilter: {
+            minVolume24hUsd: config.formationLiquidityFilter?.minVolume24hUsd ?? config.minVolume24h ?? 70_000_000,
+            minTrades24h:    config.formationLiquidityFilter?.minTrades24h    ?? config.minTrades24h ?? 900_000,
+            mode:            config.formationLiquidityFilter?.mode            ?? 'OR',
+            enabled:         config.formationLiquidityFilter?.enabled         ?? true,
+          },
+        },
+        generatedAt: Date.now(),
+      });
+    } catch (err) {
+      console.error('[formations] debug/extremes error:', err.message);
+      return res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  });
+
+  // GET /api/formations/debug/rejects
+  // Last 100 rejected extreme candidates (rolling ring buffer, newest first).
+  // Useful for understanding what is blocking formation creation.
+  router.get('/rejects', (req, res) => {
+    try {
+      const log = service.getRejectLog ? service.getRejectLog() : [];
+      const rejectReasons = {};
+      for (const r of log) rejectReasons[r.rejectReason] = (rejectReasons[r.rejectReason] || 0) + 1;
+      return res.json({
+        success:       true,
+        count:         log.length,
+        rejectReasons,
+        rejects:       log,
+        generatedAt:   Date.now(),
+      });
+    } catch (err) {
+      console.error('[formations] debug/rejects error:', err.message);
+      return res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  });
+
+  // GET /api/formations/debug/store
+  // Shows the current state of the Redis formation store.
+  // Compares active-set count, by-strategy breakdown, and validates
+  // extremePrice on all extreme-based items so you can tell if Redis has
+  // formations but the view filter is hiding them (count=0 on the page).
+  router.get('/store', async (req, res) => {
+    try {
+      const all = await store.getActive();
+      const byStrategy  = {};
+      const byStatus    = {};
+      const bySymbolCnt = {};
+      for (const f of all) {
+        byStrategy[f.strategy  || 'unknown'] = (byStrategy[f.strategy   || 'unknown'] || 0) + 1;
+        byStatus[f.status      || 'unknown'] = (byStatus[f.status       || 'unknown'] || 0) + 1;
+        bySymbolCnt[f.symbol]                = (bySymbolCnt[f.symbol]                 || 0) + 1;
+      }
+
+      const extremeBased    = all.filter(f => f.strategy === 'extremeBased');
+      const invalidPrice    = extremeBased.filter(f => !(Number(f.extremePrice) > 0));
+      const missingStatus   = all.filter(f => !f.status);
+      const sampleExtremes  = extremeBased.slice(0, 5).map(f => ({
+        id:           f.id,
+        symbol:       f.symbol,
+        tf:           f.tf,
+        patternType:  f.patternType,
+        extremePrice: f.extremePrice,
+        status:       f.status,
+        updatedAt:    f.updatedAt,
+      }));
+
+      return res.json({
+        success:           true,
+        active:            all.length,
+        extremeBased:      extremeBased.length,
+        invalidPriceCount: invalidPrice.length,
+        invalidPriceSample: invalidPrice.slice(0, 5).map(f => ({ id: f.id, symbol: f.symbol, extremePrice: f.extremePrice })),
+        missingStatusCount: missingStatus.length,
+        byStrategy,
+        byStatus,
+        symbolCount:       Object.keys(bySymbolCnt).length,
+        sampleExtremes,
+        generatedAt:       Date.now(),
+      });
+    } catch (err) {
+      console.error('[formations] debug/store error:', err.message);
       return res.status(500).json({ success: false, error: 'Internal server error' });
     }
   });

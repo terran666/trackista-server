@@ -168,7 +168,12 @@ function buildFormationViewItem(f) {
   const extremeIds = Array.isArray(f.extremeIds)
     ? f.extremeIds
     : (Array.isArray(f.metrics?.extremeIds) ? f.metrics.extremeIds : []);
+  const extremeId = f.extremeId ?? f.metrics?.extremeId ?? f.debug?.extremeId ?? null;
   const extremeSource = f.extremeSource ?? f.metrics?.extremeSource ?? f.debug?.extremeSource ?? null;
+  const extremeType = f.extremeType ?? f.metrics?.extremeType ?? f.debug?.extremeType ?? null;
+  const extremePrice = toPositiveNumOrNull(f.extremePrice ?? f.metrics?.extremePrice ?? f.debug?.extremePrice);
+  const extremeTime = toNum(f.extremeTime ?? f.metrics?.extremeTime ?? f.debug?.extremeTime, null);
+  const extremeBarIndex = toNum(f.extremeBarIndex ?? f.metrics?.extremeBarIndex ?? f.debug?.extremeBarIndex, null);
   const levelAge = toNum(f.levelAge ?? f.metrics?.levelAge ?? f.debug?.levelAge, null);
   const levelType = String(f.levelType ?? f.metrics?.levelType ?? f.debug?.levelType ?? '').toUpperCase() || null;
   const zoneLower = toPositiveNumOrNull(f.zoneLower ?? f.metrics?.zoneLower ?? f.debug?.zoneLower ?? f.levels?.supportZone?.lowerBound ?? f.levels?.resistanceZone?.lowerBound);
@@ -199,7 +204,17 @@ function buildFormationViewItem(f) {
     : (typeof f.visibleOnTestPage === 'boolean'
       ? f.visibleOnTestPage
       : (typeof f.metrics?.isVisibleOnTestPage === 'boolean' ? f.metrics.isVisibleOnTestPage : null));
-  const chartRange = f.chartRange ?? f.metrics?.chartRange ?? f.debug?.chartRange ?? null;
+  const _rawChartRange = f.chartRange ?? f.metrics?.chartRange ?? f.debug?.chartRange ?? null;
+  // Derive chartRange from extremeTime when no explicit range is provided (optional visual field)
+  const _TF_MS = { '1m': 60000, '3m': 180000, '5m': 300000, '15m': 900000, '30m': 1800000, '1h': 3600000, '4h': 14400000, '1d': 86400000 };
+  const chartRange = _rawChartRange
+    ?? (extremeTime
+      ? { fromTime: extremeTime - (_TF_MS[extremeTf || tf] ?? 60000) * 50, toTime: null, reason: 'from_extreme_time' }
+      : null);
+  // levelLine: horizontal line from extremeTime to present at extremePrice (optional, for chart drawing)
+  const levelLine = (extremePrice && extremeType)
+    ? { fromTime: extremeTime ?? null, toTime: null, price: extremePrice, type: extremeType }
+    : null;
   const breakDirection = f.breakDirection ?? f.metrics?.breakDirection ?? f.debug?.breakDirection ?? null;
   const lifecycleStatus = f.lifecycleStatus ?? f.metrics?.lifecycleStatus ?? f.debug?.lifecycleStatus ?? null;
   const lifecycleReason = f.lifecycleReason ?? f.metrics?.lifecycleReason ?? f.debug?.lifecycleReason ?? null;
@@ -228,9 +243,15 @@ function buildFormationViewItem(f) {
     debugTfReason,
     levelPrice,
     levelCreatedAt,
+    extremeId,
     extremeTf,
     extremeIds,
     extremeSource,
+    extremeType,
+    extremePrice,
+    extremeTime,
+    extremeBarIndex,
+    levelLine,
     levelType,
     zoneLower,
     zoneUpper,
@@ -303,7 +324,17 @@ function isValidLevelBasedItem(item) {
 
   if (isLevelBased) {
     if (item.isVisibleOnTestPage !== true) return false;
-    if (!item.levelId || !item.levelSource || !item.levelTf || !(item.levelPrice > 0)) return false;
+
+    // Stage 1: extreme-based formations use extremeId instead of levelId.
+    const isExtremeBased = item.strategy === 'extremeBased' || !!item.extremeId;
+    if (isExtremeBased) {
+      if (!item.extremeId) return false;            // EXTREME_ID_MISSING
+      if (!(item.extremePrice > 0)) return false;   // EXTREME_PRICE_INVALID
+      if (!item.extremeType) return false;          // EXTREME_TYPE_INVALID
+    } else {
+      // Legacy level-based: require levelId, levelSource, levelTf, levelPrice
+      if (!item.levelId || !item.levelSource || !item.levelTf || !(item.levelPrice > 0)) return false;
+    }
   }
 
   if (item.patternType === 'RESISTANCE_BREAKOUT') {

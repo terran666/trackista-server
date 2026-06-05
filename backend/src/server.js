@@ -292,6 +292,9 @@ app.use(express.json({ limit: '256kb' }));
 
 // Global API rate-limit guard. Per-route limiters (auth, posts, votes)
 // remain stricter; this is a coarse last-resort cap against burst floods.
+// High-frequency read surfaces (screener, live, heatmap, alerts, orderbook,
+// market, formations) get dedicated relaxed buckets so frequent polling from
+// the frontend never trips the coarse global cap.
 {
   const { createRateLimiter } = require('./middleware/rateLimiters');
   const globalApiLimiter = createRateLimiter({
@@ -299,7 +302,36 @@ app.use(express.json({ limit: '256kb' }));
     windowSec: parseInt(process.env.RATE_LIMIT_API_WINDOW_SEC || '60', 10) || 60,
     keyPrefix: 'api',
   })(redis);
-  app.use('/api', globalApiLimiter);
+
+  // Relaxed limiter shared by all high-frequency read namespaces.
+  const readApiLimiter = createRateLimiter({
+    max:       parseInt(process.env.RATE_LIMIT_READ_MAX || '3000', 10) || 3000,
+    windowSec: parseInt(process.env.RATE_LIMIT_READ_WINDOW_SEC || '60', 10) || 60,
+    keyPrefix: 'api-read',
+  })(redis);
+
+  // Read-heavy namespaces that must not share the coarse global bucket.
+  const READ_PREFIXES = [
+    '/screener/',
+    '/live/',
+    '/heatmap/',
+    '/alerts/',
+    '/formations/',
+    '/orderbook',
+    '/market/',
+    '/walls',
+    '/density',
+    '/tracked-universe',
+  ];
+
+  app.use('/api', (req, res, next) => {
+    const path = req.path || '';
+    // Binance datafeed bypass (can burst heavily with many kline/agg-trade requests).
+    if (path.startsWith('/binance/')) return next();
+    // All high-frequency read surfaces use a relaxed shared bucket.
+    if (READ_PREFIXES.some(p => path.startsWith(p))) return readApiLimiter(req, res, next);
+    return globalApiLimiter(req, res, next);
+  });
 }
 
 // GET /health

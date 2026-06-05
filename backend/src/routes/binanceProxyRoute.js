@@ -75,16 +75,29 @@ const INTERVAL_MS = {
   '1w': 604_800_000,
 };
 
-// Decide the klines cache TTL: long for fully-closed historical windows, short
-// (default 60s) for windows that still include the live/forming candle.
+// Decide the klines cache TTL:
+//   1. Historical window (endTime fully in the past)  → 6 h (immutable)
+//   2. Live window (no endTime or endTime ≈ now)      → bar-aligned TTL
+//      Expires exactly when the current bar closes so the chart refreshes
+//      once per bar instead of on every client render.  This is the key
+//      guard against formation-page chart bursts: N charts for N symbols
+//      all call getHistory simultaneously, but within a bar they all hit
+//      cache after the first upstream call.
 function klinesCacheTtl(query, pathKey) {
-  const endTime = parseInt(query.endTime, 10);
+  const endTime    = parseInt(query.endTime, 10);
+  const intervalMs = INTERVAL_MS[query.interval] ?? 60_000;
+
   if (Number.isFinite(endTime)) {
-    const intervalMs = INTERVAL_MS[query.interval] ?? 60_000;
     // The candle covering endTime has fully closed → response is immutable.
     if (endTime < Date.now() - intervalMs) return KLINES_HISTORICAL_TTL_MS;
   }
-  return CACHE_TTL_MS[pathKey] ?? DEFAULT_CACHE_TTL_MS;
+
+  // Live window: align TTL to the next bar close + 2 s buffer.
+  // Example for 1m: if now is :37 into the minute, TTL = 23 + 2 = 25 s.
+  // All callers within that 25 s window share the same cached response;
+  // at bar close the cache expires and the next request fetches fresh data.
+  const msUntilBarClose = intervalMs - (Date.now() % intervalMs);
+  return Math.max(msUntilBarClose + 2_000, 5_000); // floor at 5 s
 }
 
 // ── aggTrades per-symbol throttle ────────────────────────────────────────────
@@ -126,6 +139,48 @@ const responseCache = new Map();
 // Map<cacheKey, Promise> — multiple simultaneous identical requests share one upstream call.
 // Critical for Screener: prevents 50 parallel exchangeInfo requests on page load.
 const inflightRequests = new Map();
+
+// ── Global klines concurrency semaphore ───────────────────────────────────────
+// The formations page (and other chart-heavy pages) opens charts for many symbols
+// simultaneously. Each symbol is a unique cache key, so deduplication doesn't help.
+// Without throttling, 50+ parallel klines calls exhaust Binance's 2400 weight/min
+// budget → 418/429 IP ban → all subsequent requests blocked with HTTP 503.
+//
+// Solution: queue non-cached klines upstream calls and process at most
+// KLINES_MAX_CONCURRENT at a time. Cache hits always bypass the queue.
+const KLINES_MAX_CONCURRENT    = 5;
+const KLINES_QUEUE_MAX         = 60;  // reject when queue this deep (circuit-breaker)
+const KLINES_QUEUE_TIMEOUT_MS  = 20_000;
+let   _klinesInFlight          = 0;
+const _klinesQueue             = []; // { resolve, reject, timer }
+
+function _acquireKlinesSlot() {
+  return new Promise((resolve, reject) => {
+    if (_klinesInFlight < KLINES_MAX_CONCURRENT) {
+      _klinesInFlight++;
+      return resolve();
+    }
+    if (_klinesQueue.length >= KLINES_QUEUE_MAX) {
+      return reject(Object.assign(new Error('klines queue full'), { code: 'KLINES_QUEUE_FULL' }));
+    }
+    const timer = setTimeout(() => {
+      const idx = _klinesQueue.findIndex(e => e.resolve === resolve);
+      if (idx !== -1) _klinesQueue.splice(idx, 1);
+      reject(Object.assign(new Error('klines queue timeout'), { code: 'KLINES_QUEUE_TIMEOUT' }));
+    }, KLINES_QUEUE_TIMEOUT_MS);
+    _klinesQueue.push({ resolve, reject, timer });
+  });
+}
+
+function _releaseKlinesSlot() {
+  const next = _klinesQueue.shift();
+  if (next) {
+    clearTimeout(next.timer);
+    next.resolve(); // _klinesInFlight stays the same — passed to next waiter
+  } else {
+    _klinesInFlight--;
+  }
+}
 
 function getCachedFresh(key) {
   const entry = responseCache.get(key);
@@ -495,6 +550,21 @@ function makeProxy(targetBase, market) {
     try {
       // Create in-flight promise for klines / aggTrades
       const fetchPromise = (isKlines || isAggTrades) ? (async () => {
+        // ── Klines concurrency gate ───────────────────────────────────────────
+        // Serialize upstream klines calls to at most KLINES_MAX_CONCURRENT at
+        // once. Prevents mass-parallel chart loads (formations page, screener)
+        // from blasting through Binance's weight budget and triggering a 418/429
+        // IP ban. aggTrades has its own per-symbol throttle so no gate needed.
+        if (isKlines) {
+          try {
+            await _acquireKlinesSlot();
+          } catch (qErr) {
+            inflightRequests.delete(cacheKey);
+            const stale = responseCache.get(cacheKey);
+            if (stale) return { body: stale.body, status: 200, headers: { ...stale.headers, 'x-proxy-cache': 'stale' }, res: null };
+            throw Object.assign(new Error('klines upstream throttled'), { status: 418, retryAfterMs: KLINES_QUEUE_TIMEOUT_MS });
+          }
+        }
         try {
           const upstreamRes = await binanceFetch(
             upstreamUrl,
@@ -532,6 +602,7 @@ function makeProxy(targetBase, market) {
           
           return { body, status: upstreamRes.status, headers, res: upstreamRes };
         } finally {
+          if (isKlines) _releaseKlinesSlot();
           inflightRequests.delete(cacheKey);
         }
       })() : null;
@@ -706,6 +777,13 @@ function createBinanceProxyRouter() {
           exchangeInfoFullRequests: 'Number of full exchangeInfo upstream requests to Binance',
           klinesPreviewCacheHits:   'Cache hits for preview chart klines',
         },
+      },
+      klinesGate: {
+        maxConcurrent : KLINES_MAX_CONCURRENT,
+        inFlight      : _klinesInFlight,
+        queued        : _klinesQueue.length,
+        queueMax      : KLINES_QUEUE_MAX,
+        queueTimeoutMs: KLINES_QUEUE_TIMEOUT_MS,
       },
       recentErrors:       proxyStats.errors.slice(-20),
       requestCounts:      proxyStats.requestCounts,

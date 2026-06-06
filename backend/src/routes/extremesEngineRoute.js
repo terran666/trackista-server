@@ -124,22 +124,45 @@ function _parseSettings(source, query) {
   _int('lookbackBars', 20, 2000);
 
   if (source === 'sharp-extremes') {
-    _int('pivotWindow',    1,  20);
+    // pivotWindow maps to both pivotLeft and pivotRight (mirrors frontend behavior)
+    const pw = parseInt(query.pivotWindow, 10);
+    if (!isNaN(pw) && pw >= 1 && pw <= 20) {
+      settings.pivotLeft  = pw;
+      settings.pivotRight = pw;
+    }
     _num('minStrengthPct', 0,  20);
     _int('maxExtremes',    1, 200);
   } else if (source === 'vertical-extremes') {
-    if (VALID_VE_VARIANTS.has(query.variant)) settings.variant = query.variant;
-    _num('volumeMultiplier',    1,   20);
-    _num('rangeMultiplier',     1,   20);
-    _int('atrPeriod',           2,   50);
-    _num('clusterTolerancePct', 0.01, 5);
-    _int('maxExtremes',         1,  200);
+    // maxVariantsPerSide (frontend name) → maxLinesPerSide (engine name)
+    const mv = parseInt(query.maxVariantsPerSide, 10);
+    if (!isNaN(mv) && mv >= 1 && mv <= 20) settings.maxLinesPerSide = mv;
+    _int('maxLinesPerSide', 1, 20); // direct override if passed
+    _int('minTouches',      2, 20);
+    _num('tolPct',          0.0001, 0.05); // maps to tolPctDefault
+    if (settings.tolPct !== undefined) { settings.tolPctDefault = settings.tolPct; delete settings.tolPct; }
+    _int('pivotLeft',       1, 20);
+    _int('pivotRight',      1, 20);
+    const pw2 = parseInt(query.pivotWindow, 10);
+    if (!isNaN(pw2) && pw2 >= 1 && pw2 <= 20) { settings.pivotLeft = pw2; settings.pivotRight = pw2; }
   } else if (source === 'trendlines') {
     _int('pivotWindow',       1,  20);
+    // pivotWindow → pivotLeft + pivotRight
+    if (settings.pivotWindow !== undefined) {
+      settings.pivotLeft  = settings.pivotWindow;
+      settings.pivotRight = settings.pivotWindow;
+      delete settings.pivotWindow;
+    }
     _int('minTouches',        2,  20);
-    _num('touchTolerancePct', 0.01, 5);
+    _num('touchTolerancePct', 0.001, 5);
+    // touchTolerancePct from frontend is in percent (e.g. 0.2 = 0.2%), map to tolPctDefault (fraction)
+    if (settings.touchTolerancePct !== undefined) {
+      settings.tolPctDefault = settings.touchTolerancePct / 100;
+      delete settings.touchTolerancePct;
+    }
     _int('maxLinesPerSide',   1,  20);
     _num('minSlopePct',       0,   1);
+    _num('minAngleDeg',       0,  89);
+    _num('maxAngleDeg',       1,  89);
   }
 
   return settings;
@@ -239,10 +262,14 @@ async function extremesEngineHandler(req, res) {
   if (save) {
     try {
       const userId = req.user?.id ?? null;
-      const result = store.bulkSave({ userId, symbol, marketType, tf, source, extremes });
+      // Frontend reads tracked-extremes with source='extremes', so we must
+      // save using that key regardless of the engine source type.
+      const storeSource = source === 'sharp-extremes' ? 'extremes' : source;
+      // force=true bypasses fingerprint cache so deleted levels are restored
+      const result = store.bulkSave({ userId, symbol, marketType, tf, source: storeSource, extremes, force: true });
       saved = { skipped: result.skipped, count: result.items.length };
       console.log(
-        `[extremes-engine] stored source=${source} symbol=${symbol} ` +
+        `[extremes-engine] stored source=${storeSource} symbol=${symbol} ` +
         `count=${result.items.length} skipped=${result.skipped}`,
       );
     } catch (err) {
@@ -264,4 +291,61 @@ async function extremesEngineHandler(req, res) {
   });
 }
 
-module.exports = { extremesEngineHandler };
+// ─── Debug handler ────────────────────────────────────────────────
+// GET /api/extremes-engine/debug?symbol=XLMUSDT&tf=1h&source=sharp-extremes
+//
+// Returns per-candle diagnostic for every detected pivot:
+//   { candleIndex, timestamp, high, low, close, detectedType, finalPrice, reasons[] }
+
+async function extremesEngineDebugHandler(req, res) {
+  const symbol     = safeSymbol(req.query.symbol);
+  const marketType = VALID_MARKET_TYPES.has(req.query.marketType) ? req.query.marketType : 'futures';
+  const tf         = (req.query.tf     || '').toLowerCase();
+  const source     = (req.query.source || 'sharp-extremes').toLowerCase();
+
+  if (!symbol)                  return res.status(400).json({ success: false, error: 'Missing or invalid symbol' });
+  if (!VALID_INTERVALS.has(tf)) return res.status(400).json({ success: false, error: 'Invalid or missing tf' });
+  if (source !== 'sharp-extremes')
+    return res.status(400).json({ success: false, error: 'debug endpoint only supports source=sharp-extremes' });
+
+  const settings = _parseSettings(source, req.query);
+  const limit    = settings.lookbackBars;
+
+  let bars;
+  try {
+    const cacheKey = `${symbol}:${tf}:${marketType}:${limit}`;
+    bars = getCachedBars(cacheKey);
+    if (!bars) {
+      bars = await _fetchBars(symbol, tf, limit, marketType);
+      if (bars.length) setCachedBars(cacheKey, bars);
+    }
+  } catch (err) {
+    return res.status(502).json({ success: false, error: `Binance fetch failed: ${err.message}` });
+  }
+
+  if (!bars || bars.length < 10)
+    return res.status(422).json({ success: false, error: 'Insufficient bar data' });
+
+  const barsWithTs = bars[0]?.timestamp !== undefined
+    ? bars
+    : bars.map(b => ({ ...b, timestamp: b.time }));
+
+  // Run engine with debug mode: collect reason for each pivot
+  const { findSharpExtremesDebug } = require('../engines/extremes/sharpExtremesEngine');
+  const debugResult = findSharpExtremesDebug(barsWithTs, { ...settings, tf });
+
+  return res.json({
+    success    : true,
+    source,
+    symbol,
+    tf,
+    marketType,
+    settings,
+    totalBars  : barsWithTs.length,
+    detected   : debugResult.detected,
+    rejected   : debugResult.rejected,
+    pivots     : debugResult.pivots,
+  });
+}
+
+module.exports = { extremesEngineHandler, extremesEngineDebugHandler };

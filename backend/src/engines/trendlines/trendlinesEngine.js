@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * trendlinesEngine.js — Trendlines (ported 1:1 from frontend trendlines.ts)
+ * trendlinesEngine.js ï¿½ Trendlines (ported 1:1 from frontend trendlines.ts)
  *
  * Bars format: { timestamp: number (ms), open, high, low, close, volume? }
  *
@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS = {
   pivotRight        : 5,
   minPivotGapBars   : 8,
   maxLinesPerSide   : 3,
-  tolPctDefault     : 0.0008,
+  tolPctDefault     : 0.002,
   tolTicks          : 2,
   minTolAbs         : 0,
   tickSize          : undefined,
@@ -283,7 +283,7 @@ function buildTrendlines(barsFull, options) {
 }
 
 /**
- * Main export — converts trendline results to trackedExtremesStore format.
+ * Main export ï¿½ converts trendline results to trackedExtremesStore format.
  * @param {Array<{timestamp,open,high,low,close,volume}>} bars
  * @param {object} [settings]
  * @returns {Array<{side,type,price,points,strength,touches}>}
@@ -292,18 +292,26 @@ function findTrendlines(bars, settings) {
   const opts = Object.assign({}, DEFAULT_SETTINGS, settings || {});
   const lines = buildTrendlines(bars, opts);
 
-  return lines.map(l => ({
-    side   : l.type,
-    type   : 'line',
-    price  : l.p2.price,
-    points : [
-      { timestamp: l.p1.t, value: l.p1.price },
-      { timestamp: l.p2.t, value: l.p2.price },
-    ],
-    strength: l.score,
-    touches : l.touches,
-    meta   : { k: l.k, b: l.b, brokenAtT: l.brokenAtT },
-  }));
+  // Extend right point to last bar so the ray reaches the chart's right edge
+  const lastBar = bars[bars.length - 1];
+  const lastT   = lastBar ? (lastBar.timestamp ?? lastBar.time) : null;
+
+  return lines.map(l => {
+    const rightT     = lastT ?? l.p2.t;
+    const rightPrice = trendlinePriceAt(l, rightT);
+    return {
+      side   : l.type,
+      type   : 'line',
+      price  : rightPrice,
+      points : [
+        { timestamp: l.p1.t, value: l.p1.price },
+        { timestamp: rightT,  value: rightPrice },
+      ],
+      strength: l.score,
+      touches : l.touches,
+      meta   : { k: l.k, b: l.b, brokenAtT: l.brokenAtT },
+    };
+  });
 }
 
 module.exports = { findTrendlines, DEFAULT_SETTINGS };

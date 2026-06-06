@@ -8,7 +8,7 @@ const { createLevelsService }         = require('./levelsService');
 const { levelsHandler }               = require('./routes/levelsEngineRoute');
 const { autoLevelsHandler }           = require('./routes/autoLevelsRoute');
 const { createDebugExtremesLevelsHandler } = require('./routes/debugExtremesLevelsRoute');
-const { extremesEngineHandler }       = require('./routes/extremesEngineRoute');
+const { extremesEngineHandler, extremesEngineDebugHandler } = require('./routes/extremesEngineRoute');
 const { createHandler: manualLevelsCreate, listHandler: manualLevelsList, deleteHandler: manualLevelsDelete, patchHandler: manualLevelsPatchFactory } = require('./routes/manualLevelsRoute');
 const { getById: manualLevelsGetById, patch: manualLevelsPatch } = require('./services/manualLevelsStore');
 const { bulkHandler: trackedLevelsBulk, listHandler: trackedLevelsList, deleteOneHandler: trackedLevelsDeleteOne, deleteManyHandler: trackedLevelsDeleteMany, patchOneHandler: trackedLevelsPatchOne, patchManyHandler: trackedLevelsPatchMany } = require('./routes/trackedLevelsRoute');
@@ -323,6 +323,17 @@ app.use(express.json({ limit: '256kb' }));
     '/walls',
     '/density',
     '/tracked-universe',
+    // Chart page — burst on symbol switch (many hooks fire in parallel)
+    '/correlation/',
+    '/manual-levels',
+    '/saved-rays',
+    '/funding/',
+    '/autolevels',
+    '/extremes-engine',
+    '/tracked-extremes',
+    '/tracked-levels',
+    '/auto-levels',
+    '/bars',
   ];
 
   app.use('/api', (req, res, next) => {
@@ -759,6 +770,11 @@ app.get('/api/levels', levelsHandler);
 // save=true (default) persists results to trackedExtremesStore (userModified records are preserved)
 console.log('[backend] registering /api/extremes-engine route');
 app.get('/api/extremes-engine', extremesEngineHandler);
+
+// GET /api/extremes-engine/debug — per-candle diagnostics for sharp-extremes
+// ?symbol=XLMUSDT&tf=1h&source=sharp-extremes
+console.log('[backend] registering /api/extremes-engine/debug route');
+app.get('/api/extremes-engine/debug', authRequired, extremesEngineDebugHandler);
 
 // GET /api/autolevels — AutoLevels engine (pivot grid clustering)
 console.log('[backend] registering /api/autolevels route');

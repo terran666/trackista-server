@@ -64,7 +64,7 @@ function writeStore(store) {
 // If the incoming payload is identical to the last saved snapshot (by fingerprint),
 // skip the write and return { skipped: true, items: existingRecords }.
 // Otherwise replace and return { skipped: false, items: createdRecords }.
-function bulkSave({ symbol, marketType, tf, source, levels }) {
+function bulkSave({ symbol, marketType, tf, source, levels, force = false }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
@@ -73,7 +73,7 @@ function bulkSave({ symbol, marketType, tf, source, levels }) {
   const fpKey    = `${sym}:${marketType}:${tf}:${source}`;
   const incoming = computeFingerprint(levels);
 
-  if (store.fingerprints[fpKey] === incoming) {
+  if (!force && store.fingerprints[fpKey] === incoming) {
     const existing = store.levels.filter(
       l => l.symbol === sym && l.marketType === marketType && l.tf === tf && l.source === source
     );

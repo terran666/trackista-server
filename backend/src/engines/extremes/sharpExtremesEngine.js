@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * sharpExtremesEngine.js � Sharp Extremes (ported 1:1 from frontend sharpExtremes.ts)
+ * sharpExtremesEngine.js � Sharp Extremes (ported 1:1 from frontend sharpExtremes.ts)
  *
  * Bars format: { timestamp: number (ms), open, high, low, close, volume? }
  * NOTE: extremesEngineRoute converts Binance bars (time -> timestamp) before calling here.
@@ -10,8 +10,8 @@
 const DEFAULT_SETTINGS = {
   pivotLeft            : 3,
   pivotRight           : 3,
-  L                    : 3,
-  R                    : 3,
+  L                    : 8,   // frontend hardcodes L:8 — must match
+  R                    : 8,   // frontend hardcodes R:8 — must match
   minSlopePct          : 0.08,
   startFromFirstPivot  : true,
   unbrokenLookahead    : 300,
@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS = {
   breakToleranceTicks  : 0,
   tickSize             : undefined,
   maxExtremes          : 60,
-  lookbackBars         : 200,
+  lookbackBars         : 500,  // frontend default lookbackBars:500
 };
 
 function slopePct(fromClose, toClose, barsCount) {
@@ -115,4 +115,105 @@ function findSharpExtremes(bars, settings) {
   return result.slice(0, p.maxExtremes);
 }
 
-module.exports = { findSharpExtremes, DEFAULT_SETTINGS };
+/**
+ * findSharpExtremesDebug — same algorithm as findSharpExtremes but returns
+ * per-candle diagnostics: why each pivot was accepted or rejected.
+ *
+ * Returns:
+ *   {
+ *     pivots   : Array<{ candleIndex, timestamp, high, low, close, detectedType, finalPrice, reasons }>
+ *     detected : number   // accepted count
+ *     rejected : number   // rejected candidate count
+ *   }
+ */
+function findSharpExtremesDebug(bars, settings) {
+  const p = Object.assign({}, DEFAULT_SETTINGS, settings || {});
+  const slice = p.lookbackBars > 0 && p.lookbackBars < bars.length
+    ? bars.slice(bars.length - p.lookbackBars) : bars;
+  const n      = slice.length;
+  const startI = p.pivotLeft;
+  const endI   = n - 1 - p.pivotRight;
+
+  const pivots = [];
+  if (endI > startI) {
+    for (let i = startI; i <= endI; i++) {
+      if (isPivotHigh(slice, i, p.pivotLeft, p.pivotRight)) pivots.push({ i, type: 'HIGH' });
+      if (isPivotLow(slice,  i, p.pivotLeft, p.pivotRight)) pivots.push({ i, type: 'LOW'  });
+    }
+    pivots.sort((a, b) => a.i - b.i);
+  }
+
+  if (!pivots.length) return { pivots: [], detected: 0, rejected: 0 };
+
+  const firstPivotIndex     = p.startFromFirstPivot ? pivots[0].i : startI;
+  const lookahead           = p.unbrokenLookahead ?? 0;
+  const breakMode           = p.breakMode ?? 'equal';
+  const breakToleranceTicks = p.breakToleranceTicks ?? 0;
+
+  let detected = 0;
+  let rejected = 0;
+  const result = [];
+
+  for (const pv of pivots) {
+    const bar     = slice[pv.i];
+    const reasons = [];
+    let   status  = 'accepted';
+
+    if (pv.i < firstPivotIndex) {
+      reasons.push(`skipped: index ${pv.i} < firstPivotIndex ${firstPivotIndex}`);
+      status = 'rejected';
+    } else {
+      // Check sharp slope
+      const leftI  = pv.i - p.L;
+      const rightI = pv.i + p.R;
+      if (leftI < 0 || rightI >= slice.length) {
+        reasons.push(`rejected: not enough bars for slope check (L=${p.L}, R=${p.R}, i=${pv.i}, n=${slice.length})`);
+        status = 'rejected';
+      } else {
+        const before = slopePct(slice[leftI].close, bar.close, p.L);
+        const after  = slopePct(bar.close, slice[rightI].close, p.R);
+        reasons.push(`slope: before=${before.toFixed(4)}%/bar, after=${after.toFixed(4)}%/bar`);
+
+        const sharpOk = pv.type === 'HIGH'
+          ? (before > 0 && after < 0)
+          : (before < 0 && after > 0);
+
+        if (!sharpOk) {
+          reasons.push(`rejected: slope check failed for ${pv.type} (need ${pv.type === 'HIGH' ? 'before>0 AND after<0' : 'before<0 AND after>0'})`);
+          status = 'rejected';
+        } else {
+          reasons.push('sharp slope: OK');
+          // Check broken
+          const broken = isBrokenToRight(slice, pv.i, pv.type, lookahead, breakMode, p.tickSize, breakToleranceTicks);
+          if (broken) {
+            reasons.push(`rejected: level broken to the right (lookahead=${lookahead}, breakMode=${breakMode})`);
+            status = 'rejected';
+          } else {
+            reasons.push('unbroken: OK');
+          }
+        }
+      }
+    }
+
+    const finalPrice = pv.type === 'HIGH' ? bar.high : bar.low;
+    result.push({
+      candleIndex  : pv.i,
+      timestamp    : bar.timestamp,
+      high         : bar.high,
+      low          : bar.low,
+      close        : bar.close,
+      detectedType : pv.type === 'HIGH' ? 'resistance' : 'support',
+      priceSource  : pv.type === 'HIGH' ? 'candle.high' : 'candle.low',
+      finalPrice,
+      status,
+      reasons,
+    });
+
+    if (status === 'accepted') detected++;
+    else rejected++;
+  }
+
+  return { pivots: result, detected, rejected };
+}
+
+module.exports = { findSharpExtremes, findSharpExtremesDebug, DEFAULT_SETTINGS };

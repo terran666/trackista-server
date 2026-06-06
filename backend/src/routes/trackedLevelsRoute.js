@@ -20,7 +20,7 @@ const VALID_INTERVALS    = new Set([
 // }
 function bulkHandler(req, res) {
   const body = req.body || {};
-  const { symbol, marketType, tf, source, levels } = body;
+  const { symbol, marketType, tf, source, levels, force } = body;
 
   function fail(reason) {
     console.log(`[tracked-levels] bulk validation failed reason=${reason}`);
@@ -44,7 +44,7 @@ function bulkHandler(req, res) {
   }
 
   try {
-    const result = store.bulkSave({ symbol, marketType, tf, source, levels });
+    const result = store.bulkSave({ symbol, marketType, tf, source, levels, force: force === true });
     if (result.skipped) {
       console.log(`[tracked-levels] bulk skipped unchanged snapshot symbol=${symbol.toUpperCase()} marketType=${marketType} tf=${tf} source=${source} count=${result.items.length}`);
       return res.status(200).json({ success: true, skipped: true, count: result.items.length, levels: result.items });

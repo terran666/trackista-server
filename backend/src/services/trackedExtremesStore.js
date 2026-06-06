@@ -90,7 +90,7 @@ function normalizeStrengthTouch(v, source) {
  * Replace all records for symbol+marketType+tf+source with a fresh set.
  * Returns the created records.
  */
-function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
+function bulkSave({ userId = null, symbol, marketType, tf, source, extremes, force = false }) {
   const sym   = symbol.toUpperCase();
   const store = readStore();
   const now   = Date.now();
@@ -99,7 +99,7 @@ function bulkSave({ userId = null, symbol, marketType, tf, source, extremes }) {
   const fpKey    = `${userId != null ? userId + ':' : ''}${sym}:${marketType}:${tf}:${source}`;
   const incoming = computeFingerprint(extremes);
 
-  if (store.fingerprints[fpKey] === incoming) {
+  if (!force && store.fingerprints[fpKey] === incoming) {
     const existing = store.extremes.filter(
       e => e.symbol === sym && e.marketType === marketType && e.tf === tf && e.source === source &&
            (!userId || !e.userId || e.userId === userId)

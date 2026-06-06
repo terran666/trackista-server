@@ -1,5 +1,5 @@
 {
-  "nextId": 206,
+  "nextId": 208,
   "levels": [
     {
       "id": 32,
@@ -61,42 +61,15 @@
       "updatedAt": 1775825508919
     },
     {
-      "id": 199,
-      "symbol": "VVVUSDT",
+      "id": 207,
+      "symbol": "HOMEUSDT",
       "marketType": "futures",
       "tf": "5m",
-      "price": 16.4113024691358,
-      "side": "support",
+      "price": 0.05867108880082195,
+      "side": "resistance",
       "userId": 2,
-      "createdAt": 1778573772018,
-      "updatedAt": 1778573834637
-    },
-    {
-      "id": 205,
-      "symbol": "BSBUSDT",
-      "marketType": "futures",
-      "tf": "1h",
-      "price": 0.5003472227404123,
-      "side": "support",
-      "userId": 2,
-      "createdAt": 1779807735508,
-      "updatedAt": 1779807762581,
-      "alertEnabled": true,
-      "watchMode": "simple",
-      "scenarioMode": "auto",
-      "alertOptions": {
-        "earlyWarningEnabled": true,
-        "warnBeforeSeconds": 60,
-        "warnBeforeDistancePct": 0.3,
-        "popupEnabled": true,
-        "telegramEnabled": false,
-        "soundEnabled": true,
-        "soundId": "default_alert",
-        "soundGroup": "standard",
-        "displayScope": "tab",
-        "badgeEnabled": true,
-        "notificationEnabled": true
-      }
+      "createdAt": 1780780532568,
+      "updatedAt": 1780780532659
     }
   ]
 }

@@ -102,6 +102,9 @@ const heatmapService                    = require('./services/heatmapService');
 const densityService                    = require('./services/densityService');
 const wsEventBus                        = require('./services/wsEventBus');
 const { createFormationsModule }        = require('./formations');
+const { createExtremePatternFormationService } = require('./formations/patterns/extremePatternFormationService');
+const { createFormationPatternRoutes }  = require('./formations/patterns/formationPatternRoutes');
+const trackedExtremesStore              = require('./services/trackedExtremesStore');
 
 // ─── Configuration ───────────────────────────────────────────────
 const PORT       = parseInt(process.env.API_PORT  || '3000', 10);
@@ -252,6 +255,11 @@ densityService.start(redis, wsEventBus)
 // ─── Formations (isolated breakout-scanner module) ───────────────
 const formations = createFormationsModule({ redis });
 formations.service.start();
+
+// ─── Extreme Pattern Formations (v1: horizontal sharp extremes) ──
+const extremePatternService = createExtremePatternFormationService({ redis, trackedExtremesStore });
+extremePatternService.start();
+const patternFormationRouter = createFormationPatternRoutes({ service: extremePatternService, store: extremePatternService.store });
 
 // ─── Express app ─────────────────────────────────────────────────
 const app = express();
@@ -1556,6 +1564,10 @@ console.log('[backend] registering /api/formations routes');
 app.use('/api/formations/scalping', formations.router);
 app.use('/api/formations/debug', formations.debugRouter);
 app.get('/api/formations/compare-source', createFormationsCompareSourceHandler({ service: formations.service }));
+
+// New pattern formations endpoint
+console.log('[backend] registering /api/formations/patterns routes');
+app.use('/api/formations/patterns', patternFormationRouter);
 
 // Density chart / orderbook / depth / symbols / appearance (new density page)
 const { createDensityChartRouter } = require('./routes/densityChartRoute');

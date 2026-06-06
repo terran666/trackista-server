@@ -1,5 +1,5 @@
 {
-  "nextId": 6589,
+  "nextId": 6611,
   "extremes": [
     {
       "id": 206,
@@ -60908,7 +60908,7 @@
       "updatedAt": 1780750659104
     },
     {
-      "id": 6575,
+      "id": 6593,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -60927,16 +60927,16 @@
           "value": 193.38
         }
       ],
-      "strength": 14.955971779080663,
+      "strength": 15.427974827080451,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6576,
+      "id": 6594,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -60955,16 +60955,16 @@
           "value": 193.38
         }
       ],
-      "strength": 13.535310591099204,
+      "strength": 14.006951871544118,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6577,
+      "id": 6595,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -60983,16 +60983,16 @@
           "value": 193.38
         }
       ],
-      "strength": 11.446938644977624,
+      "strength": 11.918048127116926,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6578,
+      "id": 6596,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61011,16 +61011,16 @@
           "value": 197.82
         }
       ],
-      "strength": 51.907427813030125,
+      "strength": 51.26567942866043,
       "touches": 3,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6579,
+      "id": 6597,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61039,16 +61039,16 @@
           "value": 197.82
         }
       ],
-      "strength": 47.15771332265318,
+      "strength": 46.51906746413342,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6580,
+      "id": 6598,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61067,16 +61067,16 @@
           "value": 219.26
         }
       ],
-      "strength": 46.88362112096811,
+      "strength": 46.244392775474196,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750661397,
-      "updatedAt": 1780750661574
+      "updatedAt": 1780750712516
     },
     {
-      "id": 6585,
+      "id": 6599,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61095,16 +61095,16 @@
           "value": 194.2133333333768
         }
       ],
-      "strength": 31.903225368839266,
+      "strength": 32.10425835417668,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750669388,
-      "updatedAt": 1780750681279
+      "updatedAt": 1780750715067
     },
     {
-      "id": 6586,
+      "id": 6600,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61123,16 +61123,16 @@
           "value": 197.04708333332383
         }
       ],
-      "strength": 73.9210129213506,
+      "strength": 73.7162596639995,
       "touches": 4,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750669388,
-      "updatedAt": 1780750681279
+      "updatedAt": 1780750715067
     },
     {
-      "id": 6587,
+      "id": 6601,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61151,16 +61151,16 @@
           "value": 197.42399999999907
         }
       ],
-      "strength": 60.212072190040814,
+      "strength": 60.00691504636849,
       "touches": 3,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750669388,
-      "updatedAt": 1780750681279
+      "updatedAt": 1780750715067
     },
     {
-      "id": 6588,
+      "id": 6602,
       "userId": null,
       "symbol": "TAOUSDT",
       "marketType": "futures",
@@ -61179,13 +61179,125 @@
           "value": 197.56882352940738
         }
       ],
-      "strength": 40.52384024542636,
+      "strength": 40.31883695289273,
       "touches": 2,
       "alertEnabled": false,
       "tracked": false,
       "userModified": false,
       "createdAt": 1780750669388,
-      "updatedAt": 1780750681279
+      "updatedAt": 1780750715067
+    },
+    {
+      "id": 6607,
+      "userId": null,
+      "symbol": "1000PEPEUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "source": "trendlines",
+      "side": "support",
+      "type": "line",
+      "price": 0.0026583555555550475,
+      "points": [
+        {
+          "timestamp": 1780722000000,
+          "value": 0.0025072
+        },
+        {
+          "timestamp": 1780750500000,
+          "value": 0.0026583555555550475
+        }
+      ],
+      "strength": 33.31702152202593,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780750716769,
+      "updatedAt": 1780750716880
+    },
+    {
+      "id": 6608,
+      "userId": null,
+      "symbol": "1000PEPEUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "source": "trendlines",
+      "side": "resistance",
+      "type": "line",
+      "price": 0.002714515517241445,
+      "points": [
+        {
+          "timestamp": 1780633500000,
+          "value": 0.0029233
+        },
+        {
+          "timestamp": 1780750500000,
+          "value": 0.002714515517241445
+        }
+      ],
+      "strength": 60.32814358925096,
+      "touches": 3,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780750716769,
+      "updatedAt": 1780750716880
+    },
+    {
+      "id": 6609,
+      "userId": null,
+      "symbol": "1000PEPEUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "source": "trendlines",
+      "side": "resistance",
+      "type": "line",
+      "price": 0.00272439999999996,
+      "points": [
+        {
+          "timestamp": 1780679100000,
+          "value": 0.0027958
+        },
+        {
+          "timestamp": 1780750500000,
+          "value": 0.00272439999999996
+        }
+      ],
+      "strength": 55.70125569421353,
+      "touches": 3,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780750716769,
+      "updatedAt": 1780750716880
+    },
+    {
+      "id": 6610,
+      "userId": null,
+      "symbol": "1000PEPEUSDT",
+      "marketType": "futures",
+      "tf": "5m",
+      "source": "trendlines",
+      "side": "resistance",
+      "type": "line",
+      "price": 0.0027313029702970004,
+      "points": [
+        {
+          "timestamp": 1780707600000,
+          "value": 0.0027507
+        },
+        {
+          "timestamp": 1780750500000,
+          "value": 0.0027313029702970004
+        }
+      ],
+      "strength": 32.369844660940295,
+      "touches": 2,
+      "alertEnabled": false,
+      "tracked": false,
+      "userModified": false,
+      "createdAt": 1780750716769,
+      "updatedAt": 1780750716880
     }
   ],
   "fingerprints": {
@@ -61204,7 +61316,7 @@
     "CUSDT:futures:30m:extremes": "f53ed19c62427b97aa7c88ee04df42784e01ade13fc1ffab795a41a370b26ab7",
     "TAOUSDT:futures:1m:vertical-extremes": "5742de29592ba02a061281a3ecf23dac0963513a64f5cc52a8d6969781f28575",
     "TAOUSDT:futures:5m:extremes": "c35267c4918d0d8c5f4781603ca2d3d420111a3311a099dd7018c782ba9c2ff6",
-    "TAOUSDT:futures:5m:vertical-extremes": "5b95410b62285a2e32d7ca5cdee4b3d5af0969b5b33fd2f27bd91355e85851b2",
+    "TAOUSDT:futures:5m:vertical-extremes": "6e53bf52c13f9f6cd01769e88bfa8d2b0cda85dd8d5f0577a858b3e2867692e2",
     "BSBUSDT:futures:5m:vertical-extremes": "83ad505195ffb9ec76f6aaac60976fe09e359b4451d06ea95ae74df4f4a30659",
     "BSBUSDT:futures:5m:extremes": "6ac3569750172fa7c2b2d13d66c2bbe0435b44bc552ec9f9418b3e99ff902bbe",
     "BSBUSDT:futures:1m:vertical-extremes": "653730d4829d761f1458f1824cdc6bc4b2d52db7ede676bf808c4ea20e09e38f",
@@ -61638,6 +61750,7 @@
     "WLDUSDT:futures:5m:trendlines": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "HYPEUSDT:futures:5m:trendlines": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "SOLUSDT:futures:5m:vertical-extremes": "6ac49b8972faf241825a5fb807c17f75134c297ca5344b8a6e3fa9c78b7bf2cf",
-    "TAOUSDT:futures:5m:trendlines": "0dbad783e2cf55f7a7f4e1148d107153d98f6127c4d19f650a56b866a7f0a0a3"
+    "TAOUSDT:futures:5m:trendlines": "9e1005c7b32bfa309af4b3b9d6f8246c545e853a2cfab615ea200eabbfeb960a",
+    "1000PEPEUSDT:futures:5m:trendlines": "16bd43eba12f77d93892b52820e378faed7cc72abe8e85324c6a5fcf1cca7e06"
   }
 }

@@ -22,38 +22,44 @@ const DEFAULT_SETTINGS = {
   lookbackBars         : 500,  // frontend default lookbackBars:500
 };
 
-// Per-timeframe overrides for unbrokenLookahead.
-// Goal: keep the "unbroken window" consistent in real time (~25 hours) across all TFs.
-// Formula: Math.round(25 * 60 / tf_minutes)
-// 5m  → 300 bars (~25h)   — same as default, no change
-// 15m → 100 bars (~25h)
-// 30m →  50 bars (~25h)
-// 1h  →  25 bars (~25h)
-// 2h  →  13 bars (~26h)
-// 4h  →   6 bars (~24h)
-const TF_LOOKAHEAD_OVERRIDES = {
-  '1m' : 1500,
-  '3m' :  500,
-  '5m' :  300,
-  '15m':  100,
-  '30m':   50,
-  '1h' :   25,
-  '2h' :   13,
-  '4h' :    6,
-  '6h' :    4,
-  '8h' :    3,
-  '12h':    2,
-  '1d' :    1,
+// Per-timeframe overrides for lookbackBars and unbrokenLookahead.
+//
+// Strategy: always check unbrokenLookahead to the END of fetched data (use lookbackBars as
+// lookahead) so broken levels never appear. To compensate on higher TFs (where a long lookback
+// = almost everything gets broken), we reduce lookbackBars so we only look at recent history.
+//
+// lookbackBars = how far back to search for pivots (real-time equivalent):
+//   5m  → 500 bars (~41h)
+//   15m → 200 bars (~50h)
+//   30m → 120 bars (~60h)
+//   1h  →  72 bars (~72h)
+//   4h  →  42 bars (~7d)
+//
+// unbrokenLookahead = 0 → always check to the very end of the fetched slice
+const TF_DEFAULTS_BY_TF = {
+  '1m' : { lookbackBars: 1000, unbrokenLookahead: 0 },
+  '3m' : { lookbackBars:  600, unbrokenLookahead: 0 },
+  '5m' : { lookbackBars:  500, unbrokenLookahead: 0 },
+  '15m': { lookbackBars:  200, unbrokenLookahead: 0 },
+  '30m': { lookbackBars:  120, unbrokenLookahead: 0 },
+  '1h' : { lookbackBars:   72, unbrokenLookahead: 0 },
+  '2h' : { lookbackBars:   48, unbrokenLookahead: 0 },
+  '4h' : { lookbackBars:   42, unbrokenLookahead: 0 },
+  '6h' : { lookbackBars:   28, unbrokenLookahead: 0 },
+  '8h' : { lookbackBars:   21, unbrokenLookahead: 0 },
+  '12h': { lookbackBars:   14, unbrokenLookahead: 0 },
+  '1d' : { lookbackBars:    7, unbrokenLookahead: 0 },
 };
 
 /**
- * Merge per-timeframe lookahead into settings unless caller explicitly passed unbrokenLookahead.
+ * Merge per-timeframe defaults into settings unless caller explicitly overrode them.
  * Called at the top of findSharpExtremes / findSharpExtremesDebug.
  */
 function _applyTfDefaults(p) {
-  if (p.tf && TF_LOOKAHEAD_OVERRIDES[p.tf] !== undefined && p._lookaheadExplicit !== true) {
-    p.unbrokenLookahead = TF_LOOKAHEAD_OVERRIDES[p.tf];
-  }
+  const tfDef = p.tf && TF_DEFAULTS_BY_TF[p.tf];
+  if (!tfDef) return;
+  if (p._lookaheadExplicit !== true) p.unbrokenLookahead = tfDef.unbrokenLookahead;
+  if (p._lookbackExplicit  !== true) p.lookbackBars      = tfDef.lookbackBars;
 }
 
 function slopePct(fromClose, toClose, barsCount) {

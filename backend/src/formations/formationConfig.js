@@ -79,7 +79,7 @@ const config = {
 
   tfHistoryBackfill: {
     enabled: true,
-    cacheTtlMs: 15 * 60 * 1000,
+    cacheTtlMs: 45 * 60 * 1000,  // 45 min — reduces REST burst on warm-up/restart
     requestTimeoutMs: 5000,
   },
 

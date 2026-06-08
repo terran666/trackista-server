@@ -148,9 +148,9 @@ const inflightRequests = new Map();
 //
 // Solution: queue non-cached klines upstream calls and process at most
 // KLINES_MAX_CONCURRENT at a time. Cache hits always bypass the queue.
-const KLINES_MAX_CONCURRENT    = 5;
+const KLINES_MAX_CONCURRENT    = 8;
 const KLINES_QUEUE_MAX         = 60;  // reject when queue this deep (circuit-breaker)
-const KLINES_QUEUE_TIMEOUT_MS  = 20_000;
+const KLINES_QUEUE_TIMEOUT_MS  = 8_000;
 let   _klinesInFlight          = 0;
 const _klinesQueue             = []; // { resolve, reject, timer }
 
@@ -275,7 +275,7 @@ function applyHeaders(headers, res) {
 }
 
 // ── Proxy factory ─────────────────────────────────────────────────────────────
-function makeProxy(targetBase, market) {
+function makeProxy(targetBase, market, redis) {
   return async (req, res) => {
     // Express 4 wildcard params[0] has no leading slash — normalise it.
     const rawSuffix   = req.params[0] || '';
@@ -285,7 +285,48 @@ function makeProxy(targetBase, market) {
     const pathKey     = pathSuffix.split('?')[0];     // path without QS, for classification
     const isSafe      = SAFE_ENDPOINTS.has(pathKey);
     const symbol      = (req.query.symbol || '*').toString().toUpperCase();
-    
+
+    // ── Redis 1m bars fast path ────────────────────────────────────────────────
+    // Collector keeps bars:1m:{symbol} live in Redis. Serve 1m chart history
+    // directly from Redis (~2ms) instead of calling Binance (~200ms), saving
+    // weight budget and eliminating ban risk for chart loads on coin switch.
+    // Falls through to Binance if Redis has insufficient bars.
+    if (redis && (pathKey === '/v1/klines' || pathKey === '/v3/klines')) {
+      const interval = (req.query.interval || '').toLowerCase();
+      const limit    = Math.min(parseInt(req.query.limit || '500', 10) || 500, 1500);
+      if (interval === '1m' && symbol !== '*' && !req.query.startTime && !req.query.endTime) {
+        try {
+          const redisKey = market === 'spot' ? `bars:1m:spot:${symbol}` : `bars:1m:${symbol}`;
+          const raw = await redis.zrange(redisKey, -limit, -1);
+          if (Array.isArray(raw) && raw.length >= Math.min(limit, 30)) {
+            const bars = raw.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean);
+            if (bars.length >= Math.min(limit, 30)) {
+              // Format as Binance klines array: [openTime, open, high, low, close, vol, closeTime, quoteVol, ...]
+              const klinesArr = bars.map(b => [
+                b.ts,
+                String(b.open),
+                String(b.high),
+                String(b.low),
+                String(b.close),
+                String(b.volume ?? b.volumeUsdt ?? 0),
+                b.ts + 59999,
+                String(b.volumeUsdt ?? b.volume ?? 0),
+                b.tradeCount ?? 0,
+                '0', '0', '0',
+              ]);
+              console.log(`[binance-proxy] ${market} ${pathKey} 1m Redis-hit symbol=${symbol} bars=${bars.length}`);
+              res.setHeader('content-type', 'application/json');
+              res.setHeader('x-proxy-cache', 'redis-1m');
+              return res.json(klinesArr);
+            }
+          }
+        } catch (redisErr) {
+          console.warn(`[binance-proxy] Redis 1m bars read failed for ${symbol}:`, redisErr.message);
+          // Fall through to Binance
+        }
+      }
+    }
+
     // ── Smart cache key normalization ──────────────────────────────────────────
     // exchangeInfo with ?symbol= is normalized to full exchangeInfo key.
     // This prevents 400+ identical cache entries.
@@ -707,16 +748,16 @@ function makeProxy(targetBase, market) {
 }
 
 // ── Router factory ────────────────────────────────────────────────────────────
-function createBinanceProxyRouter() {
+function createBinanceProxyRouter(redis) {
   const { Router } = require('express');
   const router = Router();
 
   // /api/binance/spot/v3/...         → https://api.binance.com/api/v3/...
   // /api/binance/futures/v1/...      → https://fapi.binance.com/fapi/v1/...
   // /api/binance/delivery/dapi/v1/... → https://dapi.binance.com/dapi/v1/... (COIN-M)
-  router.get('/spot/*',     makeProxy(SPOT_BASE,     'spot'));
-  router.get('/futures/*',  makeProxy(FUTURES_BASE,  'futures'));
-  router.get('/delivery/*', makeProxy(DELIVERY_BASE, 'delivery'));
+  router.get('/spot/*',     makeProxy(SPOT_BASE,     'spot',     redis));
+  router.get('/futures/*',  makeProxy(FUTURES_BASE,  'futures',  redis));
+  router.get('/delivery/*', makeProxy(DELIVERY_BASE, 'delivery', redis));
 
   // /api/binance/debug — proxy diagnostics
   // Shows backoff state, cache entries, recent errors, per-endpoint request counts.

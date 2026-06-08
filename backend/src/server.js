@@ -708,7 +708,7 @@ app.get('/api/market/top-active', async (req, res) => {
 
 // ─── Binance REST proxy (browser → backend → Binance, no direct browser→Binance) ──
 console.log('[backend] registering /api/binance proxy route');
-app.use('/api/binance', createBinanceProxyRouter());
+app.use('/api/binance', createBinanceProxyRouter(redis));
 
 // ─── Orderbook endpoint ──────────────────────────────────────────
 console.log('[backend] registering /api/orderbook route');

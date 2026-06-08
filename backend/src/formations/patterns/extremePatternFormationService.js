@@ -13,6 +13,7 @@
  */
 
 const { patternConfig } = require('./formationPatternConfig');
+const { binanceFetch } = require('../../utils/binanceRestLogger');
 const { createFormationPatternStore } = require('./formationPatternStore');
 const { computeAdaptiveTolerance } = require('./formationPatternScorer');
 const { evaluate: evaluateLifecycle } = require('./formationPatternLifecycle');
@@ -174,7 +175,15 @@ function createExtremePatternFormationService({ redis, trackedExtremesStore, con
 
     guard.recordRequest();
     try {
-      const res = await fetch(url);
+      let res;
+      try {
+        res = await binanceFetch(url, {}, 'extremePatternFormations', symbol, `fallback:${tf}`);
+      } catch (banErr) {
+        // binanceFetch throws when IP ban / soft-pause is active
+        guard.recordError(banErr.status || 418);
+        addDebugLog({ symbol, tf, rejectReason: 'BINANCE_BAN_GUARD', detail: banErr.message });
+        return null;
+      }
       if (res.status === 429 || res.status === 418 || res.status >= 500) {
         guard.recordError(res.status);
         return null;

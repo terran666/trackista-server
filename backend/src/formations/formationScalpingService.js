@@ -257,7 +257,7 @@ function createFormationService({ redis, store, config }) {
         'formationScalpingService',
         symbol,
         `tf-history:${tf}:${limit}`,
-        { critical: true },
+        { critical: false },
       );
       if (!res.ok) {
         const text = await res.text().catch(() => '');

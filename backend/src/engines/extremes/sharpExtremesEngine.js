@@ -22,6 +22,40 @@ const DEFAULT_SETTINGS = {
   lookbackBars         : 500,  // frontend default lookbackBars:500
 };
 
+// Per-timeframe overrides for unbrokenLookahead.
+// Goal: keep the "unbroken window" consistent in real time (~25 hours) across all TFs.
+// Formula: Math.round(25 * 60 / tf_minutes)
+// 5m  → 300 bars (~25h)   — same as default, no change
+// 15m → 100 bars (~25h)
+// 30m →  50 bars (~25h)
+// 1h  →  25 bars (~25h)
+// 2h  →  13 bars (~26h)
+// 4h  →   6 bars (~24h)
+const TF_LOOKAHEAD_OVERRIDES = {
+  '1m' : 1500,
+  '3m' :  500,
+  '5m' :  300,
+  '15m':  100,
+  '30m':   50,
+  '1h' :   25,
+  '2h' :   13,
+  '4h' :    6,
+  '6h' :    4,
+  '8h' :    3,
+  '12h':    2,
+  '1d' :    1,
+};
+
+/**
+ * Merge per-timeframe lookahead into settings unless caller explicitly passed unbrokenLookahead.
+ * Called at the top of findSharpExtremes / findSharpExtremesDebug.
+ */
+function _applyTfDefaults(p) {
+  if (p.tf && TF_LOOKAHEAD_OVERRIDES[p.tf] !== undefined && p._lookaheadExplicit !== true) {
+    p.unbrokenLookahead = TF_LOOKAHEAD_OVERRIDES[p.tf];
+  }
+}
+
 function slopePct(fromClose, toClose, barsCount) {
   if (barsCount <= 0) return 0;
   const base = Math.max(1e-12, Math.abs(fromClose));
@@ -77,6 +111,7 @@ function isBrokenToRight(bars, i, type, lookahead, breakMode, tickSize, breakTol
 
 function findSharpExtremes(bars, settings) {
   const p = Object.assign({}, DEFAULT_SETTINGS, settings || {});
+  _applyTfDefaults(p);
   const slice = p.lookbackBars > 0 && p.lookbackBars < bars.length
     ? bars.slice(bars.length - p.lookbackBars) : bars;
   const n     = slice.length;
@@ -128,6 +163,7 @@ function findSharpExtremes(bars, settings) {
  */
 function findSharpExtremesDebug(bars, settings) {
   const p = Object.assign({}, DEFAULT_SETTINGS, settings || {});
+  _applyTfDefaults(p);
   const slice = p.lookbackBars > 0 && p.lookbackBars < bars.length
     ? bars.slice(bars.length - p.lookbackBars) : bars;
   const n      = slice.length;

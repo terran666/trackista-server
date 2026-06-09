@@ -19,10 +19,18 @@
  *   symbol_bars_1m            — permanent bar history
  */
 
+const { binanceFetch } = require('../utils/binanceRestLogger');
+
 const INTERVAL_MS    = 60_000;
 const REDIS_TTL_MS   = parseInt(process.env.BARS_REDIS_TTL_MS  || String(48 * 3600 * 1000), 10);
 const MAX_REDIS_BARS = parseInt(process.env.BARS_MAX_REDIS_BARS || '500', 10);
 const SETTLE_OFFSET  = parseInt(process.env.BARS_SETTLE_OFFSET_MS || '5000', 10); // ms after :00
+
+const BINANCE_FAPI_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
+// Backfill: fetch last N 1m bars per symbol to fill gaps after restart.
+// limit=200 → weight=2 per call. Stagger: 250ms → ~4 req/s → 480 weight/min (safe under 2400/min).
+const BACKFILL_LIMIT      = 1500; // covers full 25h Redis window
+const BACKFILL_STAGGER_MS = 1500; // up to 2 fetches/symbol (weight=20) → 40 req/min × 20 = 800 weight/min
 
 function createBarAggregatorService(redis, db) {
   const prevOiMap = new Map(); // symbol → last known oiValue
@@ -225,6 +233,7 @@ function createBarAggregatorService(redis, db) {
         const cutoff = tickTs - REDIS_TTL_MS;
         for (const bar of bars) {
           const key = `bars:1m:${bar.symbol}`;
+          wPipe.zremrangebyscore(key, bar.ts, bar.ts);     // evict stale same-ts entry
           wPipe.zadd(key, bar.ts, JSON.stringify(bar));
           wPipe.zremrangebyscore(key, 0, cutoff);          // drop expired
           wPipe.zremrangebyrank(key, 0, -(MAX_REDIS_BARS + 1)); // cap size
@@ -310,6 +319,7 @@ function createBarAggregatorService(redis, db) {
           const cutoff = tickTs - REDIS_TTL_MS;
           for (const bar of spotBars) {
             const key = `bars:1m:spot:${bar.symbol}`;
+            swPipe.zremrangebyscore(key, bar.ts, bar.ts);   // evict stale same-ts entry
             swPipe.zadd(key, bar.ts, JSON.stringify(bar));
             swPipe.zremrangebyscore(key, 0, cutoff);
             swPipe.zremrangebyrank(key, 0, -(MAX_REDIS_BARS + 1));
@@ -371,22 +381,151 @@ function createBarAggregatorService(redis, db) {
     }
   }
 
+  function scheduleNext() {
+    if (!active) return;
+    const now       = Date.now();
+    const nextBound = Math.ceil(now / INTERVAL_MS) * INTERVAL_MS;
+    const delay     = nextBound - now + SETTLE_OFFSET;
+    initialTimeoutId = setTimeout(() => {
+      tick();
+      scheduleNext();
+    }, delay);
+  }
+
+  // ── Startup gap-fill: fetch recent 1m bars from Binance and write
+  // any that are missing from Redis. Runs once after start(), staggered
+  // to stay within Binance rate limits. Best-effort — errors are swallowed.
+  async function backfillSymbol(sym) {
+    try {
+      const redisKey = `bars:1m:${sym}`;
+      const existing = await redis.zrange(redisKey, 0, -1);
+      const existingTsList = existing.map(r => { try { return JSON.parse(r).ts; } catch { return null; } }).filter(Boolean);
+      const existingTs = new Set(existingTsList);
+
+      // Find oldest bar in Redis to determine how far back we need to go.
+      // Fetch in two chunks if needed: startTime..+1500 then remainder up to now.
+      // Each fetch: limit=1500, weight=10. Two fetches = weight 20 per symbol.
+      // Use reduce (not spread) to avoid V8 stack overflow with large arrays
+      const oldestTs  = existingTsList.length > 0
+        ? existingTsList.reduce((a, b) => a < b ? a : b)
+        : Date.now() - REDIS_TTL_MS;
+      const newestTs  = Date.now();
+      const windowMs  = newestTs - oldestTs;
+      const chunkMs   = BACKFILL_LIMIT * 60_000; // 1500 min = 90000000 ms
+
+      // Build fetch URLs — one or two chunks to cover the full Redis window
+      const fetchUrls = [];
+      if (windowMs <= chunkMs) {
+        fetchUrls.push(`${BINANCE_FAPI_KLINES}?symbol=${sym}&interval=1m&limit=${BACKFILL_LIMIT}`);
+      } else {
+        // Two chunks: oldest → oldest+1500min, then last 1500min
+        fetchUrls.push(`${BINANCE_FAPI_KLINES}?symbol=${sym}&interval=1m&startTime=${oldestTs}&limit=${BACKFILL_LIMIT}`);
+        fetchUrls.push(`${BINANCE_FAPI_KLINES}?symbol=${sym}&interval=1m&limit=${BACKFILL_LIMIT}`);
+      }
+
+      const allKlines = [];
+      for (const url of fetchUrls) {
+        const res = await binanceFetch(url, { signal: AbortSignal.timeout(8000) }, 'barBackfill', sym, 'backfill');
+        if (!res.ok) continue;
+        const klines = await res.json();
+        if (Array.isArray(klines)) allKlines.push(...klines);
+      }
+      if (allKlines.length === 0) return;
+
+      const pipe    = redis.pipeline();
+      const cutoff  = Date.now() - REDIS_TTL_MS;
+      let   filled  = 0;
+      const mysqlRows = [];
+
+      for (const k of allKlines) {
+        const ts = k[0];
+        if (existingTs.has(ts)) continue; // already present — skip
+        const open  = Number(k[1]);
+        const high  = Number(k[2]);
+        const low   = Number(k[3]);
+        const close = Number(k[4]);
+        const quoteVol   = Number(k[7]);
+        const buyQuote   = Number(k[10]);
+        const bar = {
+          symbol: sym, ts, market: 'futures',
+          open, high, low, close,
+          priceChangePct  : open !== 0 ? (close - open) / open * 100 : 0,
+          volatility      : open !== 0 ? (high  - low)  / open * 100 : 0,
+          volumeUsdt      : quoteVol,
+          buyVolumeUsdt   : buyQuote,
+          sellVolumeUsdt  : quoteVol - buyQuote,
+          deltaUsdt       : buyQuote - (quoteVol - buyQuote),
+          tradeCount      : Number(k[8]),
+          volumeSpikeRatio: null, fundingRate: null,
+          oiValue: null,  oiDelta: null,
+          liqLongUsd: null, liqShortUsd: null,
+          impulseScore: null, inPlayScore: null,
+        };
+        pipe.zremrangebyscore(redisKey, ts, ts);
+        pipe.zadd(redisKey, ts, JSON.stringify(bar));
+        filled++;
+        mysqlRows.push(bar);
+      }
+
+      if (filled === 0) return;
+
+      pipe.zremrangebyscore(redisKey, 0, cutoff); // only drop truly expired bars
+      // NOTE: no zremrangebyrank here — backfill adds old bars that would be
+      // immediately evicted by rank trim. Regular tick() handles rank capping.
+      await pipe.exec();
+
+      if (db && mysqlRows.length > 0) {
+        const phs = mysqlRows.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',');
+        const sql = `INSERT IGNORE INTO symbol_bars_1m
+          (symbol,ts,market,open,high,low,close,price_change_pct,volatility,
+           volume_usdt,buy_volume_usdt,sell_volume_usdt,delta_usdt,trade_count,
+           volume_spike_ratio,funding_rate,oi_value,oi_delta,
+           liq_long_usd,liq_short_usd,impulse_score,in_play_score)
+          VALUES ${phs}`;
+        const vals = mysqlRows.flatMap(b => [
+          b.symbol, b.ts, b.market, b.open, b.high, b.low, b.close,
+          b.priceChangePct, b.volatility, b.volumeUsdt, b.buyVolumeUsdt,
+          b.sellVolumeUsdt, b.deltaUsdt, b.tradeCount, b.volumeSpikeRatio,
+          b.fundingRate, b.oiValue, b.oiDelta, b.liqLongUsd, b.liqShortUsd,
+          b.impulseScore, b.inPlayScore,
+        ]);
+        await db.execute(sql, vals).catch(() => {});
+      }
+
+      console.log(`[barBackfill] ${sym}: filled ${filled} missing bars`);
+    } catch (_) { /* best-effort */ }
+  }
+
+  async function runBackfill() {
+    const rawSymbols = await redis.get('symbols:active:usdt').catch(() => null);
+    const _parsed    = tryParse(rawSymbols);
+    const symbols    = Array.isArray(_parsed) ? _parsed : (_parsed?.symbols ?? []);
+    if (!symbols.length) {
+      console.warn('[barBackfill] no symbols — skipping');
+      return;
+    }
+    console.log(`[barBackfill] starting for ${symbols.length} symbols (stagger=${BACKFILL_STAGGER_MS}ms)`);
+    for (let i = 0; i < symbols.length; i++) {
+      if (!active) break;
+      await backfillSymbol(symbols[i]);
+      if (i + 1 < symbols.length) await new Promise(r => setTimeout(r, BACKFILL_STAGGER_MS));
+    }
+    console.log('[barBackfill] done');
+  }
+
   function start() {
     if (active) return;
     active    = true;
     startedAt = Date.now();
+    scheduleNext();
 
     const now       = Date.now();
     const nextBound = Math.ceil(now / INTERVAL_MS) * INTERVAL_MS;
     const delay     = nextBound - now + SETTLE_OFFSET;
-
-    initialTimeoutId = setTimeout(() => {
-      if (!active) return;
-      tick();
-      intervalId = setInterval(tick, INTERVAL_MS);
-    }, delay);
-
     console.log(`[barAggregatorService] started — first tick in ~${Math.round(delay / 1000)}s`);
+
+    // Run backfill 90s after start to let symbols load and first tick complete
+    setTimeout(() => { if (active) runBackfill().catch(() => {}); }, 90_000);
   }
 
   function stop() {

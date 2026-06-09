@@ -342,6 +342,8 @@ app.use(express.json({ limit: '256kb' }));
     '/tracked-levels',
     '/auto-levels',
     '/bars',
+    // Watch-state polling — frontend polls per-level every few seconds
+    '/levels',
   ];
 
   app.use('/api', (req, res, next) => {

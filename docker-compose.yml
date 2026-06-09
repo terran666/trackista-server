@@ -248,8 +248,6 @@ services:
       retries: 3
     networks:
       - trackista-network
-    profiles:
-      - production
 
 volumes:
   mysql_data:

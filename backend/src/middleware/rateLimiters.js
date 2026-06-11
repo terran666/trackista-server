@@ -18,8 +18,15 @@ function createRateLimiter({ max, windowSec, keyPrefix }) {
 
       try {
         const count = await redis.incr(key);
+        // Guard against race condition: if two requests both see count > 1 at the
+        // same time, neither sets expire and the key lives forever. Fix: also set
+        // expire when the key has no TTL (ttl === -1 means persistent key).
         if (count === 1) {
           await redis.expire(key, windowSec);
+        } else if (count % 100 === 0) {
+          // Periodic check: ensure key always has a TTL (cheap sampled check).
+          const ttl = await redis.ttl(key);
+          if (ttl === -1) await redis.expire(key, windowSec);
         }
         if (count > max) {
           const ttl = await redis.ttl(key);

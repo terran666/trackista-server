@@ -57,7 +57,8 @@ const { createRuntimeQaService }        = require('./services/runtimeQaService')
 const { createRuntimeQaRouter }         = require('./routes/runtimeQaRoute');
 const { runBarAggregatorMigrations }    = require('./services/barAggregatorMigrations');
 const { createBarAggregatorService }    = require('./services/barAggregatorService');
-const { createBarsRouter }              = require('./routes/barsRoute');
+const barGapFillService                 = require('./services/barGapFillService');
+const { createBarsRouter, createDebugBarsRouter } = require('./routes/barsRoute');
 const { runMoveMigrations2 }            = require('./services/movePhase2Migrations');
 const { createMovesRouter }             = require('./routes/movesRoute');
 const { createPreSignalsRouter }        = require('./routes/preSignalsRoute');
@@ -90,6 +91,7 @@ const { createScreenerDiagnosticsRouter } = require('./routes/screenerDiagnostic
 const { createLiveSnapshotRouter }      = require('./routes/liveSnapshotRoute');
 const { createLiveDeltaRouter }         = require('./routes/liveDeltaRoute');
 const { createLiveHealthRouter }        = require('./routes/liveHealthRoute');
+const { createMarketDataHealthRouter }  = require('./routes/marketDataHealthRoute');
 const livePollingMetrics                = require('./services/livePollingMetrics');
 const { createKlineFlatRouter }         = require('./routes/klineFlatRoute');
 const { createScreenerSpotStatsRouter } = require('./routes/screenerSpotStatsRoute');
@@ -314,7 +316,7 @@ app.use(express.json({ limit: '256kb' }));
 
   // Relaxed limiter shared by all high-frequency read namespaces.
   const readApiLimiter = createRateLimiter({
-    max:       parseInt(process.env.RATE_LIMIT_READ_MAX || '3000', 10) || 3000,
+    max:       parseInt(process.env.RATE_LIMIT_READ_MAX || '10000', 10) || 10000,
     windowSec: parseInt(process.env.RATE_LIMIT_READ_WINDOW_SEC || '60', 10) || 60,
     keyPrefix: 'api-read',
   })(redis);
@@ -364,7 +366,6 @@ app.get('/health', (_req, res) => {
 // GET /api/price/:symbol
 app.get('/api/price/:symbol', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
-  console.log(`[backend] GET /api/price/${symbol}`);
 
   try {
     const price = await redis.get(`price:${symbol}`);
@@ -419,7 +420,6 @@ app.get('/api/symbols', async (_req, res) => {
 // GET /api/trade/:symbol/last
 app.get('/api/trade/:symbol/last', async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
-  console.log(`[backend] GET /api/trade/${symbol}/last`);
 
   try {
     const raw = await redis.get(`trade:${symbol}:last`);
@@ -1546,9 +1546,29 @@ app.use('/api/runtime-qa', authRequired, createRuntimeQaRouter(redis, runtimeQaS
 console.log('[backend] registering /api/runtime/live-health route');
 app.use('/api/runtime/live-health', createLiveHealthRouter(livePollingMetrics));
 
+console.log('[backend] registering /api/health/market-data route');
+app.use('/api/health/market-data', createMarketDataHealthRouter(redis));
+
 // ─── Block 1: 1-minute bars routes ───────────────────────────────
 console.log('[backend] registering /api/bars routes');
 app.use('/api/bars', createBarsRouter(redis, db));
+
+console.log('[backend] registering /api/debug/bars routes');
+app.use('/api/debug/bars', createDebugBarsRouter(redis, db));
+
+// POST /api/debug/bars/gap-fill — manually trigger immediate gap-fill scan
+app.post('/api/debug/bars/gap-fill', authRequired, async (_req, res) => {
+  try {
+    barGapFillService.attach(redis, db);
+    // Run in background — don't await so the response is instant
+    barGapFillService.runGapFill().catch(err =>
+      console.error('[barGapFill] manual trigger error:', err.message),
+    );
+    res.json({ success: true, message: 'Gap-fill started in background. Check server logs.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 console.log('[backend] registering /api/ws-proxy/debug route');
 app.get('/api/ws-proxy/debug', authRequired, (_req, res) => {

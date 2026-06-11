@@ -1,5 +1,5 @@
 {
-  "nextId": 350,
+  "nextId": 351,
   "rays": [
     {
       "id": 32,
@@ -116,35 +116,6 @@
       "updatedAt": 1774807876026
     },
     {
-      "id": 168,
-      "userId": 2,
-      "symbol": "PLAYUSDT",
-      "marketType": "futures",
-      "source": "saved-rays",
-      "createdFrom": "vertical-extremes",
-      "side": "support",
-      "kind": "extreme",
-      "shape": "sloped",
-      "points": [
-        {
-          "timestamp": 1774588500000,
-          "value": 0.03644719999999779
-        },
-        {
-          "timestamp": 1774813500000,
-          "value": 0.02742759215685453
-        }
-      ],
-      "strength": 0,
-      "touches": 2,
-      "persistent": true,
-      "visibleOnAllTimeframes": true,
-      "alertEnabled": false,
-      "tracked": false,
-      "createdAt": 1774813648335,
-      "updatedAt": 1774813648335
-    },
-    {
       "id": 335,
       "userId": 2,
       "symbol": "UAIUSDT",
@@ -203,6 +174,35 @@
       "tracked": false,
       "createdAt": 1778887466482,
       "updatedAt": 1778887466482
+    },
+    {
+      "id": 350,
+      "userId": 2,
+      "symbol": "ETHUSDT",
+      "marketType": "futures",
+      "source": "manual-sloped-level",
+      "createdFrom": "manual-sloped-level-mq86tbsg",
+      "side": "resistance",
+      "kind": "ray",
+      "shape": "sloped",
+      "points": [
+        {
+          "timestamp": 1781065800000,
+          "value": 1712.8781955085867
+        },
+        {
+          "timestamp": 1781158200000,
+          "value": 1600.5821447820344
+        }
+      ],
+      "strength": 0,
+      "touches": 0,
+      "persistent": true,
+      "visibleOnAllTimeframes": true,
+      "alertEnabled": false,
+      "tracked": false,
+      "createdAt": 1781103126310,
+      "updatedAt": 1781103126310
     }
   ],
   "rayFingerprints": {
@@ -210,8 +210,8 @@
     "ccd270fbbc27669818dbd87c": 33,
     "71fc3b840680acc621409c18": 164,
     "1eaa8f12b6f8bfbd66636c08": 165,
-    "87a9751665eb900ff65b2549": 168,
     "f0d9bfe3c972eccaa16db0a9": 335,
-    "55fc008b88c7984c3e463bc4": 349
+    "55fc008b88c7984c3e463bc4": 349,
+    "ea0be74fa0fcf85c727e2096": 350
   }
 }

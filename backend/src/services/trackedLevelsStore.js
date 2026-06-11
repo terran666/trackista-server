@@ -18,6 +18,8 @@ function computeFingerprint(items) {
 const DATA_DIR  = path.join(__dirname, '..', '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tracked-levels.json');
 
+let _cache = null;
+
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -28,11 +30,13 @@ function ensureFile() {
 }
 
 function readStore() {
+  if (_cache) return _cache;
   ensureFile();
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
     if (!raw || !raw.trim()) throw new Error('empty file');
-    return JSON.parse(raw);
+    _cache = JSON.parse(raw);
+    return _cache;
   } catch (err) {
     const bak = DATA_FILE + '.bak';
     if (fs.existsSync(bak)) {
@@ -58,6 +62,7 @@ function writeStore(store) {
     try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
   }
   fs.renameSync(tmp, DATA_FILE);
+  _cache = store;
 }
 
 // Replace all records for symbol+marketType+tf+source with a fresh set.

@@ -92,13 +92,24 @@ function computeAxisHints(bars) {
   return { dayBoundaries, monthBoundaries };
 }
 
-// ── Normalise bar array: sort ASC, deduplicate ────────────────────
+// ── Detect synthetic / zero-volume cross bars ────────────────────
+// A bar where open===high===low===close and volumeUsdt===0 carries no
+// real market information.  We flag it so callers can skip or mark it.
+function isSyntheticBar(b) {
+  const vol = b.volumeUsdt ?? b.volume ?? 0;
+  if (Number(vol) !== 0) return false;
+  const o = Number(b.open), h = Number(b.high), l = Number(b.low), c = Number(b.close);
+  return o === h && h === l && l === c;
+}
+
+// ── Normalise bar array: sort ASC, deduplicate, tag synthetics ────
 function normaliseBars(bars) {
   bars.sort((a, b) => a.ts - b.ts);
   // Remove duplicates (keep last written — higher index after sort)
   const seen = new Map();
   for (const b of bars) seen.set(b.ts, b);
-  return [...seen.values()];
+  // Tag synthetic bars; real-time bars remain but frontend knows to skip them
+  return [...seen.values()].map(b => isSyntheticBar(b) ? { ...b, synthetic: true } : b);
 }
 
 // ── Map MySQL snake_case columns → camelCase bar object ──────────
@@ -265,4 +276,102 @@ function createBarsRouter(redis, db) {
   return router;
 }
 
-module.exports = { createBarsRouter };
+// ── Debug router: GET /api/debug/bars/:symbol/:timeframe ──────────
+//
+// Returns a quality report for the bars stored in Redis (and MySQL count).
+// Supports any timeframe token but only "1m" currently has data in Redis.
+// Example: GET /api/debug/bars/ETHUSDT/1m
+function createDebugBarsRouter(redis, db) {
+  const router = express.Router();
+
+  router.get('/:symbol/:timeframe', async (req, res) => {
+    const symbol    = safeSymbol(req.params.symbol);
+    const timeframe = (req.params.timeframe || '1m').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: "Invalid 'symbol' parameter" });
+    }
+
+    // Build the Redis key — currently only 1m is supported by the aggregator
+    const redisKey = timeframe === '1m' ? `bars:1m:${symbol}` : `bars:${timeframe}:${symbol}`;
+
+    let bars = [];
+    let redisErr = null;
+    try {
+      const raw = await redis.zrange(redisKey, 0, -1, 'WITHSCORES');
+      // WITHSCORES returns [member, score, member, score, …]
+      for (let i = 0; i < raw.length; i += 2) {
+        try { bars.push(JSON.parse(raw[i])); } catch (_) { /* ignore corrupt member */ }
+      }
+    } catch (e) {
+      redisErr = e.message;
+    }
+
+    // Sort and deduplicate
+    bars.sort((a, b) => a.ts - b.ts);
+    const seen       = new Map();
+    let duplicates   = 0;
+    for (const b of bars) {
+      if (seen.has(b.ts)) duplicates++;
+      seen.set(b.ts, b);
+    }
+    const unique = [...seen.values()];
+
+    // Gap analysis (for 1m bars we expect 60000 ms steps; allow gaps but report them)
+    const expectedStep = timeframe === '1m' ? 60_000 : null;
+    const gaps = [];
+    if (expectedStep && unique.length >= 2) {
+      for (let i = 1; i < unique.length; i++) {
+        const diff = unique[i].ts - unique[i - 1].ts;
+        if (diff !== expectedStep) {
+          gaps.push({
+            after : unique[i - 1].ts,
+            before: unique[i].ts,
+            gapMs : diff,
+            missing: Math.round(diff / expectedStep) - 1,
+          });
+        }
+      }
+    }
+
+    // Synthetic / zero-volume bar count
+    let zeroVolumeBars = 0;
+    let syntheticBars  = 0;
+    for (const b of unique) {
+      const vol = Number(b.volumeUsdt ?? b.volume ?? 0);
+      if (vol === 0) zeroVolumeBars++;
+      if (isSyntheticBar(b)) syntheticBars++;
+    }
+
+    // MySQL bar count for reference
+    let mysqlCount = null;
+    if (db) {
+      try {
+        const [[row]] = await db.execute(
+          `SELECT COUNT(*) AS cnt FROM symbol_bars_1m WHERE symbol = ? AND market = 'futures'`,
+          [symbol],
+        );
+        mysqlCount = Number(row?.cnt ?? 0);
+      } catch (_) { /* non-fatal */ }
+    }
+
+    return res.json({
+      symbol,
+      timeframe,
+      redisKey,
+      count          : unique.length,
+      duplicates,
+      gaps           : gaps.slice(0, 50),          // cap response size
+      gapCount       : gaps.length,
+      zeroVolumeBars,
+      syntheticBars,
+      firstTimestamp : unique[0]?.ts   ?? null,
+      lastTimestamp  : unique.at(-1)?.ts ?? null,
+      mysqlCount,
+      ...(redisErr ? { redisError: redisErr } : {}),
+    });
+  });
+
+  return router;
+}
+
+module.exports = { createBarsRouter, createDebugBarsRouter };

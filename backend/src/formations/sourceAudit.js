@@ -531,22 +531,30 @@ async function buildFormationSourceAudit(service, { symbol, tf, marketType }) {
   }
 
   // Build breakout checks — attaches distancePct / isBroken to each level/extreme
+  const visibleSupportsInput = [
+    ...tpLows.map(e => ({ ...e, category: 'extreme' })),
+    ...tpSup.map(l => ({ ...l, category: 'tracked-level' })),
+  ].filter((item) => Number.isFinite(item.price) && item.price > 0);
+
   const supportsWithBreakout = buildBreakoutChecks(
-    [...tpLows.map(e => ({ ...e, category: 'extreme' })),
-     ...tpSup.map(l => ({ ...l, category: 'tracked-level' }))],
+    visibleSupportsInput,
     currentPrice,
   ).sort((a, b) => (b.price || 0) - (a.price || 0));
 
+  const visibleResistancesInput = [
+    ...tpHighs.map(e => ({ ...e, category: 'extreme' })),
+    ...tpRes.map(l => ({ ...l, category: 'tracked-level' })),
+  ].filter((item) => Number.isFinite(item.price) && item.price > 0);
+
   const resistancesWithBreakout = buildBreakoutChecks(
-    [...tpHighs.map(e => ({ ...e, category: 'extreme' })),
-     ...tpRes.map(l => ({ ...l, category: 'tracked-level' }))],
+    visibleResistancesInput,
     currentPrice,
   ).sort((a, b) => (a.price || 0) - (b.price || 0));
 
   // Extreme clusters — groups of close extremes that appear as a single visual level
   const extremeClusters = [
-    ...buildExtremeClusters(tpLows),
-    ...buildExtremeClusters(tpHighs),
+    ...buildExtremeClusters(tpLows.filter((e) => Number.isFinite(e.price) && e.price > 0)),
+    ...buildExtremeClusters(tpHighs.filter((e) => Number.isFinite(e.price) && e.price > 0)),
   ];
 
   return {

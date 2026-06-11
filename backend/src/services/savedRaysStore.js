@@ -9,6 +9,8 @@ const DATA_FILE = path.join(DATA_DIR, 'saved-rays.json');
 
 // ─── Internal helpers ─────────────────────────────────────────────
 
+let _cache = null;
+
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -23,13 +25,15 @@ function ensureFile() {
 }
 
 function readStore() {
+  if (_cache) return _cache;
   ensureFile();
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
     if (!raw || !raw.trim()) throw new Error('empty file');
     const store = JSON.parse(raw);
     if (!store.rayFingerprints) store.rayFingerprints = {};
-    return store;
+    _cache = store;
+    return _cache;
   } catch (err) {
     const bak = DATA_FILE + '.bak';
     if (fs.existsSync(bak)) {
@@ -56,6 +60,7 @@ function writeStore(store) {
     try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
   }
   fs.renameSync(tmp, DATA_FILE);
+  _cache = store;
 }
 
 /**

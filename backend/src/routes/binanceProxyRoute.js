@@ -36,6 +36,116 @@ const SPOT_BASE     = 'https://api.binance.com/api';
 const FUTURES_BASE  = 'https://fapi.binance.com/fapi';
 const DELIVERY_BASE = 'https://dapi.binance.com';  // COIN-M delivery futures
 
+// Some symbols exist only on one market (spot-only or futures-only).
+// For symbol-bound endpoints we auto-resolve market to avoid 400 INVALID_SYMBOL.
+const AUTO_RESOLVE_PATHS = new Set([
+  '/v3/klines',
+  '/v1/klines',
+  '/v3/aggTrades',
+  '/v1/aggTrades',
+  '/v3/ticker/24hr',
+  '/v1/ticker/24hr',
+  '/v3/ticker',
+  '/v1/ticker',
+  '/v3/depth',
+  '/v1/depth',
+]);
+
+const MARKET_SYMBOLS_TTL_MS = 3 * 60 * 1000;
+const marketSymbolsCache = {
+  spot:    { ts: 0, set: null },
+  futures: { ts: 0, set: null },
+};
+
+function marketBaseByName(name) {
+  if (name === 'spot') return SPOT_BASE;
+  if (name === 'futures') return FUTURES_BASE;
+  return null;
+}
+
+async function getMarketSymbolsSet(marketName) {
+  if (marketName !== 'spot' && marketName !== 'futures') return null;
+
+  const cached = marketSymbolsCache[marketName];
+  if (cached.set && (Date.now() - cached.ts) < MARKET_SYMBOLS_TTL_MS) {
+    return cached.set;
+  }
+
+  const base = marketBaseByName(marketName);
+  const path = marketName === 'spot' ? '/v3/exchangeInfo' : '/v1/exchangeInfo';
+  const url = `${base}${path}`;
+
+  const upstreamRes = await fetch(url, {
+    method: 'GET',
+    headers: { 'User-Agent': 'Trackista/2.0 market-resolver' },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!upstreamRes.ok) {
+    throw new Error(`exchangeInfo ${marketName} failed: HTTP ${upstreamRes.status}`);
+  }
+
+  const json = await upstreamRes.json();
+  const symbols = Array.isArray(json?.symbols) ? json.symbols : [];
+  const set = new Set(
+    symbols
+      .filter((s) => s && s.symbol && s.status === 'TRADING')
+      .map((s) => String(s.symbol).toUpperCase()),
+  );
+
+  // Only cache non-empty sets — an empty set likely means a failed/partial response.
+  if (set.size > 0) {
+    marketSymbolsCache[marketName] = { ts: Date.now(), set };
+  }
+  return set;
+}
+
+async function resolveMarketForSymbol(requestedMarket, symbol, pathKey) {
+  if (!symbol || symbol === '*') {
+    return { market: requestedMarket, reason: 'no_symbol' };
+  }
+
+  if (!AUTO_RESOLVE_PATHS.has(pathKey)) {
+    return { market: requestedMarket, reason: 'path_not_resolved' };
+  }
+
+  if (requestedMarket !== 'spot' && requestedMarket !== 'futures') {
+    return { market: requestedMarket, reason: 'market_not_resolvable' };
+  }
+
+  const altMarket = requestedMarket === 'spot' ? 'futures' : 'spot';
+
+  try {
+    const [requestedSet, altSet] = await Promise.all([
+      getMarketSymbolsSet(requestedMarket),
+      getMarketSymbolsSet(altMarket),
+    ]);
+
+    const hasRequested = requestedSet?.has(symbol) === true;
+    const hasAlt = altSet?.has(symbol) === true;
+
+    if (hasRequested) {
+      return { market: requestedMarket, reason: 'requested_market_has_symbol' };
+    }
+
+    if (!hasRequested && hasAlt) {
+      return { market: altMarket, reason: 'fallback_to_alt_market' };
+    }
+
+    // Both sets loaded but symbol not found in either — could be a stale cache
+    // (e.g. futures set failed to load on first attempt and cached as null).
+    // If altSet is null (failed to load) treat as unknown and fall through to
+    // requestedMarket so we don't permanently block a valid futures symbol.
+    if (!altSet) {
+      return { market: altMarket, reason: 'alt_set_unavailable_fallback' };
+    }
+
+    return { market: requestedMarket, reason: 'symbol_unknown_in_both_markets' };
+  } catch (err) {
+    return { market: requestedMarket, reason: `resolver_error:${err.message}` };
+  }
+}
+
 // ── Safe endpoints ────────────────────────────────────────────────────────────
 // Read-only, near-zero weight, critical for Screener bootstrap.
 // Matched against pathKey (path without query string).
@@ -281,10 +391,29 @@ function makeProxy(targetBase, market, redis) {
     const rawSuffix   = req.params[0] || '';
     const pathSuffix  = rawSuffix.startsWith('/') ? rawSuffix : `/${rawSuffix}`;
     const qs          = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-    const upstreamUrl = `${targetBase}${pathSuffix}${qs}`;
     const pathKey     = pathSuffix.split('?')[0];     // path without QS, for classification
     const isSafe      = SAFE_ENDPOINTS.has(pathKey);
     const symbol      = (req.query.symbol || '*').toString().toUpperCase();
+
+    let effectiveMarket = market;
+    let effectiveBase = targetBase;
+    let marketResolveReason = null;
+
+    const resolved = await resolveMarketForSymbol(market, symbol, pathKey);
+    if (resolved.market !== market) {
+      const altBase = marketBaseByName(resolved.market);
+      if (altBase) {
+        effectiveMarket = resolved.market;
+        effectiveBase = altBase;
+        marketResolveReason = resolved.reason;
+        console.log(
+          `[binance-proxy] market auto-resolve ${market} -> ${effectiveMarket} ` +
+          `symbol=${symbol} path=${pathKey} reason=${marketResolveReason}`,
+        );
+      }
+    }
+
+    const upstreamUrl = `${effectiveBase}${pathSuffix}${qs}`;
 
     // ── Redis 1m bars fast path ────────────────────────────────────────────────
     // Collector keeps bars:1m:{symbol} live in Redis. Serve 1m chart history
@@ -296,10 +425,15 @@ function makeProxy(targetBase, market, redis) {
       const limit    = Math.min(parseInt(req.query.limit || '500', 10) || 500, 1500);
       if (interval === '1m' && symbol !== '*' && !req.query.startTime && !req.query.endTime) {
         try {
-          const redisKey = market === 'spot' ? `bars:1m:spot:${symbol}` : `bars:1m:${symbol}`;
+          const redisKey = effectiveMarket === 'spot' ? `bars:1m:spot:${symbol}` : `bars:1m:${symbol}`;
           const raw = await redis.zrange(redisKey, -limit, -1);
           if (Array.isArray(raw) && raw.length >= Math.min(limit, 30)) {
-            const bars = raw.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean);
+            let bars = raw.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean);
+            // Deduplicate by ts (keep last occurrence after sort) and ensure ASC order
+            bars.sort((a, b) => a.ts - b.ts);
+            const seen = new Map();
+            for (const b of bars) seen.set(b.ts, b);
+            bars = [...seen.values()];
             if (bars.length >= Math.min(limit, 30)) {
               // Format as Binance klines array: [openTime, open, high, low, close, vol, closeTime, quoteVol, ...]
               const klinesArr = bars.map(b => [
@@ -330,16 +464,21 @@ function makeProxy(targetBase, market, redis) {
     // ── Smart cache key normalization ──────────────────────────────────────────
     // exchangeInfo with ?symbol= is normalized to full exchangeInfo key.
     // This prevents 400+ identical cache entries.
-    const cacheKey = normalizedCacheKey(market, upstreamUrl, pathKey);
+    const cacheKey = normalizedCacheKey(effectiveMarket, upstreamUrl, pathKey);
     const isExchangeInfo = (pathKey === '/v3/exchangeInfo' || pathKey === '/v1/exchangeInfo' || pathKey === '/dapi/v1/exchangeInfo');
     const requestedSymbol = isExchangeInfo && req.query.symbol ? req.query.symbol.toString().toUpperCase() : null;
 
-    recordRequest(`${market}:${pathKey}`);
+    recordRequest(`${effectiveMarket}:${pathKey}`);
 
     console.log(
-      `[binance-proxy] ${market} ${req.method} ${pathSuffix}${qs}` +
-      ` → ${upstreamUrl} (safe=${isSafe}${requestedSymbol ? ` symbol=${requestedSymbol}` : ''})`,
+      `[binance-proxy] ${effectiveMarket} ${req.method} ${pathSuffix}${qs}` +
+      ` cache-miss → ${upstreamUrl}${requestedSymbol ? ` sym=${requestedSymbol}` : ''}`,
     );
+
+    if (marketResolveReason) {
+      res.setHeader('x-proxy-market-resolved', `${market}->${effectiveMarket}`);
+      res.setHeader('x-proxy-market-reason', marketResolveReason);
+    }
 
     // ── SAFE ENDPOINT PATH ─────────────────────────────────────────────────────
     // 1. Serve from fresh cache if available (with server-side symbol filtering).
@@ -358,9 +497,6 @@ function makeProxy(targetBase, market, redis) {
         if (requestedSymbol) {
           body = filterExchangeInfoBySymbol(cached.body, requestedSymbol);
           proxyStats.screener.exchangeInfoNormalized++;
-          console.log(`[binance-proxy] ${market} ${pathKey} cache-hit + server-filter symbol=${requestedSymbol} (age=${Math.round(ageMs / 1000)}s)`);
-        } else {
-          console.log(`[binance-proxy] ${market} ${pathKey} cache-hit (age=${Math.round(ageMs / 1000)}s)`);
         }
         
         res.status(cached.status);
@@ -375,7 +511,6 @@ function makeProxy(targetBase, market, redis) {
       const existingPromise = inflightRequests.get(cacheKey);
       if (existingPromise) {
         proxyStats.dedupeHits++;
-        console.log(`[binance-proxy] ${market} ${pathKey} in-flight dedupe — waiting for existing request`);
         try {
           const result = await existingPromise;
           
@@ -467,7 +602,7 @@ function makeProxy(targetBase, market, redis) {
         const stale = responseCache.get(cacheKey);
         if (stale) {
           console.warn(
-            `[binance-proxy] ${market} ${pathKey} upstream HTTP ${result.status},` +
+            `[binance-proxy] ${effectiveMarket} ${pathKey} upstream HTTP ${result.status},` +
             ` serving stale cache (age=${Math.round((Date.now() - stale.cachedAt) / 1000)}s)`,
           );
           res.status(200);
@@ -476,11 +611,12 @@ function makeProxy(targetBase, market, redis) {
           return res.send(stale.body);
         }
 
-        recordError(market, pathKey, 'upstream_http_error', result.status);
+        recordError(effectiveMarket, pathKey, 'upstream_http_error', result.status);
         return res.status(result.status).json({
           success: false,
           error:   `Binance returned HTTP ${result.status}`,
-          market,
+          market: effectiveMarket,
+          requestedMarket: market,
           reason:  'upstream_http_error',
           path:    pathKey,
         });
@@ -494,13 +630,14 @@ function makeProxy(targetBase, market, redis) {
           res.setHeader('x-proxy-cache', 'stale');
           return res.send(stale.body);
         }
-        recordError(market, pathKey, 'upstream_network_error', -1);
-        console.error(`[binance-proxy] ${market} ${pathKey} safe-bypass error: ${err.message}`);
+        recordError(effectiveMarket, pathKey, 'upstream_network_error', -1);
+        console.error(`[binance-proxy] ${effectiveMarket} ${pathKey} safe-bypass error: ${err.message}`);
         if (!res.headersSent) {
           return res.status(502).json({
             success: false,
             error:   'Binance proxy network error',
-            market,
+            market: effectiveMarket,
+            requestedMarket: market,
             reason:  'upstream_network_error',
             detail:  err.message,
           });
@@ -522,8 +659,6 @@ function makeProxy(targetBase, market, redis) {
       if (cached) {
         proxyStats.cacheHits++;
         if (isKlines) proxyStats.screener.klinesPreviewCacheHits++;
-        const ageMs = Date.now() - cached.cachedAt;
-        console.log(`[binance-proxy] ${market} ${pathKey} cache-hit (age=${ageMs}ms)`);
         res.status(cached.status);
         applyHeaders(cached.headers, res);
         res.setHeader('x-proxy-cache', 'hit');
@@ -543,7 +678,7 @@ function makeProxy(targetBase, market, redis) {
           isWindowQuery   ? 'ui'        :
                             'misc';
         const minIntervalMs = AGGTRADES_MIN_INTERVAL_MS[flow] ?? 2_000;
-        const throttleKey = `${market}:${symbol}:${flow}`;
+        const throttleKey = `${effectiveMarket}:${symbol}:${flow}`;
         aggThrottleKey  = throttleKey;
         aggThrottleFlow = flow;
         const lastTs   = aggTradesLastTs.get(throttleKey) || 0;
@@ -563,7 +698,8 @@ function makeProxy(targetBase, market, redis) {
           return res.status(429).json({
             success: false,
             error:   'aggTrades throttled — too many requests for this symbol',
-            market,
+            market: effectiveMarket,
+            requestedMarket: market,
             reason:  'aggtrades_throttled',
             flow,
             retryAfterMs: minIntervalMs - elapsed,
@@ -669,15 +805,16 @@ function makeProxy(targetBase, market, redis) {
       if (upstreamRes.status === 429 || upstreamRes.status === 418) {
         const retryAfterSec = parseInt(upstreamRes.headers.get('retry-after') || '0', 10);
         const remainingMs   = retryAfterSec > 0 ? retryAfterSec * 1000 : 60_000;
-        recordError(market, pathKey, 'upstream_rate_limit', upstreamRes.status);
+        recordError(effectiveMarket, pathKey, 'upstream_rate_limit', upstreamRes.status);
         console.warn(
-          `[binance-proxy] ${market} ${pathKey} upstream rate-limit HTTP ${upstreamRes.status}` +
+          `[binance-proxy] ${effectiveMarket} ${pathKey} upstream rate-limit HTTP ${upstreamRes.status}` +
           ` remainingMs=${remainingMs}`,
         );
         return res.status(503).json({
           success:     false,
           error:       `Binance rate limit — HTTP ${upstreamRes.status}`,
-          market,
+          market: effectiveMarket,
+          requestedMarket: market,
           reason:      'upstream_rate_limit',
           remainingMs,
         });
@@ -686,12 +823,13 @@ function makeProxy(targetBase, market, redis) {
       // Intercept other upstream errors — never pass raw Binance error text silently
       if (!upstreamRes.ok) {
         const body = fetchPromise ? (await fetchPromise).body : await upstreamRes.text();
-        recordError(market, pathKey, 'upstream_http_error', upstreamRes.status);
-        console.warn(`[binance-proxy] ${market} ${pathKey} upstream HTTP ${upstreamRes.status}: ${body.slice(0, 200)}`);
+        recordError(effectiveMarket, pathKey, 'upstream_http_error', upstreamRes.status);
+        console.warn(`[binance-proxy] ${effectiveMarket} ${pathKey} upstream HTTP ${upstreamRes.status}: ${body.slice(0, 200)}`);
         return res.status(upstreamRes.status).json({
           success: false,
           error:   `Binance returned HTTP ${upstreamRes.status}`,
-          market,
+          market: effectiveMarket,
+          requestedMarket: market,
           reason:  'upstream_http_error',
           path:    pathKey,
         });
@@ -700,18 +838,18 @@ function makeProxy(targetBase, market, redis) {
       res.status(upstreamRes.status);
       applyHeaders(extractHeaders(upstreamRes), res);
       const body = fetchPromise ? (await fetchPromise).body : await upstreamRes.text();
-      console.log(`[binance-proxy] ${market} ${pathKey} → status=${upstreamRes.status}`);
+      console.log(`[binance-proxy] ${effectiveMarket} ${pathKey} → status=${upstreamRes.status}`);
       res.send(body);
     } catch (err) {
       // binanceFetch throws err.status=418 when in-process IP-ban guard fires
       if (err.status === 418) {
         const remainingMs = Math.round(err.retryAfterMs || 60_000);
-        recordError(market, pathKey, 'market_backoff_active', 418);
+        recordError(effectiveMarket, pathKey, 'market_backoff_active', 418);
         // Serve stale cache instead of a hard 503 — keeps charts alive during bans
         const stale = responseCache.get(cacheKey);
         if (stale) {
           console.warn(
-            `[binance-proxy] ${market} ${pathKey} blocked by IP ban guard` +
+            `[binance-proxy] ${effectiveMarket} ${pathKey} blocked by IP ban guard` +
             ` remainingMs=${remainingMs} — serving stale cache (age=${Math.round((Date.now() - stale.cachedAt) / 1000)}s)`,
           );
           res.status(200);
@@ -721,24 +859,26 @@ function makeProxy(targetBase, market, redis) {
           return res.send(stale.body);
         }
         console.warn(
-          `[binance-proxy] ${market} ${pathKey} blocked by IP ban guard` +
+            `[binance-proxy] ${effectiveMarket} ${pathKey} blocked by IP ban guard` +
           ` remainingMs=${remainingMs} reason=market_backoff_active`,
         );
         return res.status(503).json({
           success:     false,
           error:       'Proxy temporarily blocked by rate-limit guard',
-          market,
+          market: effectiveMarket,
+          requestedMarket: market,
           reason:      'market_backoff_active',
           remainingMs,
         });
       }
-      recordError(market, pathKey, 'upstream_network_error', -1);
-      console.error(`[binance-proxy] ${market} ${pathKey} error: ${err.message}`);
+      recordError(effectiveMarket, pathKey, 'upstream_network_error', -1);
+      console.error(`[binance-proxy] ${effectiveMarket} ${pathKey} error: ${err.message}`);
       if (!res.headersSent) {
         res.status(502).json({
           success: false,
           error:   'Binance proxy error',
-          market,
+          market: effectiveMarket,
+          requestedMarket: market,
           reason:  'upstream_network_error',
           detail:  err.message,
         });

@@ -1,5 +1,5 @@
 {
-  "nextId": 208,
+  "nextId": 210,
   "levels": [
     {
       "id": 32,
@@ -61,15 +61,31 @@
       "updatedAt": 1775825508919
     },
     {
-      "id": 207,
-      "symbol": "HOMEUSDT",
+      "id": 209,
+      "symbol": "BEATUSDT",
       "marketType": "futures",
-      "tf": "5m",
-      "price": 0.05867108880082195,
+      "tf": "15m",
+      "price": 5.047049167767504,
       "side": "resistance",
       "userId": 2,
-      "createdAt": 1780780532568,
-      "updatedAt": 1780780532659
+      "createdAt": 1781038614221,
+      "updatedAt": 1781038618048,
+      "alertEnabled": true,
+      "watchMode": "simple",
+      "scenarioMode": "auto",
+      "alertOptions": {
+        "earlyWarningEnabled": true,
+        "warnBeforeSeconds": 60,
+        "warnBeforeDistancePct": 0.3,
+        "popupEnabled": true,
+        "telegramEnabled": false,
+        "soundEnabled": true,
+        "soundId": "default_alert",
+        "soundGroup": "standard",
+        "displayScope": "tab",
+        "badgeEnabled": true,
+        "notificationEnabled": true
+      }
     }
   ]
 }

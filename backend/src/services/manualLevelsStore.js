@@ -6,6 +6,10 @@ const path = require('path');
 const DATA_DIR  = path.join(__dirname, '..', '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'manual-levels.json');
 
+// In-memory cache — eliminates fs.readFileSync on every request.
+// Invalidated on every writeStore call.
+let _cache = null;
+
 function ensureFile() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -16,11 +20,13 @@ function ensureFile() {
 }
 
 function readStore() {
+  if (_cache) return _cache;
   ensureFile();
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
     if (!raw || !raw.trim()) throw new Error('empty file');
-    return JSON.parse(raw);
+    _cache = JSON.parse(raw);
+    return _cache;
   } catch (err) {
     // Try .bak before resetting to empty
     const bak = DATA_FILE + '.bak';
@@ -48,6 +54,7 @@ function writeStore(store) {
     try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {}
   }
   fs.renameSync(tmp, DATA_FILE); // atomic on POSIX (Docker/Linux)
+  _cache = store;
 }
 
 function getAll({ symbol, marketType, tf, userId = null } = {}) {

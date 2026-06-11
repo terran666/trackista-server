@@ -27,6 +27,12 @@ const BUCKET_COUNT          = 60;        // rolling window: 60 one-second bucket
 const MINUTE_BUCKET_COUNT   = 60;        // rolling window: 60 one-minute buckets (1h max)
 const SIGNAL_HISTORY_SIZE   = 60;        // keep last 60 metric snapshots for baseline
 
+const MARKET_HEALTH_KEY      = 'health:market-data';
+const MARKET_HEALTH_TTL_S    = 10 * 60;
+const OFFLINE_STALE_MS       = 120_000;
+const DEGRADED_STALE_MS      = 30_000;
+const RECOVERING_WINDOW_MS   = 120_000;
+
 // Kline intervals subscribed by the collector for chart streaming
 const KLINE_INTERVALS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d'];
 
@@ -45,6 +51,99 @@ const redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT });
 
 redis.on('connect', () => console.log('[collector] Connected to Redis'));
 redis.on('error',   (err) => console.error('[collector] Redis error:', err.message));
+
+// ─── Market data health state (shared with backend) ──────────────
+const _futuresWsConnected = new Set();
+const _futuresWsReconnecting = new Set();
+const _marketHealth = {
+  status: 'DEGRADED',
+  lastTradeAt: null,
+  offlineSince: null,
+  recoveredAt: null,
+  recoveringSince: null,
+  lastDnsErrorAt: null,
+  lastNetworkErrorAt: null,
+  wsConnected: false,
+};
+
+function _now() { return Date.now(); }
+
+function _noteTradeAt(ts) {
+  _marketHealth.lastTradeAt = Number(ts) || _now();
+}
+
+function _markWsOpen(key) {
+  _futuresWsConnected.add(key);
+  _futuresWsReconnecting.delete(key);
+}
+
+function _markWsClosed(key) {
+  _futuresWsConnected.delete(key);
+  _futuresWsReconnecting.add(key);
+}
+
+function _markWsError(err) {
+  const msg = String(err?.message || err || '').toUpperCase();
+  const now = _now();
+  if (msg.includes('ENOTFOUND') || msg.includes('EAI_AGAIN')) {
+    _marketHealth.lastDnsErrorAt = now;
+  } else if (msg.includes('ETIMEDOUT') || msg.includes('ECONNRESET') || msg.includes('ECONNREFUSED') || msg.includes('NETWORK')) {
+    _marketHealth.lastNetworkErrorAt = now;
+  }
+}
+
+function _computeMarketStatus() {
+  const now = _now();
+  const staleMs = _marketHealth.lastTradeAt ? (now - _marketHealth.lastTradeAt) : Infinity;
+  const wsConnected = _futuresWsConnected.size > 0;
+  const reconnecting = _futuresWsReconnecting.size > 0;
+  const recentDnsError = _marketHealth.lastDnsErrorAt && (now - _marketHealth.lastDnsErrorAt) < OFFLINE_STALE_MS;
+  const recentNetError = _marketHealth.lastNetworkErrorAt && (now - _marketHealth.lastNetworkErrorAt) < DEGRADED_STALE_MS;
+
+  let nextStatus = 'ONLINE';
+  if (!wsConnected || staleMs > OFFLINE_STALE_MS || (recentDnsError && !wsConnected)) {
+    nextStatus = 'OFFLINE';
+  } else if ((_marketHealth.recoveringSince && (now - _marketHealth.recoveringSince) <= RECOVERING_WINDOW_MS)) {
+    nextStatus = 'RECOVERING';
+  } else if (reconnecting || staleMs > DEGRADED_STALE_MS || recentNetError) {
+    nextStatus = 'DEGRADED';
+  }
+
+  const prev = _marketHealth.status;
+  if (prev !== 'OFFLINE' && nextStatus === 'OFFLINE') {
+    _marketHealth.offlineSince = now;
+    _marketHealth.recoveredAt = null;
+    _marketHealth.recoveringSince = null;
+  }
+  if (prev === 'OFFLINE' && nextStatus !== 'OFFLINE') {
+    _marketHealth.recoveredAt = now;
+    _marketHealth.recoveringSince = now;
+    _marketHealth.offlineSince = null;
+    nextStatus = 'RECOVERING';
+  }
+  if (_marketHealth.recoveringSince && (now - _marketHealth.recoveringSince) > RECOVERING_WINDOW_MS) {
+    _marketHealth.recoveringSince = null;
+    if (nextStatus === 'RECOVERING') nextStatus = 'ONLINE';
+  }
+
+  _marketHealth.status = nextStatus;
+  _marketHealth.wsConnected = wsConnected;
+
+  return {
+    status: _marketHealth.status,
+    lastTradeAt: _marketHealth.lastTradeAt,
+    offlineSince: _marketHealth.offlineSince,
+    recoveredAt: _marketHealth.recoveredAt,
+    staleSeconds: Number.isFinite(staleMs) ? Math.max(0, Math.floor(staleMs / 1000)) : null,
+    wsConnected: _marketHealth.wsConnected,
+    reconnecting: reconnecting,
+    openSockets: _futuresWsConnected.size,
+    pendingReconnects: _futuresWsReconnecting.size,
+    lastDnsErrorAt: _marketHealth.lastDnsErrorAt,
+    lastNetworkErrorAt: _marketHealth.lastNetworkErrorAt,
+    updatedAt: now,
+  };
+}
 
 // ─── REST helper ─────────────────────────────────────────────────
 async function fetchJSON(url, service, symbol, reason) {
@@ -250,6 +349,7 @@ function onTrade(msg) {
   // Update last seen price (also written to price:<SYM> key during flush)
   state.lastPrice     = price;
   state.lastTradeTime = tradeTime;
+  _noteTradeAt(tradeTime);
 
   // ── second bucket management ──────────────────────────────────
   if (!state.currentBucket || state.currentBucket.tsSec !== tradeSec) {
@@ -514,6 +614,7 @@ function startFlushTimer() {
     const nowMs = Date.now();
     const pipeline = redis.pipeline();
     let snapshotCount = 0;
+    const marketHealth = _computeMarketStatus();
 
     // Used for summary log
     let topInPlay   = { symbol: '', score: -1 };
@@ -522,16 +623,20 @@ function startFlushTimer() {
     const topImpulseList = [];
 
     // ── Futures flush ──────────────────────────────────────────────
+    // TTL on metrics/signal/price: 5 minutes. When a symbol stops trading
+    // (WS disconnected, instrument delisted, no activity) the key expires so
+    // barAggregatorService does NOT keep writing identical frozen bars.
+    const METRICS_TTL_S = 5 * 60; // 300 seconds
     for (const state of symbolStates.values()) {
       if (state.lastTradeTime === 0) continue; // no trades yet
 
       const snapshot = buildSnapshot(state, nowMs);
-      pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot));
-      pipeline.set(`price:${state.symbol}`, String(state.lastPrice));
+      pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot), 'EX', METRICS_TTL_S);
+      pipeline.set(`price:${state.symbol}`, String(state.lastPrice), 'EX', METRICS_TTL_S);
 
       // Build signal from history, then append current snapshot to history
       const signal = buildSignal(snapshot, state.signalHistory, nowMs);
-      pipeline.set(`signal:${state.symbol}`, JSON.stringify(signal));
+      pipeline.set(`signal:${state.symbol}`, JSON.stringify(signal), 'EX', METRICS_TTL_S);
 
       // Update signal history (append current snapshot, trim to SIGNAL_HISTORY_SIZE)
       state.signalHistory.push({
@@ -556,8 +661,8 @@ function startFlushTimer() {
       if (state.lastTradeTime === 0) continue;
 
       const snapshot = buildSnapshot(state, nowMs);
-      pipeline.set(`spot:metrics:${state.symbol}`, JSON.stringify(snapshot));
-      pipeline.set(`spot:price:${state.symbol}`, String(state.lastPrice));
+      pipeline.set(`spot:metrics:${state.symbol}`, JSON.stringify(snapshot), 'EX', METRICS_TTL_S);
+      pipeline.set(`spot:price:${state.symbol}`, String(state.lastPrice), 'EX', METRICS_TTL_S);
       // Fallback: write spot data to shared metrics/price keys ONLY when the
       // futures aggTrade state for this symbol is stale (> 2 min without a trade).
       // This keeps ETH/SOL etc. on futures data when the futures WS is healthy,
@@ -565,12 +670,12 @@ function startFlushTimer() {
       const futuresState = symbolStates.get(state.symbol);
       const futuresAge   = futuresState ? (nowMs - (futuresState.lastTradeTime || 0)) : Infinity;
       if (futuresAge > 2 * 60 * 1000) {
-        pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot));
-        pipeline.set(`price:${state.symbol}`, String(state.lastPrice));
+        pipeline.set(`metrics:${state.symbol}`, JSON.stringify(snapshot), 'EX', METRICS_TTL_S);
+        pipeline.set(`price:${state.symbol}`, String(state.lastPrice), 'EX', METRICS_TTL_S);
       }
 
       const signal = buildSignal(snapshot, state.signalHistory, nowMs);
-      pipeline.set(`spot:signal:${state.symbol}`, JSON.stringify(signal));
+      pipeline.set(`spot:signal:${state.symbol}`, JSON.stringify(signal), 'EX', METRICS_TTL_S);
 
       state.signalHistory.push({
         volumeUsdt60s: snapshot.volumeUsdt60s,
@@ -582,11 +687,10 @@ function startFlushTimer() {
       snapshotCount++;
     }
 
-    if (snapshotCount > 0) {
-      pipeline.exec().catch((err) => {
-        console.error('[aggregator] Redis pipeline flush error:', err.message);
-      });
-    }
+    pipeline.set(MARKET_HEALTH_KEY, JSON.stringify(marketHealth), 'EX', MARKET_HEALTH_TTL_S);
+    pipeline.exec().catch((err) => {
+      console.error('[aggregator] Redis pipeline flush error:', err.message);
+    });
 
     flushCount++;
 
@@ -808,6 +912,7 @@ function connectBatch(batchIndex, symbols) {
   }
 
   ws.on('open', () => {
+    _markWsOpen(`batch:${batchIndex}`);
     _resetReconnect(`batch:${batchIndex}`);
     console.log(`[collector] Batch ${batchIndex + 1}: connected`);
     resetSilenceTimer();
@@ -835,10 +940,12 @@ function connectBatch(batchIndex, symbols) {
   });
 
   ws.on('error', (err) => {
+    _markWsError(err);
     console.error(`[collector] Batch ${batchIndex + 1} WebSocket error:`, err.message);
   });
 
   ws.on('close', (code) => {
+    _markWsClosed(`batch:${batchIndex}`);
     if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
     const key   = `batch:${batchIndex}`;
     const delay = _reconnectDelayMs(key);
@@ -849,7 +956,7 @@ function connectBatch(batchIndex, symbols) {
   batchSockets[batchIndex] = ws;
 }
 
-function connectFuturesAggTradeBatch(symbols) {
+function connectFuturesAggTradeBatch(batchKey, symbols) {
   const streams = symbols.map(s => `${s.toLowerCase()}@trade`).join('/');
   const url     = `${BINANCE_WS_BASE}/stream?streams=${streams}`;
 
@@ -867,6 +974,7 @@ function connectFuturesAggTradeBatch(symbols) {
   }
 
   ws.on('open', () => {
+    _markWsOpen(batchKey);
     _resetReconnect('futures:aggTrade');
     console.log(`[collector] Futures trade: connected (${symbols.length} symbols)`);
     resetSilenceTimer();
@@ -889,10 +997,12 @@ function connectFuturesAggTradeBatch(symbols) {
   });
 
   ws.on('error', (err) => {
+    _markWsError(err);
     console.error(`[collector] Futures aggTrade WS error:`, err.message);
   });
 
   ws.on('close', (code) => {
+    _markWsClosed(batchKey);
     if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
     const key   = 'futures:aggTrade';
     const delay = _reconnectDelayMs(key);
@@ -915,7 +1025,9 @@ async function startFuturesAggTradeCollector(spotSymbolSet) {
       if (nonSpot.length > 0) {
         for (const s of nonSpot) { futuresAggTradeSet.add(s); getOrCreateState(s); }
         const batches = chunkArray(nonSpot, 20);
-        for (const batch of batches) connectFuturesAggTradeBatch(batch);
+        for (let i = 0; i < batches.length; i++) {
+          connectFuturesAggTradeBatch(`futures:aggtrade:${i}`, batches[i]);
+        }
         console.log(`[collector] Futures aggTrade: subscribed to ${nonSpot.length} non-spot symbols: ${nonSpot.join(', ')}`);
       } else {
         console.log('[collector] Futures aggTrade: all tracked futures symbols have spot coverage');
